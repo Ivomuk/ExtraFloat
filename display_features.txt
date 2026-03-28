@@ -1,0 +1,21 @@
+import importlib
+from credit_limit_model.features.extrafloat_limit_engine_features import build_extrafloat_limit_engine_features
+
+import credit_limit_model.features.extrafloat_limit_engine_features as elf
+importlib.reload(elf)
+
+if "tbl_dt" in transaction_capacity_features.columns and "snapshot_dt" not in transaction_capacity_features.columns:
+    transaction_capacity_features = transaction_capacity_features.rename(columns={"tbl_dt": "snapshot_dt"})
+
+if "phonenumber" in borrower_limit_features.columns and "msisdn" not in borrower_limit_features.columns:
+    borrower_limit_features = borrower_limit_features.rename(columns={"phonenumber": "msisdn"})
+
+extrafloat_features = build_extrafloat_limit_engine_features(
+    borrower_limit_features,
+    transaction_capacity_features,
+    loan_summary_recent_features
+)
+
+print(extrafloat_features.head())
+print(extrafloat_features.shape)
+
