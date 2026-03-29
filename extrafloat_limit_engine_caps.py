@@ -264,46 +264,72 @@ def compute_capacity_cap(features_df, config=None):
     cap_cfg = cfg["capacity"]
     df = features_df.copy()
 
-    avg_balance = (
-        0.7 * _safe_series(df, "avg_daily_balance_30d", 0.0)
-        + 0.3 * _safe_series(df, "avg_daily_balance_90d", 0.0)
-    )
-    monthly_revenue = (
-        0.7 * _safe_series(df, "avg_monthly_revenue_30d", 0.0)
-        + 0.3 * _safe_series(df, "avg_monthly_revenue_90d", 0.0)
-    )
-    txn_count = (
-        0.7 * _safe_series(df, "avg_monthly_txn_count_30d", 0.0)
-        + 0.3 * _safe_series(df, "avg_monthly_txn_count_90d", 0.0)
-    )
-    monthly_payments = (
-        0.7 * _safe_series(df, "avg_monthly_payments_30d", 0.0)
-        + 0.3 * _safe_series(df, "avg_monthly_payments_90d", 0.0)
-    )
-    active_customers = (
-        0.7 * _safe_series(df, "active_customer_count_30d", 0.0)
-        + 0.3 * _safe_series(df, "active_customer_count_90d", 0.0)
-    )
-    txn_volume = (
-        0.7 * _safe_series(df, "avg_monthly_txn_volume_30d", 0.0)
-        + 0.3 * _safe_series(df, "avg_monthly_txn_volume_90d", 0.0)
-    )
+    # ─────────────────────────────────────────────────────────────
+    # 1. ROBUST INPUT MAPPING + DATA QUALITY TRACKING
+    # ─────────────────────────────────────────────────────────────
 
-    balance_amount = avg_balance * cap_cfg["balance_multiplier"]
-    revenue_amount = monthly_revenue * cap_cfg["revenue_multiplier"]
-    txn_amount = txn_count * cap_cfg["txn_multiplier"]
-    payments_amount = monthly_payments * cap_cfg["payments_multiplier"]
-    customers_amount = active_customers * cap_cfg["customers_multiplier"]
-    volume_amount = txn_volume * cap_cfg["volume_multiplier"]
+    def _mapped_series(primary, fallback):
+        if primary in df.columns:
+            vals = _safe_series(df, primary, 0.0).astype("float64")
+            src = pd.Series("primary", index=df.index)
+        elif fallback in df.columns:
+            vals = _safe_series(df, fallback, 0.0).astype("float64")
+            src = pd.Series("fallback", index=df.index)
+        else:
+            vals = pd.Series(0.0, index=df.index, dtype="float64")
+            src = pd.Series("missing", index=df.index)
+        return vals, src
 
-    balance_component = balance_amount * cap_cfg["balance_weight"]
-    revenue_component = revenue_amount * cap_cfg["revenue_weight"]
-    txn_component = txn_amount * cap_cfg["txn_weight"]
-    payments_component = payments_amount * cap_cfg["payments_weight"]
-    customers_component = customers_amount * cap_cfg["customers_weight"]
-    volume_component = volume_amount * cap_cfg["activity_weight"]
+    # Pull signals + track sources
+    bal_30, bal_30_src = _mapped_series("avg_daily_balance_30d", "average_balance")
+    bal_90, bal_90_src = _mapped_series("avg_daily_balance_90d", "average_balance")
 
-    raw_capacity_amount = (
+    rev_30, rev_30_src = _mapped_series("avg_monthly_revenue_30d", "revenue_1m")
+    rev_90, rev_90_src = _mapped_series("avg_monthly_revenue_90d", "revenue_1m")
+
+    txn_30, txn_30_src = _mapped_series("avg_monthly_txn_count_30d", "vol_1m")
+    txn_90, txn_90_src = _mapped_series("avg_monthly_txn_count_90d", "vol_1m")
+
+    pay_30, pay_30_src = _mapped_series("avg_monthly_payments_30d", "payment_value_1m")
+    pay_90, pay_90_src = _mapped_series("avg_monthly_payments_90d", "payment_value_1m")
+
+    cust_30, cust_30_src = _mapped_series("active_customer_count_30d", "cust_1m")
+    cust_90, cust_90_src = _mapped_series("active_customer_count_90d", "cust_1m")
+
+    vol_30, vol_30_src = _mapped_series("avg_monthly_txn_volume_30d", "total_txn_value_1m")
+    vol_90, vol_90_src = _mapped_series("avg_monthly_txn_volume_90d", "total_txn_value_1m")
+
+    # ─────────────────────────────────────────────────────────────
+    # 2. TRUE TEMPORAL BLENDING (NO FAKE DUPLICATION)
+    # ─────────────────────────────────────────────────────────────
+
+    def _blend(s30, s90, src30, src90):
+        same_source = (src30 == src90)
+        return np.where(
+            same_source,
+            s30,  # collapse if both signals identical (fallback case)
+            0.7 * s30 + 0.3 * s90
+        )
+
+    avg_balance = _blend(bal_30, bal_90, bal_30_src, bal_90_src)
+    monthly_revenue = _blend(rev_30, rev_90, rev_30_src, rev_90_src)
+    txn_count = _blend(txn_30, txn_90, txn_30_src, txn_90_src)
+    monthly_payments = _blend(pay_30, pay_90, pay_30_src, pay_90_src)
+    active_customers = _blend(cust_30, cust_90, cust_30_src, cust_90_src)
+    txn_volume = _blend(vol_30, vol_90, vol_30_src, vol_90_src)
+
+    # ─────────────────────────────────────────────────────────────
+    # 3. COMPONENT CONSTRUCTION (PURE CAPACITY)
+    # ─────────────────────────────────────────────────────────────
+
+    balance_component = avg_balance * cap_cfg["balance_multiplier"] * cap_cfg["balance_weight"]
+    revenue_component = monthly_revenue * cap_cfg["revenue_multiplier"] * cap_cfg["revenue_weight"]
+    txn_component = txn_count * cap_cfg["txn_multiplier"] * cap_cfg["txn_weight"]
+    payments_component = monthly_payments * cap_cfg["payments_multiplier"] * cap_cfg["payments_weight"]
+    customers_component = active_customers * cap_cfg["customers_multiplier"] * cap_cfg["customers_weight"]
+    volume_component = txn_volume * cap_cfg["volume_multiplier"] * cap_cfg["activity_weight"]
+
+    raw_capacity = (
         balance_component
         + revenue_component
         + txn_component
@@ -312,83 +338,111 @@ def compute_capacity_cap(features_df, config=None):
         + volume_component
     )
 
-    ceiling_val = cfg["global_ceiling_limit"]
-    scaled_capacity = np.log1p(np.maximum(raw_capacity_amount, 0.0))
-    scaled_capacity = scaled_capacity / np.log1p(ceiling_val)
-    scaled_capacity = scaled_capacity * ceiling_val
-    scaled_capacity = pd.Series(scaled_capacity, index=df.index, dtype="float64")
+    # ─────────────────────────────────────────────────────────────
+    # 4. LOG SCALING (STRUCTURAL CAPACITY)
+    # ─────────────────────────────────────────────────────────────
+
+    ceiling = cfg["global_ceiling_limit"]
+
+    scaled_capacity = np.log1p(np.maximum(raw_capacity, 0.0))
+    scaled_capacity = scaled_capacity / np.log1p(ceiling)
+    scaled_capacity = scaled_capacity * ceiling
+
+    scaled_capacity = pd.Series(scaled_capacity, index=df.index)
     scaled_capacity = _clip_series(
         scaled_capacity,
         cfg["global_floor_limit"],
-        ceiling_val,
+        ceiling,
     )
 
-    capacity_score = _clip_series(scaled_capacity / ceiling_val, 0.0, 1.0)
-    capacity_cap = scaled_capacity.copy()
+    capacity_score = _clip_series(scaled_capacity / ceiling, 0.0, 1.0)
 
-    activity_flag = _clip_series(
-        _safe_series(df, "operational_activity_flag", 0.0),
-        0.0,
-        1.0,
+    # ✅ TRUE CAPACITY (pure, no policy)
+    capacity_structural = scaled_capacity.copy()
+
+    # ─────────────────────────────────────────────────────────────
+    # 5. LIGHT ACTIVITY ADJUSTMENT (SOFT POLICY)
+    # ─────────────────────────────────────────────────────────────
+
+    operational_flag = _clip_series(
+        _safe_series(df, "operational_activity_flag", 0.0), 0.0, 1.0
     )
-    activity_mult = (
-        cap_cfg["activity_inactive_floor"]
-        + cap_cfg["activity_active_weight"] * activity_flag
+
+    credit_flag = _clip_series(
+        _safe_series(df, "recent_credit_active_flag", 0.0), 0.0, 1.0
     )
-    capacity_cap = capacity_cap * activity_mult
+
+    activity_score = 0.7 * operational_flag + 0.3 * credit_flag
+    activity_mult = 0.5 + 0.5 * activity_score
+
+    capacity_cap = capacity_structural * activity_mult
     capacity_cap = _clip_series(
         capacity_cap,
         cfg["global_floor_limit"],
-        ceiling_val,
+        ceiling,
     )
 
-    df["capacity_balance_component"] = pd.Series(
-        balance_component,
-        index=df.index,
-        dtype="float64",
-    )
-    df["capacity_revenue_component"] = pd.Series(
-        revenue_component,
-        index=df.index,
-        dtype="float64",
-    )
-    df["capacity_txn_component"] = pd.Series(
-        txn_component,
-        index=df.index,
-        dtype="float64",
-    )
-    df["capacity_payments_component"] = pd.Series(
-        payments_component,
-        index=df.index,
-        dtype="float64",
-    )
-    df["capacity_customers_component"] = pd.Series(
-        customers_component,
-        index=df.index,
-        dtype="float64",
-    )
-    df["capacity_volume_component"] = pd.Series(
-        volume_component,
-        index=df.index,
-        dtype="float64",
+    # ─────────────────────────────────────────────────────────────
+    # 6. DATA QUALITY SIGNAL (NEW, CRITICAL)
+    # ─────────────────────────────────────────────────────────────
+
+    source_frame = pd.DataFrame(
+        {
+            "bal30": bal_30_src, "bal90": bal_90_src,
+            "rev30": rev_30_src, "rev90": rev_90_src,
+            "txn30": txn_30_src, "txn90": txn_90_src,
+            "pay30": pay_30_src, "pay90": pay_90_src,
+            "cust30": cust_30_src, "cust90": cust_90_src,
+            "vol30": vol_30_src, "vol90": vol_90_src,
+        }
     )
 
-    df["capacity_top_driver"] = df[
-        [
-            "capacity_balance_component",
-            "capacity_revenue_component",
-            "capacity_txn_component",
-            "capacity_payments_component",
-            "capacity_customers_component",
-            "capacity_volume_component",
-        ]
-    ].idxmax(axis=1).str.replace("capacity_", "", regex=False).str.replace("_component", "", regex=False)
+    df["capacity_missing_inputs"] = (source_frame == "missing").sum(axis=1)
+    df["capacity_fallback_inputs"] = (source_frame == "fallback").sum(axis=1)
+
+    # ─────────────────────────────────────────────────────────────
+    # 7. INTERPRETABILITY
+    # ─────────────────────────────────────────────────────────────
+
+    component_frame = pd.DataFrame(
+        {
+            "balance": balance_component,
+            "revenue": revenue_component,
+            "txn": txn_component,
+            "payments": payments_component,
+            "customers": customers_component,
+            "volume": volume_component,
+        },
+        index=df.index,
+    )
+
+    total_signal = component_frame.sum(axis=1)
+
+    df["capacity_top_driver"] = np.where(
+        total_signal > 0,
+        component_frame.idxmax(axis=1),
+        "no_capacity_signal"
+    )
+
+    # ─────────────────────────────────────────────────────────────
+    # 8. OUTPUT
+    # ─────────────────────────────────────────────────────────────
+
+    df["capacity_balance_component"] = balance_component
+    df["capacity_revenue_component"] = revenue_component
+    df["capacity_txn_component"] = txn_component
+    df["capacity_payments_component"] = payments_component
+    df["capacity_customers_component"] = customers_component
+    df["capacity_volume_component"] = volume_component
+
+    df["capacity_raw"] = raw_capacity
+    df["capacity_structural"] = capacity_structural  # ✅ KEY ADDITION
+    df["capacity_activity_score"] = activity_score
 
     df["capacity_score"] = capacity_score
     df["capacity_cap"] = capacity_cap
 
     return df
-
 # ─────────────────────────────────────────────────────────────────────────────
 # 3. RECENT USAGE CAP
 # ─────────────────────────────────────────────────────────────────────────────
