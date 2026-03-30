@@ -1,4 +1,15 @@
-import importlib import credit_limit_model.limit_engine.extrafloat_limit_engine_caps as caps_module 
-importlib.reload(caps_module) 
-extrafloat_limits = caps_module.run_limit_caps(extrafloat_features) 
+import importlib
+import credit_limit_model.limit_engine.extrafloat_limit_engine_caps as caps_module
+
+importlib.reload(caps_module)
+
+# run_limit_caps() chains all 4 cap computations + combine + policy adjustment,
+# but does NOT call finalize_limits() — so the output contains policy_cap and
+# final_limit but NOT the canonical assigned_limit column.
+#
+# For the full pipeline (including finalize_limits + BoU regulatory cap), use:
+#   from credit_limit_model.limit_engine.run_extrafloat_limit_engine import run_extrafloat_limit_engine
+#   extrafloat_limits = run_extrafloat_limit_engine(extrafloat_features)
+#
+extrafloat_limits = caps_module.run_limit_caps(extrafloat_features)
 extrafloat_limits.head()
