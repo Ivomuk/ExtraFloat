@@ -1190,26 +1190,6 @@ def combine_caps(features_df, config=None):
         dtype="object",
     )
 
-    combined_reason = pd.Series(
-        np.where(
-            active_floor_preserved,
-            "active_user_floor_preserved",
-            combined_reason,
-        ),
-        index=df.index,
-        dtype="object",
-    )
-
-    combined_reason = pd.Series(
-        np.where(
-            policy_floor_preserved,
-            "proven_good_policy_floor_preserved",
-            combined_reason,
-        ),
-        index=df.index,
-        dtype="object",
-    )
-
     df["capacity_component"] = pd.Series(
         capacity_component,
         index=df.index,
