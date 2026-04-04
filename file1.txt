@@ -1,0 +1,389 @@
+# 2. Parameters
+DATA_PATH = "C:\\Users\\mikiiv.UG\\Documents\\Data\\Agents_PD\\mfs_daily_agent_mart_20250930.csv"  # TODO: change this
+DATE_FORMAT = "%Y%m%d"  # tbl_dt and activation_dt format 20251116
+
+OUTPUT_DIR = "Agents_PD"
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+# 3. Load data
+df_train_set = pd.read_csv(DATA_PATH)
+
+# 2. Parameters
+DATA_PATH = "C:\\Users\\mikiiv.UG\\Documents\\Data\\Agents_PD\\mfs_daily_agent_mart_20251115.csv"  # TODO: change this
+DATE_FORMAT = "%Y%m%d"  # tbl_dt and activation_dt format 20251116
+
+OUTPUT_DIR = "Agents_PD"
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+# 3. Load data
+df_val_set = pd.read_csv(DATA_PATH)
+
+
+# 1) Tag each snapshot with split and snapshot_dt
+train_df = df_train_set.copy()
+train_df["snapshot_dt"] = 20250930
+train_df["split"] = "train"
+
+valid_df = df_val_set.copy()
+valid_df["snapshot_dt"] = 20251115
+valid_df["split"] = "validation"
+
+# 2) (Optional but recommended) ensure tbl_dt is numeric and consistent
+train_df["tbl_dt"] = pd.to_numeric(train_df["tbl_dt"], errors="coerce")
+valid_df["tbl_dt"] = pd.to_numeric(valid_df["tbl_dt"], errors="coerce")
+
+# If tbl_dt is supposed to be the snapshot date, uncomment the next two lines
+# train_df["tbl_dt"] = 20250930
+# valid_df["tbl_dt"] = 20251115
+
+# 3) Stack them into one modeling table
+model_df = pd.concat([train_df, valid_df], ignore_index=True, sort=False)
+
+# 4) Sanity checks
+print(model_df["split"].value_counts(dropna=False))
+print(model_df.shape)
+
+# Check duplicates per agent per snapshot
+dup_cnt = model_df.duplicated(subset=["agent_msisdn", "snapshot_dt"]).sum()
+print(dup_cnt)
+
+'''
+Convenience exports (optional)
+X_train = model_df[model_df["split"] == "train"].copy()
+X_valid = model_df[model_df["split"] == "validation"].copy()
+'''
+is_multi = isinstance(model_df.index, pd.MultiIndex)
+print(is_multi)
+
+df_pd = model_df.copy()
+
+# Fix activation_dt if it has ".0" etc
+if "activation_dt" in df_pd.columns:
+    df_pd["activation_dt"] = (
+        df_pd["activation_dt"].astype(str).str.split(".").str[0].replace("", pd.NA)
+    )
+
+# Parse dates
+if "tbl_dt" in df_pd.columns:
+    df_pd["tbl_dt"] = pd.to_datetime(df_pd["tbl_dt"].astype(str), errors="coerce")
+
+if "snapshot_dt" in df_pd.columns:
+    df_pd["snapshot_dt"] = pd.to_datetime(df_pd["snapshot_dt"].astype(str), errors="coerce")
+
+if "activation_dt" in df_pd.columns:
+    df_pd["activation_dt"] = pd.to_datetime(
+        df_pd["activation_dt"].astype(str),
+        format=DATE_FORMAT,
+        errors="coerce",
+    )
+
+# parse a few potential date columns robustly
+DATE_COLUMNS = ["date_of_birth", "payment_last", "cash_in_last", "cash_out_last"]
+for c in DATE_COLUMNS:
+    if c in df_pd.columns:
+        df_pd[c] = pd.to_datetime(df_pd[c].astype(str), errors="coerce")
+
+def run_phase_2_1_richer_tx_behaviour(df_pd):
+
+    """
+    Phase 2.1: Richer transactional behaviour features for PD
+
+    Uses only columns explicitly mentioned:
+    - commission
+    - vol_1m, vol_3m, vol_6m
+    - cash_out_vol_1m/3m/6m
+    - cash_in_vol_1m/3m/6m
+    - payment_vol_1m/3m/6m
+    - commission_cluster_mean
+    - vol_3m_cluster_mean
+    - cluster_avg_commission (optional)
+    - cluster_avg_vol_3m (optional)
+    - tbl_dt
+
+    Feature themes:
+    - Trajectory: recent vs medium vs longer-term volume (1m / 3m / 6m)
+    - Intensity: average monthly volumes, commission per volume
+    - Cluster-relative commission and volume
+    - Explicit inactivity flags
+    - Simple recency from snapshot date
+    """
+
+    eps = 1e-6
+
+    # ========= PD-READY ADDITIONS (PLACE FIRST) =========
+
+    # --- A) Strong inactivity structure (consecutive & full inactivity) ---
+    if all(c in df_pd.columns for c in ["vol_1m", "vol_3m", "vol_6m"]):
+        df_pd["is_fully_inactive_6m"] = (
+            (df_pd["vol_1m"].fillna(0) == 0) &
+            (df_pd["vol_3m"].fillna(0) == 0) &
+            (df_pd["vol_6m"].fillna(0) == 0)
+        ).astype(int)
+
+        df_pd["is_consecutively_inactive"] = (
+            (df_pd["vol_1m"].fillna(0) == 0) &
+            (df_pd["vol_3m"].fillna(0) == 0)
+        ).astype(int)
+
+    # --- B) Activity restart / recovery signal ---
+    if all(c in df_pd.columns for c in ["vol_1m", "vol_3m"]):
+        df_pd["activity_restart_flag"] = (
+            (df_pd["vol_1m"] > 0) &
+            (df_pd["vol_3m"] == df_pd["vol_1m"])
+        ).astype(int)
+
+    # --- C) Conditional activity intensity ---
+    if "vol_3m" in df_pd.columns:
+        df_pd["vol_3m_if_active"] = df_pd["vol_3m"].where(
+            df_pd["vol_3m"] > 0, np.nan
+        )
+
+    # --- D) Commission dependency risk ---
+    if all(c in df_pd.columns for c in ["commission", "vol_3m"]):
+        df_pd["commission_without_activity_flag"] = (
+            (df_pd["commission"] > 0) &
+            (df_pd["vol_3m"].fillna(0) == 0)
+        ).astype(int)
+
+    # ========= Upgrade 3A: Trend direction flags (VERY strong for PD) =========
+    if all(c in df_pd.columns for c in ["vol_1m", "vol_3m", "vol_6m"]):
+        df_pd["consistent_volume_decline_flag"] = (
+            (df_pd["vol_1m"] < df_pd["vol_3m"] / 3.0) &
+            (df_pd["vol_3m"] < df_pd["vol_6m"] / 2.0)
+        ).astype(int)
+
+        df_pd["consistent_volume_growth_flag"] = (
+            (df_pd["vol_1m"] > df_pd["vol_3m"] / 3.0) &
+            (df_pd["vol_3m"] > df_pd["vol_6m"] / 2.0)
+        ).astype(int)
+
+    # ========= ADDITION 2.1A: Liquidity & balance stress =========
+    if "account_balance" in df_pd.columns:
+        df_pd["low_balance_flag"] = (df_pd["account_balance"] <= 0).astype(int)
+
+    if all(c in df_pd.columns for c in ["account_balance", "vol_3m"]):
+        df_pd["balance_to_vol_3m_ratio"] = (
+            df_pd["account_balance"] / (df_pd["vol_3m"] + eps)
+        )
+
+    if all(c in df_pd.columns for c in ["average_balance", "vol_3m"]):
+        df_pd["avg_balance_to_vol_3m_ratio"] = (
+            df_pd["average_balance"] / (df_pd["vol_3m"] + eps)
+        )
+
+    if all(c in df_pd.columns for c in ["account_balance", "average_balance"]):
+        df_pd["balance_drawdown_flag"] = (
+            df_pd["account_balance"] < 0.5 * df_pd["average_balance"]
+        ).astype(int)
+
+    # ========= ADDITION 2.1B: Customer & peer dependence =========
+    if all(c in df_pd.columns for c in ["cust_1m", "cust_3m"]):
+        df_pd["cust_concentration_flag"] = (
+            (df_pd["cust_1m"] / (df_pd["cust_3m"] + eps)) > 0.8
+        ).astype(int)
+
+    if all(c in df_pd.columns for c in ["cash_in_peers_3m", "cash_in_vol_3m"]):
+        df_pd["peer_dependency_ratio"] = (
+            df_pd["cash_in_peers_3m"] / (df_pd["cash_in_vol_3m"] + eps)
+        )
+
+        df_pd["high_peer_dependency_flag"] = (
+            df_pd["peer_dependency_ratio"] > 0.7
+        ).astype(int)       # ========= ADDITION 2.1C: Transaction mix & net flow stress =========
+    if all(c in df_pd.columns for c in ["cash_in_value_3m", "cash_out_value_3m"]):
+        df_pd["net_cash_flow_3m"] = (
+            df_pd["cash_in_value_3m"] - df_pd["cash_out_value_3m"]
+        )
+
+        df_pd["net_cash_flow_negative_flag"] = (
+            df_pd["net_cash_flow_3m"] < 0
+        ).astype(int)
+
+    if all(c in df_pd.columns for c in ["payment_value_3m", "vol_3m"]):
+        df_pd["payment_intensity_ratio"] = (
+            df_pd["payment_value_3m"] / (df_pd["vol_3m"] + eps)
+        )
+
+    # ========= ADDITION 2.1D: Stress acceleration flags =========
+    if all(c in df_pd.columns for c in ["vol_1m", "vol_3m"]):
+        df_pd["sharp_volume_drop_flag"] = (
+            (df_pd["vol_1m"] / (df_pd["vol_3m"] + eps)) < 0.3
+        ).astype(int)
+
+    if all(c in df_pd.columns for c in ["commission", "commission_cluster_mean"]):
+        df_pd["commission_drop_flag"] = (
+            df_pd["commission"] < 0.5 * df_pd["commission_cluster_mean"]
+        ).astype(int)
+
+#---------------->  
+
+    # ========= 0) Ensure tbl_dt is a datetime (for recency) =========
+    if "tbl_dt" in df_pd.columns:
+        if not str(df_pd["tbl_dt"].dtype).startswith("datetime"):
+            df_pd["tbl_dt"] = pd.to_datetime(df_pd["tbl_dt"], errors="coerce")
+
+    # ========= 1) Cluster-relative commission and volume =========
+
+    # 1.1 Commission vs cluster mean
+    if "commission" in df_pd.columns and "commission_cluster_mean" in df_pd.columns:
+        df_pd["commission_vs_cluster_mean_ratio"] = (
+            df_pd["commission"] / (df_pd["commission_cluster_mean"] + eps)
+        )
+        df_pd["commission_vs_cluster_mean_diff"] = (
+            df_pd["commission"] - df_pd["commission_cluster_mean"]
+        )
+
+    # 1.2 Vol_3m vs cluster mean
+    if "vol_3m" in df_pd.columns and "vol_3m_cluster_mean" in df_pd.columns:
+        df_pd["vol_3m_vs_cluster_mean_ratio"] = (
+            df_pd["vol_3m"] / (df_pd["vol_3m_cluster_mean"] + eps)
+        )
+        df_pd["vol_3m_vs_cluster_mean_diff"] = (
+            df_pd["vol_3m"] - df_pd["vol_3m_cluster_mean"]
+        )
+
+    # ========= 2) Commission intensity (per volume) =========
+
+    if "commission" in df_pd.columns and "vol_3m" in df_pd.columns:
+        df_pd["commission_per_vol_3m"] = (
+            df_pd["commission"] / (df_pd["vol_3m"] + eps)
+        )
+
+    # Compare intensity to cluster
+    if (
+        "cluster_avg_commission" in df_pd.columns
+        and "cluster_avg_vol_3m" in df_pd.columns
+        and "commission_per_vol_3m" in df_pd.columns
+    ):
+        df_pd["cluster_commission_per_vol_3m"] = (
+            df_pd["cluster_avg_commission"]
+            / (df_pd["cluster_avg_vol_3m"] + eps)
+        )
+        df_pd["commission_per_vol_vs_cluster_ratio"] = (
+            df_pd["commission_per_vol_3m"]
+            / (df_pd["cluster_commission_per_vol_3m"] + eps)
+        )
+
+    # ========= 3) Volume trajectory, intensity and volatility (1m / 3m / 6m) =========
+
+    base_names = ["cash_out_vol", "cash_in_vol", "payment_vol", "vol"]
+
+    for base in base_names:
+        col_1m = base + "_1m"
+        col_3m = base + "_3m"
+        col_6m = base + "_6m"
+
+        have_1m = col_1m in df_pd.columns
+        have_3m = col_3m in df_pd.columns
+        have_6m = col_6m in df_pd.columns
+
+        # 3.1 Average monthly intensity
+        if have_3m:
+            df_pd[f"{base}_avg_monthly_3m"] = df_pd[col_3m] / 3.0
+        if have_6m:
+            df_pd[f"{base}_avg_monthly_6m"] = df_pd[col_6m] / 6.0
+
+        # 3.2 Recent vs longer-term shares / trajectory
+        if have_1m and have_3m:
+            df_pd[f"{base}_share_1m_of_3m"] = (
+                df_pd[col_1m] / (df_pd[col_3m] + eps)
+            )
+
+            prev2m = (df_pd[col_3m] - df_pd[col_1m]) / 2.0
+            df_pd[f"{base}_growth_1m_vs_prev2m"] = (
+                df_pd[col_1m] / (prev2m + eps)
+            )
+
+        if have_3m and have_6m:
+            df_pd[f"{base}_share_3m_of_6m"] = (
+                df_pd[col_3m] / (df_pd[col_6m] + eps)
+            )
+
+            prev3m = (df_pd[col_6m] - df_pd[col_3m]) / 3.0
+            df_pd[f"{base}_growth_3m_vs_prev3m"] = (
+                df_pd[col_3m] / (prev3m + eps)
+            )
+
+        if have_1m and have_6m:
+            df_pd[f"{base}_share_1m_of_6m"] = (
+                df_pd[col_1m] / (df_pd[col_6m] + eps)
+            )
+
+        # 3.3 Monthly volatility proxy
+        if have_1m and have_3m and have_6m:
+            m1 = df_pd[col_1m]
+            m2 = (df_pd[col_3m] - df_pd[col_1m]) / 2.0
+            m3 = (df_pd[col_6m] - df_pd[col_3m]) / 3.0
+
+            monthly = np.vstack([m1.values, m2.values, m3.values]).T
+            mean_monthly = monthly.mean(axis=1)
+            std_monthly = monthly.std(axis=1)
+
+            df_pd[f"{base}_monthly_volatility_proxy"] = std_monthly
+            df_pd[f"{base}_monthly_volatility_cv"] = (
+                std_monthly / (mean_monthly + eps)
+            )
+
+    # ========= 4) Explicit inactivity flags =========
+
+    for horizon in ["1m", "3m", "6m"]:
+        col = f"vol_{horizon}"
+        flag_col = f"is_inactive_{horizon}"
+        if col in df_pd.columns:
+            df_pd[flag_col] = (df_pd[col].fillna(0) == 0).astype(int)
+
+    inactivity_flag_cols = [
+        c for c in
+        ["is_inactive_1m", "is_inactive_3m", "is_inactive_6m"]
+        if c in df_pd.columns
+    ]
+
+    if inactivity_flag_cols:
+        df_pd["num_inactive_horizons"] = (
+            df_pd[inactivity_flag_cols].sum(axis=1)
+        )
+
+    if all(c in df_pd.columns for c in inactivity_flag_cols):
+        df_pd["max_inactivity_horizon_flag"] = (
+            df_pd["is_inactive_1m"]
+            + df_pd["is_inactive_3m"]
+            + df_pd["is_inactive_6m"]
+        )
+
+    # ========= 5) Recency from snapshot date =========
+
+    if "tbl_dt" in df_pd.columns:
+        ref_date = df_pd["tbl_dt"].max()
+        df_pd["days_since_snapshot"] = (
+            ref_date - df_pd["tbl_dt"]
+        ).dt.days
+
+    # ========= 6) Quick sample print =========
+
+    print("\nSample of richer transactional behaviour features:")
+    sample_cols = ["agent_msisdn"]
+
+    for c in [
+        "tbl_dt", "days_since_snapshot",
+        "commission", "commission_cluster_mean",
+        "commission_vs_cluster_mean_ratio",
+        "commission_per_vol_3m",
+        "commission_per_vol_vs_cluster_ratio",
+        "vol_1m", "vol_3m", "vol_6m",
+        "is_inactive_1m", "is_inactive_3m", "is_inactive_6m",
+        "num_inactive_horizons",
+        "max_inactivity_horizon_flag",
+        "vol_share_1m_of_3m", "vol_share_3m_of_6m",
+        "vol_growth_1m_vs_prev2m", "vol_growth_3m_vs_prev3m",
+        "vol_monthly_volatility_proxy",
+        "vol_monthly_volatility_cv",
+    ]:
+        if c in df_pd.columns:
+            sample_cols.append(c)
+
+    print(df_pd[sample_cols].head())
+
+    return df_pd
+
+df_pd = run_phase_2_1_richer_tx_behaviour(df_pd) 
+
