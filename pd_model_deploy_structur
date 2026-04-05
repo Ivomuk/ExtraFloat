@@ -1,0 +1,85 @@
+# Create the canonical pd_model_deploy package structure on disk
+# and print the resulting tree in a Windows-friendly way.
+
+import os
+import json
+
+base_dir = "pd_model_deploy"
+
+subdirs = [
+    os.path.join(base_dir, "config"),
+    os.path.join(base_dir, "preprocessing"),
+    os.path.join(base_dir, "labeling"),
+    os.path.join(base_dir, "modeling"),
+    os.path.join(base_dir, "scoring"),
+    os.path.join(base_dir, "artifacts"),
+    os.path.join(base_dir, "tests"),
+]
+
+for sub in subdirs:
+    os.makedirs(sub, exist_ok=True)
+
+files = {
+    # config
+    os.path.join(base_dir, "config", "features.yaml"): "# final feature list, caps, logs, monotone signs\n",
+    os.path.join(base_dir, "config", "cutoffs.yaml"): "# policy cutoffs and overrides\n",
+    os.path.join(base_dir, "config", "constants.py"): (
+        "\"\"\"Global constants for PD model (windows, eps, flags).\"\"\"\n\n"
+        "WINDOW_LOOKBACK_DAYS = 365\n"
+        "EPS = 1e-9\n\n"
+        "BAD_STATUS_CODES = [\"BAD\", \"DEFAULT\"]\n"
+    ),
+
+    # preprocessing
+    os.path.join(base_dir, "preprocessing", "__init__.py"): "",
+    os.path.join(base_dir, "preprocessing", "validation.py"): "\"\"\"Input validation, schema checks, and leakage guards.\"\"\"\n\n",
+    os.path.join(base_dir, "preprocessing", "transforms.py"): "\"\"\"Feature transforms (log, caps, WOE, missing handling).\"\"\"\n\n",
+    os.path.join(base_dir, "preprocessing", "assemble.py"): "\"\"\"Raw to transformed feature snapshot assembler.\"\"\"\n\n",
+
+    # labeling
+    os.path.join(base_dir, "labeling", "__init__.py"): "",
+    os.path.join(base_dir, "labeling", "bad_flags.py"): "\"\"\"Label construction (e.g., 30D+ past-due forward window).\"\"\"\n\n",
+
+    # modeling
+    os.path.join(base_dir, "modeling", "__init__.py"): "",
+    os.path.join(base_dir, "modeling", "train_pd.py"): "\"\"\"Training entrypoints for PD models (LGBM/XGB).\"\"\"\n\n",
+    os.path.join(base_dir, "modeling", "monotonicity.py"): "\"\"\"Monotonicity utilities (Spearman-based constraints, etc.).\"\"\"\n\n",
+    os.path.join(base_dir, "modeling", "calibration.py"): "\"\"\"Calibration utilities (Platt scaling, binning-based).\"\"\"\n\n",
+    os.path.join(base_dir, "modeling", "metrics.py"): "\"\"\"Model performance metrics (AUC, KS, PSI, etc.).\"\"\"\n\n",
+
+    # scoring
+    os.path.join(base_dir, "scoring", "__init__.py"): "",
+    os.path.join(base_dir, "scoring", "score.py"): "\"\"\"Scoring pipeline that uses only frozen artifacts.\"\"\"\n\n",
+    os.path.join(base_dir, "scoring", "policy.py"): "\"\"\"Decision policy layer (thresholds, routing, caps).\"\"\"\n\n",
+
+    # artifacts placeholders
+    os.path.join(base_dir, "artifacts", "pd_model_lgb.txt"): "",
+    os.path.join(base_dir, "artifacts", "pd_model_xgb.json"): "",
+    os.path.join(base_dir, "artifacts", "calibration.pkl"): "",
+    os.path.join(base_dir, "artifacts", "feature_order.json"): json.dumps({"feature_order": []}, indent=2) + "\n",
+    os.path.join(base_dir, "artifacts", "metadata.json"): json.dumps({"model_name": "pd_model", "version": 1}, indent=2) + "\n",
+
+    # tests
+    os.path.join(base_dir, "tests", "test_leakage.py"): "\"\"\"Tests to ensure no label leakage in features.\"\"\"\n\n",
+    os.path.join(base_dir, "tests", "test_alignment.py"): "\"\"\"Tests for feature order and schema alignment between train and score.\"\"\"\n\n",
+    os.path.join(base_dir, "tests", "test_determinism.py"): "\"\"\"Tests to ensure deterministic scoring given fixed artifacts.\"\"\"\n\n",
+
+    # README
+    os.path.join(base_dir, "README.md"): "# pd_model_deploy\n\nCanonical PD (Probability of Default) model deployment package.\n",
+}
+
+for path, content in files.items():
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(content)
+
+# Print directory tree (no bash, no ls)
+def print_tree(root):
+    for current_dir, dirnames, filenames in os.walk(root):
+        level = current_dir.replace(root, "").count(os.sep)
+        indent = "    " * level
+        print(indent + os.path.basename(current_dir) + "/")
+        sub_indent = "    " * (level + 1)
+        for fname in filenames:
+            print(sub_indent + fname)
+
+print_tree(base_dir)
