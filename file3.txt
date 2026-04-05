@@ -1,0 +1,158 @@
+# =========================================================
+# SCORECARD Agents Without Loan History thin_file_flag=1
+# ========================================================= 
+
+def add_never_loan_scorecard_from_phase_2_1(df_pd_in):
+    eps = 1e-6
+    df_sc = df_pd_in.copy()
+
+    has_loan_num = pd.to_numeric(df_sc.get("has_loan_history", np.nan), errors="coerce").fillna(0)
+    if "thin_file_flag" not in df_sc.columns:
+        df_sc["thin_file_flag"] = (has_loan_num.eq(0)).astype(int)
+
+    thin_mask = df_sc["thin_file_flag"].eq(1)
+
+    def s_num(col_name):
+        if col_name not in df_sc.columns:
+            return pd.Series(np.nan, index=df_sc.index)
+        return pd.to_numeric(df_sc[col_name], errors="coerce")
+
+    def s_flag(col_name):
+        if col_name not in df_sc.columns:
+            return pd.Series(0.0, index=df_sc.index)
+        return pd.to_numeric(df_sc[col_name], errors="coerce").fillna(0).clip(0, 1)
+
+    def winsor(series_vals, q_lo, q_hi):
+        s_vals = pd.to_numeric(series_vals, errors="coerce")
+        if s_vals.notna().sum() == 0:
+            return s_vals
+        lo = s_vals.quantile(q_lo)
+        hi = s_vals.quantile(q_hi)
+        return s_vals.clip(lower=lo, upper=hi)
+
+    def safe_log1p_pos(series_vals):
+        s_vals = pd.to_numeric(series_vals, errors="coerce")
+        s_vals = s_vals.where(s_vals > 0, np.nan)
+        return np.log1p(s_vals)
+
+    points_vals = pd.Series(0.0, index=df_sc.index)
+
+    points_vals = points_vals + 7.0 * s_flag("is_fully_inactive_6m")
+    points_vals = points_vals + 4.0 * s_flag("is_consecutively_inactive")
+
+    if "num_inactive_horizons" in df_sc.columns:
+        inh = s_num("num_inactive_horizons").fillna(0).clip(0, 3)
+        points_vals = points_vals + 2.0 * inh
+
+    points_vals = points_vals + 3.0 * s_flag("sharp_volume_drop_flag")
+    points_vals = points_vals + 2.0 * s_flag("consistent_volume_decline_flag")
+    points_vals = points_vals - 2.0 * s_flag("activity_restart_flag")
+    points_vals = points_vals - 1.0 * s_flag("consistent_volume_growth_flag")
+
+    points_vals = points_vals + 2.5 * s_flag("low_balance_flag")
+    points_vals = points_vals + 2.0 * s_flag("balance_drawdown_flag")
+
+    if "avg_balance_to_vol_3m_ratio" in df_sc.columns:
+        bal_ratio = winsor(s_num("avg_balance_to_vol_3m_ratio"), 0.01, 0.99)
+        bal_ratio_log = safe_log1p_pos(bal_ratio)
+        points_vals = points_vals + 0.5 * (-1.0 * bal_ratio_log.fillna(0))
+
+    points_vals = points_vals + 2.5 * s_flag("net_cash_flow_negative_flag")
+
+    if "net_cash_flow_3m" in df_sc.columns and "vol_3m" in df_sc.columns:
+        net_flow = s_num("net_cash_flow_3m")
+        vol3 = s_num("vol_3m").abs()
+        net_flow_per_vol = net_flow / (vol3 + eps)
+        neg = net_flow_per_vol.where(net_flow_per_vol < 0, 0)
+        neg_w = winsor(neg, 0.01, 0.99)
+        points_vals = points_vals + 1.5 * np.log1p(np.abs(neg_w.fillna(0)))
+
+    points_vals = points_vals + 1.5 * s_flag("high_peer_dependency_flag")
+    points_vals = points_vals + 1.0 * s_flag("cust_concentration_flag")
+
+    points_vals = points_vals + 1.5 * s_flag("commission_without_activity_flag")
+    points_vals = points_vals + 1.5 * s_flag("commission_drop_flag")
+
+    if "commission_vs_cluster_mean_ratio" in df_sc.columns:
+        comm_vs = winsor(s_num("commission_vs_cluster_mean_ratio"), 0.01, 0.99)
+        under = (1.0 - comm_vs).where(comm_vs < 1.0, 0)
+        points_vals = points_vals + 1.0 * under.fillna(0)
+
+    if "commission_per_vol_vs_cluster_ratio" in df_sc.columns:
+        inten_vs = winsor(s_num("commission_per_vol_vs_cluster_ratio"), 0.01, 0.99)
+        under_i = (1.0 - inten_vs).where(inten_vs < 1.0, 0)
+        points_vals = points_vals + 0.75 * under_i.fillna(0)
+
+    if "vol_monthly_volatility_cv" in df_sc.columns:
+        vol_cv = winsor(s_num("vol_monthly_volatility_cv"), 0.01, 0.99).abs()
+        q75 = vol_cv.quantile(0.75)
+        excess = (vol_cv - q75).where(vol_cv > q75, 0)
+        points_vals = points_vals + 0.75 * np.log1p(excess.fillna(0))
+
+    df_sc["never_loan_points"] = np.where(thin_mask, points_vals, np.nan)
+
+    p1 = pd.Series(df_sc.loc[thin_mask, "never_loan_points"]).quantile(0.01)
+    p99 = pd.Series(df_sc.loc[thin_mask, "never_loan_points"]).quantile(0.99)
+    denom = (p99 - p1) + eps
+
+    df_sc["never_loan_score_0_100"] = np.nan
+    df_sc.loc[thin_mask, "never_loan_score_0_100"] = (
+        ((df_sc.loc[thin_mask, "never_loan_points"] - p1) / denom).clip(0, 1) * 100.0
+    )   
+    med = pd.Series(df_sc.loc[thin_mask, "never_loan_points"]).median()
+    iqr = (
+        pd.Series(df_sc.loc[thin_mask, "never_loan_points"]).quantile(0.75)
+        - pd.Series(df_sc.loc[thin_mask, "never_loan_points"]).quantile(0.25)
+    ) + eps
+    z = (df_sc["never_loan_points"] - med) / iqr
+    df_sc["never_loan_pd_like"] = np.where(thin_mask, 1.0 / (1.0 + np.exp(-1.25 * z)), np.nan)
+
+    driver_map = [
+        ("inactive6m", "is_fully_inactive_6m"),
+        ("inactive_consec", "is_consecutively_inactive"),
+        ("vol_drop", "sharp_volume_drop_flag"),
+        ("vol_decline", "consistent_volume_decline_flag"),
+        ("low_bal", "low_balance_flag"),
+        ("drawdown", "balance_drawdown_flag"),
+        ("net_outflow", "net_cash_flow_negative_flag"),
+        ("peer_dep", "high_peer_dependency_flag"),
+        ("cust_conc", "cust_concentration_flag"),
+        ("comm_drop", "commission_drop_flag"),
+        ("comm_wo_act", "commission_without_activity_flag"),
+    ]
+
+    tags_list = []
+    for tag, col_name in driver_map:
+        if col_name in df_sc.columns:
+            tags_list.append(np.where(s_flag(col_name) > 0, tag, ""))
+
+    df_sc["never_loan_top_drivers"] = np.nan
+    if tags_list:
+        tags_arr = np.vstack(tags_list).T
+        tags_series = pd.Series(["|".join([t for t in row if t != ""]) for row in tags_arr], index=df_sc.index)
+        tags_series = tags_series.replace("", np.nan)
+        df_sc.loc[thin_mask, "never_loan_top_drivers"] = tags_series.loc[thin_mask]
+
+    return df_sc 
+
+
+# =========================================================
+# Return (Filter Out Agents who have No Extra Float loans)
+# No temporary variables leaking into the namespace
+# Explicit coercion + missing handling
+# Safe for pipelines and refactors
+# =========================================================
+
+df_pd_new_agents = (
+    df_pd
+    .assign(
+        has_loan_history_num=lambda d: pd.to_numeric(
+            d["has_loan_history"], errors="coerce"
+        ).fillna(0)
+    )
+    .query("has_loan_history_num == 0")
+    .drop(columns="has_loan_history_num")
+    .copy()
+)
+
+df_pd_sc = add_never_loan_scorecard_from_phase_2_1(df_pd_new_agents)

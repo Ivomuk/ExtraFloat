@@ -1,0 +1,666 @@
+print("Original df_pd shape:",df_pd.shape)
+print("Original df_pd columns:",df_pd.has_loan_history.value_counts())
+
+# =========================================================
+# Return (Filter Out Agents who have Extra Float loans)
+# =========================================================
+
+has_loan_num = pd.to_numeric(df_pd["has_loan_history"], errors="coerce")
+df_pd = df_pd.loc[has_loan_num.fillna(0).eq(1)].copy()
+
+print("After df_pd shape:",df_pd.shape)
+print("After df_pd columns:",df_pd.has_loan_history.value_counts())
+
+df_pd.head(2)
+
+# df_pd
+print("df_pd rows:", df_pd.shape[0])
+print("df_pd unique agents:", df_pd["agent_msisdn"].nunique())
+
+# df_repayments
+print("df_repayments rows:", df_repayments.shape[0])
+print("df_repayments unique agents:", df_repayments["msisdn"].nunique())
+
+dup_keys = (
+    df_pd.groupby(["agent_msisdn", "snapshot_dt"])
+    .size()
+    .sort_values(ascending=False)
+)
+
+print(dup_keys[dup_keys > 1].head(10))
+
+df_pd[df_pd["agent_msisdn"].isin([256786, 256789, 256786])].sort_values("agent_msisdn")
+
+column_name = 'bad_state'
+
+if column_name in df_pd.columns:
+    print(f"Column '{column_name}' exists.")
+else:
+    print(f"Column '{column_name}' does not exist.")
+	
+df_pd.bad_state.value_counts()
+
+PD_FEATURE_BLACKLIST = {
+    # ======================
+    # Identifiers / snapshots
+    # ======================
+    "agent_msisdn",
+    "tbl_dt",
+    "account_number", 
+    "snapshot_dt",
+    "account_name",
+    "split",
+
+    # ======================
+    # Raw date anchors (NEVER model features)
+    # ======================
+    "Last_disbursement_date",
+    "Last_repayment_date",
+    "activation_dt",
+    "date_of_birth",
+    "days_since_snapshot",
+
+    # ======================
+    # Labels
+    # ======================
+    "bad_state",
+    "bad_state_30D",
+    "hard_bad_flag",
+
+    # ======================
+    # Delinquency / penalty constructs (raw or target-adjacent)
+    # ======================
+    "penalties_1M",
+    "penalties_3M",
+    "penalties_6M",
+    "penalty_frequency_6M",
+    "ever_penalized",
+    "ever_delinquent_flag",
+    "cured_after_penalty",
+    "current_dpd",
+    "dpd_30_plus",
+    "dpd_60_plus",
+    "dpd_90_plus",
+
+    # ======================
+    # Exposure / history flags
+    # ======================
+    "has_ever_loan",
+    "has_loan",
+    "loan_history",
+
+    # ======================
+    # Thin-file / policy controls
+    # ======================
+    "thin_file_flag",
+    "thin_file_pd_prior",
+    
+    # Target & proxies
+    "bad_state",
+    "hard_bad_flag",
+    "target",
+
+    # Loan existence / structural
+    "has_ever_loan",
+    "has_loan_history",
+    "is_new_agent",
+
+    # Thin-file & priors
+    "thin_file_flag",
+    "thin_file_pd_prior",
+
+    # Outcome encoders
+    "ever_penalized",
+    "ever_delinquent_flag",
+    "chronic_delinquency_flag",
+    #cluster labels
+     "cluster_id_k4",
+     "cluster_round1",
+     "cluster_id_k6",
+     "cluster_round2",
+     "cluster_id_gmm",
+
+}
+
+def get_and_classify_pd_features(df_pd, debug=False):
+    
+    
+    """
+    Full PD candidate extraction and automatic classification with optional debug.
+
+    Args:
+        df_pd: DataFrame containing PD features
+        debug: If True, prints which pattern matched each column
+
+    Returns:
+        pd_features: list of numeric PD candidate features (cleaned)
+        log_cols: list of features to log + winsorize
+        cap_cols: list of features to winsorize only
+        protected_cols: features never to touch (IDs, flags, clusters, thin-file)
+    """
+
+    
+    
+    # -------------------------------
+    # 1) Numeric candidate selection
+    # -------------------------------
+    
+    # Implement get_and_classify_pd_features_v2 with:
+    # - tightened leakage rules around DPD/ever/bad state
+    # - explicit ID-like exclusion (msisdn, ids) even if numeric
+    # - separate signed_log_cols bucket for signed heavy-tailed amounts
+
+
+
+    # Allow external blacklist if present, else default empty
+    # Define a tightened v2.1 classifier that reduces false leakage_like exclusions
+# Key changes:
+# - Remove 'snapshot' and 'split' from leakage_patterns (treat as bookkeeping only when explicit *_dt)
+# - Remove overly broad 'ever' substring, keep 'has_ever' and 'ever_' only
+# - Exclude outcome_observed* as id_like/bookkeeping
+
+    pd_blacklist = globals().get("PD_FEATURE_BLACKLIST", [])
+    pd_blacklist_lower = set([str(c).strip().lower() for c in pd_blacklist])
+
+    id_like_patterns = (
+        "msisdn", "imei", "imsi",
+        "customer_id", "cust_id", "client_id", "account_id", "acct_id",
+        "agent_id", "user_id", "device_id",
+        "national_id", "nid",
+        "tbl_dt", "as_of", "snapshot_dt", "report_dt", "run_dt", "date_",
+        "outcome_observed",
+    )
+
+    leakage_patterns = (
+        "has_ever", "ever_",
+        "bad_state", "hard_bad", "writeoff", "write_off", "charged_off", "charge_off",
+        "default", "delinq", "delinquency",
+        "penalty", "collections", "collection", "recovery",
+        "label", "target"
+    )
+
+    dpd_block_patterns = (
+        "max_dpd", "worst_dpd", "ever_dpd", "dpd_ever", "dpd_max", "dpd_worst",
+        "dpd90", "dpd_90", "ever90", "ever_90",
+        "dpd120", "dpd_120", "ever120", "ever_120",
+        "dpd30", "dpd_30", "ever30", "ever_30",
+        "dpd60", "dpd_60", "ever60", "ever_60",
+    )
+
+    dpd_allow_patterns = (
+        "current_dpd", "dpd_current", "dpd_now",
+        "days_since", "days_since_last_dpd", "days_since_dpd",
+    )
+
+    pd_features = []
+    excluded = []
+
+    for c in df_pd.select_dtypes(include=["number"]).columns:
+        c_clean = str(c).strip()
+        c_low = c_clean.lower()
+
+        if c_low in pd_blacklist_lower:
+            excluded.append((c_clean, "blacklist"))
+            continue
+
+        if any(p in c_low for p in id_like_patterns):
+            excluded.append((c_clean, "id_like"))
+            continue
+
+        if "dpd" in c_low:
+            if any(p in c_low for p in dpd_allow_patterns):
+                pd_features.append(c_clean)
+                continue
+            if any(p in c_low for p in dpd_block_patterns):
+                excluded.append((c_clean, "dpd_leakage_like"))
+                continue
+            excluded.append((c_clean, "dpd_ambiguous"))
+            continue
+
+        if any(p in c_low for p in leakage_patterns):
+            excluded.append((c_clean, "leakage_like"))
+            continue
+
+        pd_features.append(c_clean)   
+    leaked_like = [c for c in pd_features if ("dpd" in c.lower() and not any(p in c.lower() for p in dpd_allow_patterns))]
+    assert not leaked_like, "[ERROR] DPD-like columns detected in PD candidates: " + str(sorted(leaked_like))
+
+    count_patterns = (
+        "cash_in_vol", "cash_out_vol",
+        "payment_vol", "repayment_vol",
+        "disbursement_vol",
+        "_peers_", "_cust_", "_txns_", "_cnt", "_count",
+        "if_active","vol_1m", "vol_3m", "vol_6m"
+    )
+
+    log_patterns = (
+        "_value", "_val",
+        "commission",
+        "balance",
+        "revenue",
+        "voucher",
+        "rev_","payment_comm_"
+    )
+
+    signed_amount_patterns = (
+        "net_cash_flow", "net_cashflow", "net_flow", "cash_flow", "cashflow",
+        "delta_", "change_", "diff_", "net_",
+        "pnl", "profit", "loss",
+    )
+
+    cap_only_patterns = (
+        "_ratio", "_intensity", "_per_", "_to_", "_vs_",
+        "coverage",
+        "growth", "share",
+        "volatility", "_cv",
+        "avg_monthly","repayment_gap_days","cust_1m", "cust_3m", "cust_6m" 
+    )
+
+    protected_patterns = (
+        "_flag", "_indicator",
+        "is_", "num_",
+        "consistent_", "sharp_",
+        "days_since",
+        "thin_file",
+        "cluster",
+        "has_loan",
+        "loan_history",
+        "bucket",
+    )
+
+    log_cols = set()
+    signed_log_cols = set()
+    cap_cols = set()
+    protected_cols = set()
+
+    for c in pd_features:
+        c_low = c.lower()
+        if any(p in c_low for p in protected_patterns):
+            protected_cols.add(c)
+            matched_pattern = "PROTECTED (leave raw)"
+        elif any(p in c_low for p in cap_only_patterns):
+            cap_cols.add(c)
+            matched_pattern = "CAP ONLY (ratio/shape)"
+        elif any(p in c_low for p in count_patterns):
+            cap_cols.add(c)
+            matched_pattern = "CAP ONLY (count/gated)"
+        elif any(p in c_low for p in signed_amount_patterns):
+            signed_log_cols.add(c)
+            matched_pattern = "SIGNED LOG + CAP (signed amount)"
+        elif any(p in c_low for p in log_patterns):
+            log_cols.add(c)
+            matched_pattern = "LOG + CAP (amount)"
+        elif c_low.startswith("cash_in") or c_low.startswith("cash_out"):
+            cap_cols.add(c)
+            matched_pattern = "CAP ONLY (auto cash_in/out)"
+        else:
+            protected_cols.add(c)
+            matched_pattern = "DEFAULT PROTECTED"
+
+        if debug:
+            print(str(c).ljust(40) + " -> " + matched_pattern)
+
+    overlap_any = (log_cols & cap_cols) | (log_cols & protected_cols) | (cap_cols & protected_cols) | (signed_log_cols & (log_cols | cap_cols | protected_cols))
+    if len(overlap_any) > 0 and debug:
+        print("[WARNING] Overlap detected in classification sets: " + str(sorted(list(overlap_any))[:50]))
+
+    return (
+        pd_features,
+        sorted(list(log_cols)),
+        sorted(list(cap_cols)),
+        sorted(list(protected_cols)),
+        sorted(list(signed_log_cols)),
+        pd.DataFrame(excluded, columns=["feature", "reason"]),
+    )
+
+
+print('Defined get_and_classify_pd_features_v2_1') 
+
+
+#pd_features, log_cols, cap_cols, protected_cols = get_and_classify_pd_features(df_pd)
+pd_features, log_cols, cap_cols, protected_cols, signed_log_cols, excluded_df = get_and_classify_pd_features(df_pd, debug=False)# True if you want to see feature->class mapping
+
+print("Counts for every bucket (including signed-log)")
+print("PD candidates:", len(pd_features))
+print("LOG + CAP:", len(log_cols))
+print("SIGNED LOG + CAP:", len(signed_log_cols))
+print("CAP ONLY:", len(cap_cols))
+print("PROTECTED (leave raw):", len(protected_cols))
+
+print("Sanity checks: overlaps + coverage")
+
+log_set = set(log_cols)
+signed_set = set(signed_log_cols)
+cap_set = set(cap_cols)
+prot_set = set(protected_cols)
+pd_set = set(pd_features)
+
+print("Total classified:", len(log_set | signed_set | cap_set | prot_set))
+print("Unclassified (should be 0):", len(pd_set - (log_set | signed_set | cap_set | prot_set)))
+print("Overlaps (should be 0):",
+      len((log_set & cap_set) | (log_set & prot_set) | (cap_set & prot_set) |
+          (signed_set & log_set) | (signed_set & cap_set) | (signed_set & prot_set)))
+
+print("Why things were excluded")
+
+print(excluded_df["reason"].value_counts(dropna=False).head(20))
+print(excluded_df.head(20))
+
+print("quick name sample from each bucket")
+print("Sample LOG + CAP:", sorted(log_set)[:15])
+print("Sample SIGNED LOG + CAP:", sorted(signed_set)[:15])
+print("Sample CAP ONLY:", sorted(cap_set)[:15])
+print("Sample PROTECTED:", sorted(prot_set)[:15])
+
+print("PD candidates:", len(pd_features))
+print("LOG + CAP:", len(log_cols))
+print("CAP ONLY:", len(cap_cols))
+print("PROTECTED:", len(protected_cols))
+
+# 1) Look for meta/leakage-ish columns that should never be in pd_features
+suspect_patterns = [
+    "bad_state", "hard_bad", "label", "target",
+    "snapshot", "split", "tbl_dt", "msisdn",
+    "dpd", "penalt", "ever_", "future"
+]
+suspects = [c for c in pd_features if any(p in str(c).lower() for p in suspect_patterns)]
+
+print("\nSUSPECTS IN pd_features:", len(suspects))
+print(sorted(suspects)[:80])
+
+# 2) Check that classification buckets are disjoint and cover everything
+log_set = set(log_cols)
+cap_set = set(cap_cols)
+prot_set = set(protected_cols)
+
+print("\nOVERLAPS")
+print("log ∩ cap:", len(log_set & cap_set))
+print("log ∩ protected:", len(log_set & prot_set))
+print("cap ∩ protected:", len(cap_set & prot_set))
+
+covered = log_set | cap_set | prot_set
+missing = sorted(list(set(pd_features) - covered))
+extra = sorted(list(covered - set(pd_features)))
+
+print("\nCOVERAGE")
+print("Missing classification:", len(missing))
+print(missing[:50])
+print("Extra (classified but not in pd_features):", len(extra))
+print(extra[:50])
+
+# 3) Quick feature-family overview (helps spot weird stuff like keys leaking in)
+pd_features_s = pd.Series(pd_features, name="feature")
+prefix_vals = pd_features_s.str.lower().str.extract(r"^([a-z]+)")[0].fillna("(none)")
+print("\nTOP PREFIXES")
+print(prefix_vals.value_counts().head(25))
+
+if 'cluster_id_k4' in pd_features:
+    print("Element exists in the list")
+else:
+    print("Element does not exist")
+	
+# sanity check for forbidden leakage
+assert not any("ever_" in c for c in pd_features), "ever_* leaked into PD features"
+assert not any("dpd" in c for c in pd_features), "dpd_* leaked into PD features"
+assert not any("penalty" in c for c in pd_features), "penalty_* leaked into PD features"
+assert not any("has_ever" in c for c in pd_features), "has_ever_* leaked into PD features"
+
+# ---------- HARD SAFETY CHECKS ----------
+assert set(log_cols).isdisjoint(set(cap_cols)), "LOG and CAP sets overlap"
+assert set(log_cols).isdisjoint(set(protected_cols)), "LOG overlaps PROTECTED"
+assert set(cap_cols).isdisjoint(set(protected_cols)), "CAP overlaps PROTECTED"
+
+# ---------- COVERAGE CHECK ----------
+# Convert all to sets before the difference
+unclassified = set(pd_features) - set(log_cols) - set(cap_cols) - set(protected_cols)
+print("UNCLASSIFIED (expected small / flags / monotonic-safe):", sorted(unclassified))
+
+
+def apply_pd_transformations(
+    df,
+    pd_features,
+    log_cols,
+    cap_cols,
+    signed_log_cols=None,
+    q_low=0.005,
+    q_high=0.995,
+    debug=False,
+    neg_policy="signed_log1p",
+    neg_frac_threshold=0.01,
+):
+    
+    """
+    Apply PD-safe transformations to numeric PD features and detect unclassified columns.
+    
+    Args:
+        df (pd.DataFrame): Full DataFrame containing PD features.
+        pd_features (list[str]): Candidate numeric PD features.
+        log_cols (list[str]): Columns to log-transform and winsorize.
+        cap_cols (list[str]): Columns to winsorize only.
+        q_low (float): Lower quantile for winsorization.
+        q_high (float): Upper quantile for winsorization.
+        debug (bool): If True, prints transformations and unclassified features.
+    
+    Returns:
+        pd.DataFrame: DataFrame with transformed features.
+        list[str]: List of unclassified numeric PD features not in log_cols or cap_cols.
+    """
+ 
+    # Filter to safe subsets
+
+    
+    # Update apply_pd_transformations with fixes:
+    # - prevent double-transform for cols in both log_cols and cap_cols
+    # - compute neg_frac on non-null values only
+    # - optionally allow signed_log1p for columns with substantial negatives
+    # Then: verify transformations by comparing raw vs transformed summary stats and checking report.
+
+    # Define apply_pd_transformations_v3 with an explicit signed_log_cols input.
+# Signed log columns are forced into signed_log1p + winsorize, regardless of observed neg_frac.
+
+
+    df_out = df.copy()
+
+    pd_features_use = [c for c in pd_features if c in df_out.columns]
+
+    signed_log_cols_use = []
+    if signed_log_cols is not None:
+        signed_log_cols_use = [c for c in signed_log_cols if c in df_out.columns and c in pd_features_use]
+
+    log_cols_use = [c for c in log_cols if c in df_out.columns and c in pd_features_use]
+    cap_cols_use = [c for c in cap_cols if c in df_out.columns and c in pd_features_use]
+
+    # Ensure disjoint processing order: signed_log first, then log, then cap
+    log_cols_use = [c for c in log_cols_use if c not in set(signed_log_cols_use)]
+    cap_cols_use = [c for c in cap_cols_use if c not in set(log_cols_use) and c not in set(signed_log_cols_use)]
+
+    report_rows = []
+
+    def _winsorize(s_num):
+        lo_val, hi_val = s_num.quantile([q_low, q_high])
+        if pd.isna(lo_val) or pd.isna(hi_val) or float(hi_val) <= float(lo_val):
+            return s_num, True, lo_val, hi_val
+        s_clip = s_num.clip(lo_val, hi_val)
+        return s_clip, False, lo_val, hi_val
+
+    def _is_broken(s_num):
+        s_vals = pd.to_numeric(s_num, errors="coerce")
+        finite_frac = np.isfinite(s_vals.to_numpy()).mean()
+        nun = s_vals.dropna().nunique()
+        if finite_frac < 0.98:
+            return True, "low_finite_frac=" + str(float(finite_frac))
+        if nun <= 1:
+            return True, "nunique=" + str(int(nun))
+        return False, "ok"
+
+    def _signed_log1p(s_vals):
+        s_num = pd.to_numeric(s_vals, errors="coerce")
+        return np.sign(s_num) * np.log1p(np.abs(s_num))
+
+    # 0) FORCED SIGNED LOG + CAP
+    for col in signed_log_cols_use:
+        s_raw = pd.to_numeric(df_out[col], errors="coerce")
+        n_nonnull = int(s_raw.notna().sum())
+        if n_nonnull == 0:
+            df_out[col] = s_raw.astype("float32")
+            report_rows.append({"feature": col, "action": "forced_signed_log_skip_all_nan", "notes": ""})
+            continue
+
+        s_nonnull = s_raw.dropna()
+        neg_frac = float((s_nonnull < 0).mean()) if s_nonnull.shape[0] > 0 else 0.0
+
+        s_work = _signed_log1p(s_raw)
+        s_work, skipped_clip, lo_val, hi_val = _winsorize(s_work)
+        broken, why = _is_broken(s_work)  
+        if broken:
+            s_fallback, skipped_fallback, lo_fb, hi_fb = _winsorize(s_raw)
+            df_out[col] = s_fallback.astype("float32")
+            report_rows.append({
+                "feature": col,
+                "action": "forced_signed_log_cap_reverted_to_raw_cap",
+                "reason": why,
+                "neg_frac": neg_frac,
+                "clip_skipped": bool(skipped_clip),
+                "fallback_clip_skipped": bool(skipped_fallback),
+            })
+            if debug:
+                print("[REVERT] " + col + " -> raw cap because " + str(why))
+            continue
+
+        df_out[col] = s_work.astype("float32")
+        report_rows.append({
+            "feature": col,
+            "action": "forced_signed_log_cap_ok",
+            "neg_frac": neg_frac,
+            "clip_skipped": bool(skipped_clip),
+            "lo": None if pd.isna(lo_val) else float(lo_val),
+            "hi": None if pd.isna(hi_val) else float(hi_val),
+        })
+
+    # 1) LOG + CAP (standard, with optional negative handling)
+    for col in log_cols_use:
+        s_raw = pd.to_numeric(df_out[col], errors="coerce")
+        n_nonnull = int(s_raw.notna().sum())
+        if n_nonnull == 0:
+            df_out[col] = s_raw.astype("float32")
+            report_rows.append({"feature": col, "action": "log_cap_skip_all_nan", "notes": ""})
+            continue
+
+        s_nonnull = s_raw.dropna()
+        neg_frac = float((s_nonnull < 0).mean()) if s_nonnull.shape[0] > 0 else 0.0
+
+        if neg_frac > neg_frac_threshold:
+            if neg_policy == "cap_only":
+                s_work, skipped_clip, lo_val, hi_val = _winsorize(s_raw)
+                df_out[col] = s_work.astype("float32")
+                report_rows.append({
+                    "feature": col,
+                    "action": "cap_only_due_to_negatives",
+                    "neg_frac": neg_frac,
+                    "clip_skipped": bool(skipped_clip),
+                    "lo": None if pd.isna(lo_val) else float(lo_val),
+                    "hi": None if pd.isna(hi_val) else float(hi_val),
+                })
+                continue
+
+            s_work = _signed_log1p(s_raw)
+            s_work, skipped_clip, lo_val, hi_val = _winsorize(s_work)
+            broken, why = _is_broken(s_work)
+            if broken:
+                s_fallback, skipped_fallback, lo_fb, hi_fb = _winsorize(s_raw)
+                df_out[col] = s_fallback.astype("float32")
+                report_rows.append({
+                    "feature": col,
+                    "action": "signed_log_cap_reverted_to_raw_cap",
+                    "reason": why,
+                    "neg_frac": neg_frac,
+                    "clip_skipped": bool(skipped_clip),
+                    "fallback_clip_skipped": bool(skipped_fallback),
+                })
+                if debug:
+                    print("[REVERT] " + col + " -> raw cap because " + str(why))
+                continue
+
+            df_out[col] = s_work.astype("float32")
+            report_rows.append({
+                "feature": col,
+                "action": "signed_log_cap_ok",
+                "neg_frac": neg_frac,
+                "clip_skipped": bool(skipped_clip),
+                "lo": None if pd.isna(lo_val) else float(lo_val),
+                "hi": None if pd.isna(hi_val) else float(hi_val),
+            })
+            continue
+
+        s_work = s_raw.clip(lower=0)
+        s_work = np.log1p(s_work)
+        s_work, skipped_clip, lo_val, hi_val = _winsorize(s_work)
+        broken, why = _is_broken(s_work)
+        if broken:
+            s_fallback, skipped_fallback, lo_fb, hi_fb = _winsorize(s_raw)
+            df_out[col] = s_fallback.astype("float32")
+            report_rows.append({
+                "feature": col,
+                "action": "log_cap_reverted_to_raw_cap",
+                "reason": why,
+                "neg_frac": neg_frac,
+                "clip_skipped": bool(skipped_clip),
+                "fallback_clip_skipped": bool(skipped_fallback),
+            })
+            if debug:
+                print("[REVERT] " + col + " -> raw cap because " + str(why))
+            continue
+
+        df_out[col] = s_work.astype("float32")
+        report_rows.append({
+            "feature": col,
+            "action": "log_cap_ok",
+            "neg_frac": neg_frac,
+            "clip_skipped": bool(skipped_clip),
+            "lo": None if pd.isna(lo_val) else float(lo_val),
+            "hi": None if pd.isna(hi_val) else float(hi_val),
+        })
+
+
+    # 2) CAP ONLY
+    for col in cap_cols_use:
+        s_raw = pd.to_numeric(df_out[col], errors="coerce")
+        n_nonnull = int(s_raw.notna().sum())
+        if n_nonnull == 0:
+            df_out[col] = s_raw.astype("float32")
+            report_rows.append({"feature": col, "action": "cap_skip_all_nan", "notes": ""})
+            continue
+
+        s_work, skipped_clip, lo_val, hi_val = _winsorize(s_raw)
+        broken, why = _is_broken(s_work)
+        if broken:
+            df_out[col] = s_raw.astype("float32")
+            report_rows.append({"feature": col, "action": "cap_reverted_to_raw", "reason": why})
+            if debug:
+                print("[REVERT] " + col + " -> raw because " + str(why))
+            continue
+
+        df_out[col] = s_work.astype("float32")
+        report_rows.append({
+            "feature": col,
+            "action": "cap_ok",
+            "clip_skipped": bool(skipped_clip),
+            "lo": None if pd.isna(lo_val) else float(lo_val),
+            "hi": None if pd.isna(hi_val) else float(hi_val),
+        })
+
+    classified_cols = set(signed_log_cols_use) | set(log_cols_use) | set(cap_cols_use)
+    unclassified = [c for c in pd_features_use if c not in classified_cols]
+    transform_report = pd.DataFrame(report_rows)
+
+    if debug:
+        if len(unclassified) > 0:
+            print("[UNCLASSIFIED] Numeric PD features left raw (no log/cap/signed-log): " + ", ".join(sorted(unclassified)))
+        if transform_report.shape[0] > 0:
+            print(transform_report["action"].value_counts(dropna=False))
+
+    return df_out, unclassified, transform_report
+
+
+print('Defined apply_pd_transformations_v3') 
+

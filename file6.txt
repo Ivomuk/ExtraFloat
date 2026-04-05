@@ -1,0 +1,1166 @@
+def prepare_pd_training_and_validation_data(
+    df_pd_raw,
+    df_pd_transformed,
+    target_col,
+    train_cutoff,
+    id_cols,
+    protected_cols,
+    pd_feature_blacklist,
+    forbidden_feature_patterns,
+    date_cols,
+    split_date_col="snapshot_dt",
+    allowed_features=None,
+    debug=False,
+):
+
+    # 0) Force alignment on common index to avoid drift
+    common_index = df_pd_raw.index.intersection(df_pd_transformed.index)
+    df_pd_raw = df_pd_raw.loc[common_index].copy()
+    df_pd_transformed = df_pd_transformed.loc[common_index].copy()
+    assert df_pd_raw.index.equals(df_pd_transformed.index), \
+        "[FATAL] Raw and transformed snapshots misaligned even after alignment"
+    
+    # 1) Hard guards on split date integrity (split_date_col can live in raw OR transformed)
+    assert (split_date_col in df_pd_raw.columns) or (split_date_col in df_pd_transformed.columns), \
+        "[ERROR] split_date_col missing: " + str(split_date_col)
+    
+    # Prefer raw for splitting (since transformed is numeric-only by design)
+    if split_date_col in df_pd_raw.columns:
+        df_pd_raw[split_date_col] = pd.to_datetime(df_pd_raw[split_date_col], errors="coerce")
+        split_series = df_pd_raw[split_date_col]
+    else:
+        df_pd_transformed[split_date_col] = pd.to_datetime(df_pd_transformed[split_date_col], errors="coerce")
+        split_series = df_pd_transformed[split_date_col]
+    
+    assert split_series.notna().all(), "[ERROR] split_date_col has NaT: " + str(split_date_col)
+    
+    # 1b) Coerce optional date columns if present (do NOT require them in transformed)
+    for c in date_cols:
+        if (c not in df_pd_raw.columns) and (c not in df_pd_transformed.columns):
+            if debug:
+                print("[WARN] Date col missing (skipping): " + str(c))
+            continue
+    
+        if c in df_pd_raw.columns:
+            if not pd.api.types.is_datetime64_any_dtype(df_pd_raw[c]):
+                df_pd_raw[c] = pd.to_datetime(df_pd_raw[c], errors="coerce")
+    
+        if c in df_pd_transformed.columns:
+            if not pd.api.types.is_datetime64_any_dtype(df_pd_transformed[c]):
+                df_pd_transformed[c] = pd.to_datetime(df_pd_transformed[c], errors="coerce")
+
+        # Normalize patterns once
+    forbidden_patterns_low = [str(p).lower() for p in forbidden_feature_patterns]
+    blacklist_low = set([str(c).lower() for c in pd_feature_blacklist])
+    id_cols_low = set([str(c).lower() for c in id_cols])
+    protected_low = set([str(c).lower() for c in protected_cols])
+    
+    # 2) Candidate numeric features
+    base_cols = allowed_features if allowed_features is not None else df_pd_transformed.columns
+    candidate_features = []
+    
+    for c in base_cols:
+        if c not in df_pd_transformed.columns:
+            continue
+    
+        c_low = str(c).lower()
+        if c_low in id_cols_low:
+            continue
+        if c_low in protected_low:
+            continue
+        if c_low in blacklist_low:
+            continue
+        if c == target_col:
+            continue
+        if c == split_date_col:
+            continue
+        if not pd.api.types.is_numeric_dtype(df_pd_transformed[c]):
+            continue
+    
+        candidate_features.append(c)
+    
+    if debug:
+        print("[INFO] Candidate numeric features: " + str(len(candidate_features)))
+    
+    # 3) Pattern-based leakage guard (case-insensitive)
+    leakage_hits = []
+    for c in candidate_features:
+        c_low = c.lower()
+        if any(p in c_low for p in forbidden_patterns_low):
+            leakage_hits.append(c)
+    
+    assert not leakage_hits, (
+        "[ERROR] Pattern-based leakage detected. "
+        "Update PD_FEATURE_BLACKLIST explicitly:\n"
+        + ", ".join(leakage_hits)
+    )
+
+    # 4) Time-based split: train vs validation
+    if split_date_col in df_pd_raw.columns:
+        split_series = pd.to_datetime(df_pd_raw[split_date_col], errors="coerce")
+    else:
+        split_series = pd.to_datetime(df_pd_transformed[split_date_col], errors="coerce")
+    
+    assert split_series.notna().all(), "[ERROR] split_date_col has NaT: " + str(split_date_col)
+    
+    train_mask = split_series <= train_cutoff
+    val_mask = ~train_mask
+    
+    df_train_trans = df_pd_transformed.loc[train_mask].copy()
+    df_train_raw = df_pd_raw.loc[train_mask].copy()
+    df_val_trans = df_pd_transformed.loc[val_mask].copy()
+    df_val_raw = df_pd_raw.loc[val_mask].copy()  
+    assert "agent_msisdn" in df_train_raw.columns, "[ERROR] agent_msisdn missing in df_train_raw"
+    assert "agent_msisdn" in df_val_raw.columns, "[ERROR] agent_msisdn missing in df_val_raw"
+
+    # Great Check
+    assert df_train_raw["agent_msisdn"].notna().all(), "[ERROR] agent_msisdn nulls in train"
+    assert df_val_raw["agent_msisdn"].notna().all(), "[ERROR] agent_msisdn nulls in val"
+
+    agent_train = df_train_raw["agent_msisdn"].copy()
+    agent_val = df_val_raw["agent_msisdn"].copy()
+    
+    assert not df_train_raw.empty, "[ERROR] Training set is empty"
+    assert df_train_raw.shape[0] == df_train_trans.shape[0], \
+        "[ERROR] Raw and transformed train rows misaligned (row count)"
+    assert df_train_raw.index.equals(df_train_trans.index), \
+        "[ERROR] Raw and transformed train indexes misaligned"
+    
+    assert df_val_raw.shape[0] == df_val_trans.shape[0], \
+        "[ERROR] Raw and transformed validation rows misaligned (row count)"
+    assert df_val_raw.index.equals(df_val_trans.index), \
+        "[ERROR] Raw and transformed validation indexes misaligned"
+
+    # 5) Build X / y matrices
+    assert target_col in df_train_trans.columns, "[ERROR] target_col missing in train transformed: " + str(target_col)
+    assert target_col in df_val_trans.columns, "[ERROR] target_col missing in val transformed: " + str(target_col)
+    
+    missing_train_raw = [c for c in candidate_features if c not in df_train_raw.columns]
+    missing_train_trans = [c for c in candidate_features if c not in df_train_trans.columns]
+    assert not missing_train_raw, "[ERROR] Candidate features missing in train raw: " + str(missing_train_raw)
+    assert not missing_train_trans, "[ERROR] Candidate features missing in train transformed: " + str(missing_train_trans)
+    
+    missing_val_raw = [c for c in candidate_features if c not in df_val_raw.columns]
+    missing_val_trans = [c for c in candidate_features if c not in df_val_trans.columns]
+    assert not missing_val_raw, "[ERROR] Candidate features missing in val raw: " + str(missing_val_raw)
+    assert not missing_val_trans, "[ERROR] Candidate features missing in val transformed: " + str(missing_val_trans)
+
+    assert "agent_msisdn" not in candidate_features, "[FATAL] agent_msisdn leaked into candidate_features"
+    
+    X_train_raw = df_train_raw[candidate_features]
+    X_train_trans = df_train_trans[candidate_features]
+    y_train = df_train_trans[target_col]
+
+    thin_train = df_train_raw["thin_file_flag"]
+    thin_val = df_val_raw["thin_file_flag"]
+    
+    X_val_raw = df_val_raw[candidate_features]
+    X_val_trans = df_val_trans[candidate_features]
+    y_val = df_val_trans[target_col]
+    
+    assert X_train_raw.shape == X_train_trans.shape, "[ERROR] Train raw/trans shapes differ"
+    assert X_val_raw.shape == X_val_trans.shape, "[ERROR] Val raw/trans shapes differ"
+    
+    assert y_train.notna().all(), "[ERROR] Training target contains NaNs"
+    assert y_val.notna().all(), "[ERROR] Validation target contains NaNs"
+    
+    if debug:
+        print("[INFO] Training rows: " + str(len(X_train_raw)))
+        print("[INFO] Validation rows: " + str(len(X_val_raw)))
+        print("[INFO] Features passed to IV stage: " + str(len(candidate_features)))
+    
+   
+
+    return (
+    X_train_raw,
+    X_train_trans,
+    y_train,
+    X_val_raw,
+    X_val_trans,
+    y_val,
+    candidate_features,
+    df_train_raw["thin_file_flag"],
+    df_val_raw["thin_file_flag"],
+    agent_train,
+    agent_val,
+    )
+ 
+
+train_cutoff = pd.Timestamp("2025-09-30")
+
+date_cols = [
+    "snapshot_dt",
+    "Last_disbursement_date",
+    "Last_repayment_date",
+    "activation_dt",
+    "date_of_birth",
+]
+
+(
+    X_train_raw,
+    X_train_trans,
+    y_train,
+    X_val_raw,
+    X_val_trans,
+    y_val,
+    candidate_features,
+    thin_file_flag_train,
+    thin_file_flag_val,
+    agent_msisdn_train,
+    agent_msisdn_val,
+) = prepare_pd_training_and_validation_data(
+    df_pd_raw=df_pd_raw,
+    df_pd_transformed=df_pd_transformed,
+    target_col="bad_state",
+    train_cutoff=train_cutoff,
+    id_cols=ID_COLS,
+    protected_cols=protected_cols,
+    pd_feature_blacklist=PD_FEATURE_BLACKLIST,
+    forbidden_feature_patterns=FORBIDDEN_FEATURE_PATTERNS,
+    date_cols=date_cols,
+    split_date_col="snapshot_dt",
+    debug=True
+)
+
+
+
+selected_features, iv_table = iv_filter_phase_2(
+    X_train_raw=X_train_raw,
+    X_train_transformed=X_train_trans,
+    y_train=y_train,
+    min_iv=0.02,
+    n_bins=10,
+    pd_feature_blacklist=PD_FEATURE_BLACKLIST,
+    forbidden_feature_patterns=FORBIDDEN_FEATURE_PATTERNS,
+    target_col=TARGET_COL,
+    debug=True,
+)
+
+
+selected_features_separability, iv_table_separability = iv_filter_phase_2_separability_sensitive(
+    X_train_raw=X_train_raw,
+    X_train_transformed=X_train_trans,
+    y_train=y_train,
+    min_iv=0.02,
+    n_bins=10,
+    pd_feature_blacklist=PD_FEATURE_BLACKLIST,
+    forbidden_feature_patterns=FORBIDDEN_FEATURE_PATTERNS,
+    target_col=TARGET_COL,
+    debug=True,
+)
+
+
+    # ===============================
+    # IV reporting
+    # ===============================
+    print("[INFO] Selected features after IV filter: " + str(len(selected_features)))
+    print("\nTop 50 features by IV after transformation:")
+    print(iv_table.head(50)[["feature", "iv_after", "iv_before", "iv_uplift"]])
+    
+    # ===============================
+    # Correlation sanity check
+    # ===============================
+    y_num = pd.to_numeric(y_train, errors="coerce")
+    corrs = X_train_trans[selected_features].corrwith(y_num).abs().fillna(0).sort_values(ascending=False)
+    high_corr = corrs[corrs > 0.95].index.tolist()
+    
+    if high_corr:
+        print("\n[DEBUG] High absolute Pearson corr features (>|0.95|):")
+        print(corrs.loc[high_corr])
+    
+    assert not high_corr, (
+        "[ERROR] Features too highly correlated with target: "
+        + ", ".join(high_corr)
+    )
+    
+    # ===============================
+    # Unclassified feature warning
+    # ===============================
+    if untransformed_pd_features:
+        print(
+            "[WARNING] Numeric PD features not transformed: "
+            + ", ".join(untransformed_pd_features[:20])
+            + (" ..." if len(untransformed_pd_features) > 10 else "")
+        )
+
+# ------------------------------
+# Leakage-Safe IV Audit
+# ------------------------------
+
+def iv_audit(
+    iv_df,
+    X_train_transformed,
+    y_train,
+    forbidden_patterns=FORBIDDEN_FEATURE_PATTERNS,
+    blacklist=PD_FEATURE_BLACKLIST,
+    high_iv_threshold=10.0,
+    leak_corr_threshold=0.99,
+):
+    """
+    Annotates an IV table for leakage, degenerate features, and extreme IV values.
+
+    Args:
+        iv_df: IV table from iv_filter_phase_2
+        X_train_transformed: DataFrame used to compute IV
+        y_train: PD target (1/0)
+        forbidden_patterns: iterable of substrings marking forbidden columns
+        blacklist: iterable of columns never allowed
+        high_iv_threshold: IV above this value triggers review
+        leak_corr_threshold: abs(corr) with target above this flags potential leakage
+
+    Returns:
+        iv_audit_df: IV table with 'status' and 'status_detail' columns
+    """
+  
+       # --- basic validation to avoid silent weirdness later ---
+    needed_cols = {"feature", "iv_after"}
+    missing_cols = needed_cols - set(iv_df.columns)
+    if len(missing_cols) > 0:
+        raise ValueError("iv_df missing required columns: " + str(sorted(list(missing_cols))))
+
+    blacklist_set = set(blacklist) if blacklist is not None else set()
+    forbidden_patterns = tuple(forbidden_patterns) if forbidden_patterns is not None else tuple()
+
+    # Align y to X index (prevents shuffled-row correlation bugs)
+    y_series = pd.Series(y_train, index=X_train_transformed.index)
+
+    iv_audit_records = []
+
+    for _, row in iv_df.iterrows():
+        feat = row["feature"]
+        iv_after = row["iv_after"]
+        iv_before = row["iv_before"] if "iv_before" in row.index else np.nan
+        iv_uplift = row["iv_uplift"] if "iv_uplift" in row.index else np.nan
+
+        status = "OK"
+        status_detail = ""
+
+        if feat not in X_train_transformed.columns:
+            status = "SKIPPED_NOT_IN_X"
+            status_detail = "Feature not found in X_train_transformed"
+        else:
+            col = X_train_transformed[feat]
+
+            if feat in blacklist_set or any(p in feat for p in forbidden_patterns):
+                status = "SKIPPED_FORBIDDEN"
+                status_detail = "In PD_FEATURE_BLACKLIST or matches forbidden pattern"
+
+            elif not pd.api.types.is_numeric_dtype(col):
+                status = "SKIPPED_NON_NUMERIC"
+                status_detail = "Non-numeric dtype"
+
+            else:
+                # Explicit missing / constant checks
+                non_null_count = int(col.notna().sum())
+                if non_null_count == 0:
+                    status = "SKIPPED_ALL_MISSING"
+                    status_detail = "All values are "
+                elif col.nunique(dropna=True) <= 1:
+                    status = "SKIPPED_CONSTANT"
+                    status_detail = "Constant or single unique value"
+                else:
+                    # All zeros among non-missing
+                    if (col.dropna() == 0).all():
+                        status = "SKIPPED_CONSTANT"
+                        status_detail = "All non-missing values are zero"
+
+                    # High IV flag
+                    if status == "OK" and (pd.notna(iv_after) and iv_after >= high_iv_threshold):
+                        status = "REVIEW_HIGH_IV"
+                        status_detail = "IV_after >= " + str(high_iv_threshold)
+
+                    # Correlation with target (index-aligned)
+                    corr = np.nan
+                    try:
+                        xy = pd.concat([col, y_series], axis=1).dropna()
+                        if xy.shape[0] > 2:
+                            corr = xy.iloc[:, 0].corr(xy.iloc[:, 1])
+                    except Exception:
+                        corr = np.nan
+
+                    if pd.notna(corr) and abs(corr) >= leak_corr_threshold:
+                        if status == "OK":
+                            status = "REVIEW_LEAKAGE"
+                        else:
+                            status = status + "_AND_LEAKAGE"
+                        if status_detail:
+                            status_detail = status_detail + "; "
+                        status_detail = status_detail + "abs(corr_with_target) >= " + str(leak_corr_threshold)
+
+                    # Name-based review flags
+                    leak_name_patterns = ("target", "label", "bad_state", "default", "dpd", "days_past_due")
+                    id_patterns = ("id", "_id", "uuid", "guid", "account_id", "customer_id", "client_id", "agent_id")
+                    date_patterns = ("date", "dt_", "_dt", "_timestamp")
+
+                    lower_name = str(feat).lower()  
+                    if any(p in lower_name for p in leak_name_patterns):
+                        if status == "OK":
+                            status = "REVIEW_LEAKAGE"
+                        else:
+                            status = status + "_AND_LEAKAGE"
+                        if status_detail:
+                            status_detail = status_detail + "; "
+                        status_detail = status_detail + "Name suggests target/leakage"
+
+                    if any(p in lower_name for p in id_patterns):
+                        if status == "OK":
+                            status = "REVIEW_ID"
+                        else:
+                            status = status + "_AND_ID"
+                        if status_detail:
+                            status_detail = status_detail + "; "
+                        status_detail = status_detail + "Name suggests ID-like feature"
+
+                    if any(p in lower_name for p in date_patterns):
+                        if status == "OK":
+                            status = "REVIEW_DATE"
+                        else:
+                            status = status + "_AND_DATE"
+                        if status_detail:
+                            status_detail = status_detail + "; "
+                        status_detail = status_detail + "Name suggests time-like feature"
+
+        iv_audit_records.append(
+            {
+                "feature": feat,
+                "iv_before": iv_before,
+                "iv_after": iv_after,
+                "iv_uplift": iv_uplift,
+                "status": status,
+                "status_detail": status_detail,
+            }
+        )
+
+    iv_audit_df = pd.DataFrame(iv_audit_records).sort_values("iv_after", ascending=False).reset_index(drop=True)
+    return iv_audit_df
+
+
+# =========================
+# Run audit on IV table
+# =========================
+iv_audit_df = iv_audit(iv_table, X_train_trans, y_train)
+    
+print("IV Audit Summary:")
+print(iv_audit_df["status"].value_counts())
+    
+review_feats = iv_audit_df[iv_audit_df["status"] != "OK"]
+if not review_feats.empty:
+    print("\nFlagged / skipped (top 50 by iv_after):")
+    print(review_feats.head(50))
+
+
+for feat in iv_audit_df[iv_audit_df['status'] == "REVIEW_HIGH_IV"]["feature"]:
+    print(f"\nFeature: {feat}")
+    print(pd.crosstab(X_train_trans[feat], y_train))
+	
+# =========================
+# Select IV-filtered features
+# =========================
+ok_feats = set(iv_audit_df.loc[iv_audit_df["status"] == "OK", "feature"])
+
+iv_sorted_ok = (
+    iv_table[iv_table["feature"].isin(ok_feats)]
+    .sort_values("iv_after", ascending=False)
+)
+
+selected_features_iv = iv_sorted_ok.head(50)["feature"].tolist()
+
+# Make train/val column intersection explicit to avoid KeyError
+selected_features_iv = [c for c in selected_features_iv if (c in X_train_trans.columns and c in X_val_trans.columns)]
+
+X_train_iv_filtered = X_train_trans[selected_features_iv].copy()
+X_val_iv_filtered = X_val_trans[selected_features_iv].copy()
+
+print("\nSelected feature count:")
+print(len(selected_features_iv)) 
+
+
+
+def build_monotonic_map_top50_penalties30d(selected_features=None, default_value=0):
+    """
+    Monotonic constraints for: bad_state = 1 if future_penalties_30D > 0
+    +1 higher feature => higher penalty risk
+    -1 higher feature => lower penalty risk
+     0 unconstrained
+    """
+    monotone_map = {
+    "account_balance": 0,
+    "average_balance": 0,
+    "avg_balance_to_vol_3m_ratio": -1,
+    "balance_to_vol_3m_ratio": -1,
+    "cash_in_comm_1m": 0,
+    "cash_in_comm_3m": 0,
+    "cash_in_comm_6m": 0,
+    "cash_in_cust_1m": 0,
+    "cash_in_cust_3m": 0,
+    "cash_in_cust_6m": 0,
+    "cash_in_peers_1m": 0,
+    "cash_in_peers_3m": 0,
+    "cash_in_peers_6m": 0,
+    "cash_in_value_1m": 0,
+    "cash_in_value_3m": 0,
+    "cash_in_value_6m": 0,
+    "cash_in_vol_1m": 0,
+    "cash_in_vol_3m": 0,
+    "cash_in_vol_6m": 0,
+    "cash_in_vol_avg_monthly_3m": 0,
+    "cash_in_vol_avg_monthly_6m": 0,
+    "cash_in_vol_growth_1m_vs_prev2m": 0,
+    "cash_in_vol_growth_3m_vs_prev3m": 0,
+    "cash_in_vol_monthly_volatility_cv": 1,
+    "cash_in_vol_monthly_volatility_proxy": 1,
+    "cash_in_vol_share_1m_of_3m": 0,
+    "cash_in_vol_share_1m_of_6m": 0,
+    "cash_in_vol_share_3m_of_6m": 0,
+    "cash_out_comm_1m": 0,
+    "cash_out_comm_3m": 0,
+    "cash_out_comm_6m": 0,
+    "cash_out_cust_1m": 0,
+    "cash_out_cust_3m": 0,
+    "cash_out_cust_6m": 0,
+    "cash_out_peers_1m": 0,
+    "cash_out_peers_3m": 0,
+    "cash_out_peers_6m": 0,
+    "cash_out_value_1m": 0,
+    "cash_out_value_3m": 0,
+    "cash_out_value_6m": 0,
+    "cash_out_vol_1m": 0,
+    "cash_out_vol_3m": 0,
+    "cash_out_vol_6m": 0,
+    "cash_out_vol_avg_monthly_6m": 0,
+    "cash_out_vol_growth_1m_vs_prev2m": 0,
+    "cash_out_vol_growth_3m_vs_prev3m": 0,
+    "cash_out_vol_monthly_volatility_cv": 1,
+    "cash_out_vol_monthly_volatility_proxy": 1,
+    "cash_out_vol_share_1m_of_3m": 0,
+    "cash_out_vol_share_1m_of_6m": 0,
+    "commission": 0,
+    "commission_per_vol_3m": 0,
+    "cust_1m": 0,
+    "cust_3m": 0,
+    "cust_6m": 0,
+    "disbursement_vol_1m": 0,
+    "disbursement_vol_3m": 0,
+    "disbursement_vol_m1": 0,
+    "net_cash_flow_3m": -1,
+    "payment_cust_6m": 0,
+    "payment_intensity_ratio": 0,
+    "payment_peers_1m": 0,
+    "payment_peers_6m": 0,
+    "payment_vol_6m": 0,
+    "payment_vol_avg_monthly_6m": 0,
+    "payment_vol_growth_1m_vs_prev2m": 0,
+    "payment_vol_growth_3m_vs_prev3m": 0,
+    "payment_vol_monthly_volatility_cv": 1,
+    "payment_vol_monthly_volatility_proxy": 1,
+    "payment_vol_share_1m_of_3m": 0,
+    "payment_vol_share_1m_of_6m": 0,
+    "peer_dependency_ratio": 0,
+    "repayment_gap_days": 1,
+    "vol_1m": 0,
+    "vol_3m": 0,
+    "vol_3m_if_active": 0,
+    "vol_6m": 0,
+    "vol_avg_monthly_3m": 0,
+    "vol_avg_monthly_6m": 0,
+    "vol_growth_1m_vs_prev2m": 0,
+    "vol_growth_3m_vs_prev3m": 0,
+    "vol_monthly_volatility_cv": 1,
+    "vol_monthly_volatility_proxy": 1,
+    "vol_share_1m_of_3m": 0,
+    "vol_share_1m_of_6m": 0,
+}
+    if selected_features is None:
+        return monotone_map
+
+    # build from selected_features so nothing can vanish.
+    # Any feature not in monotone_map gets default_value (0 = unconstrained).
+    monotone_filtered = {feat: monotone_map.get(feat, default_value) for feat in selected_features}
+    return monotone_filtered
+
+def resolve_feature_conflict(f1, f2, iv_map, monotonic_map, mono_iv_tolerance=0.05):
+    """
+    Decide which feature to KEEP when correlation is high.
+
+    Policy:
+    - If exactly one feature is monotonic-constrained, keep it unless it's worse by more than mono_iv_tolerance in IV.
+    - Otherwise keep higher-IV.
+    - Final tie-breaker is alphabetical for determinism.
+
+    mono_iv_tolerance:
+    Allow monotonic feature to be up to this much IV worse and still keep it.
+    """
+
+    def safe_iv(feat_name):
+        iv_val = iv_map.get(feat_name, None)
+        if iv_val is None or (isinstance(iv_val, float) and np.isnan(iv_val)):
+            return float("-inf")
+        return float(iv_val)
+
+    def safe_mono(feat_name):
+        mono_val = monotonic_map.get(feat_name, 0)
+        try:
+            mono_val = int(mono_val)
+        except Exception:
+            mono_val = 0
+        return mono_val
+
+    iv1 = safe_iv(f1)
+    iv2 = safe_iv(f2)
+    mono1 = safe_mono(f1)
+    mono2 = safe_mono(f2)
+
+    mono1_is = mono1 != 0
+    mono2_is = mono2 != 0
+
+    if mono1_is and not mono2_is:
+        if iv1 + mono_iv_tolerance >= iv2:
+            return f1
+        return f2
+
+    if mono2_is and not mono1_is:
+        if iv2 + mono_iv_tolerance >= iv1:
+            return f2
+        return f1
+
+    if iv1 > iv2:
+        return f1
+    if iv2 > iv1:
+        return f2
+
+    return f1 if f1 <= f2 else f2
+
+def spearman_set_monotone_direction_safe(
+    X_train,
+    y_train,
+    iv_table=None,
+    monotonic_map=None,
+    min_abs_target_spearman=0.05,
+    override_nonzero_base=True
+):
+    """
+    
+      - Keep ALL features in X_train
+      - Compute spearman(feature, target) to set direction:
+          +1 if corr >= min_abs_target_spearman
+          -1 if corr <= -min_abs_target_spearman
+           0 otherwise (or if corr is )
+      - If monotonic_map is provided, optionally keep its non-zero values (override_nonzero_base=True)
+
+    Returns:
+      final_monotone_map: dict(feature -> -1/0/+1) aligned to ALL columns in X_train
+      spearman_target: pd.Series of raw spearman correlations (signed)
+      spearman_log_df: DataFrame with feature, spearman, abs_spearman, iv_after, base_mono, final_mono
+    """
+    feat_list = list(X_train.columns)
+
+    # Safe IV map (optional; used only for logging)
+    iv_map = {}
+    if iv_table is not None:
+        iv_tbl = iv_table.copy()
+        if ("feature" in iv_tbl.columns) and ("iv_after" in iv_tbl.columns):
+            iv_tbl = iv_tbl.drop_duplicates(subset=["feature"], keep="last")
+            iv_map = iv_tbl.set_index("feature")["iv_after"].to_dict()
+
+    # Base monotone map (optional)
+    base_map = monotonic_map if monotonic_map is not None else {}
+
+    # Compute target spearman for each feature (signed)
+    spearman_vals = {}
+    y_ser = pd.Series(y_train)
+
+    for col in feat_list:
+        x_ser = pd.Series(X_train[col])
+        cval = x_ser.corr(y_ser, method="spearman")
+        spearman_vals[col] = cval
+
+    spearman_target = pd.Series(spearman_vals).replace([np.inf, -np.inf], np.nan)
+
+    # Convert to monotone directions
+    spearman_suggested = {}
+    for col in feat_list:
+        cval = spearman_target.get(col)
+        if pd.isna(cval) or abs(cval) < float(min_abs_target_spearman):
+            spearman_suggested[col] = 0
+        else:
+            spearman_suggested[col] = 1 if cval > 0 else -1
+
+    # Merge with base monotonic_map: keep base non-zero values if requested
+    final_monotone_map = {}
+    for col in feat_list:
+        base_val = int(base_map.get(col, 0))
+        if override_nonzero_base and base_val != 0:
+            final_monotone_map[col] = base_val
+        else:
+            final_monotone_map[col] = int(spearman_suggested.get(col, 0))
+
+    # Build log for debugging / transparency
+    log_rows = []
+    for col in feat_list:
+        cval = spearman_target.get(col)
+        abs_cval = np.nan if pd.isna(cval) else abs(float(cval))
+        log_rows.append({
+            "feature": col,
+            "spearman_target": np.nan if pd.isna(cval) else float(cval),
+            "abs_spearman_target": abs_cval,
+            "iv_after": float(iv_map.get(col, np.nan)) if len(iv_map) else np.nan,
+            "base_mono": int(base_map.get(col, 0)),
+            "spearman_mono": int(spearman_suggested.get(col, 0)),
+            "final_mono": int(final_monotone_map.get(col, 0)),
+        })
+
+    spearman_log_df = pd.DataFrame(log_rows).sort_values(
+        "abs_spearman_target", ascending=False, na_position="last"
+    )
+
+    return final_monotone_map, spearman_target, spearman_log_df
+
+
+def _psi_from_bins(expected, actual, eps=1e-6, assume_proportions_if_sum_close_to_1=True):
+    expected = np.asarray(expected, dtype=float)
+    actual = np.asarray(actual, dtype=float)
+
+    if expected.shape != actual.shape:
+        raise ValueError(
+            "expected and actual must have same shape. Got "
+            + str(expected.shape) + " and " + str(actual.shape)
+        )
+
+    # Replace NaNs/infs and enforce non-negative
+    expected = np.nan_to_num(expected, nan=0.0, posinf=0.0, neginf=0.0)
+    actual   = np.nan_to_num(actual,   nan=0.0, posinf=0.0, neginf=0.0)
+
+    expected = np.maximum(expected, 0.0)
+    actual   = np.maximum(actual, 0.0)
+
+    exp_sum = float(expected.sum())
+    act_sum = float(actual.sum())
+
+    # Normalize counts to proportions (unless already ~1)
+    if exp_sum > 0:
+        if (not assume_proportions_if_sum_close_to_1) or (abs(exp_sum - 1.0) > 1e-3):
+            expected = expected / exp_sum
+
+    if act_sum > 0:
+        if (not assume_proportions_if_sum_close_to_1) or (abs(act_sum - 1.0) > 1e-3):
+            actual = actual / act_sum
+
+    expected = np.clip(expected, eps, None)
+    actual   = np.clip(actual, eps, None)
+
+    return float(np.sum((actual - expected) * np.log(actual / expected)))
+def compute_feature_psi(train_series: pd.Series, val_series: pd.Series, n_bins: int = 10, include_na_bin: bool = True):
+    """
+    PSI using quantile bins from TRAIN only.
+    Robust to val values outside train range.
+    Optionally includes NaNs as their own bin.
+    """
+   
+    train_vals_raw = pd.to_numeric(train_series, errors="coerce")
+    val_vals_raw = pd.to_numeric(val_series, errors="coerce")
+
+    if include_na_bin:
+        train_na = float(train_vals_raw.isna().mean())
+        val_na = float(val_vals_raw.isna().mean())
+        train_vals = train_vals_raw.dropna()
+        val_vals = val_vals_raw.dropna()
+    else:
+        train_vals = train_vals_raw.dropna()
+        val_vals = val_vals_raw.dropna()
+        train_na = None
+        val_na = None
+
+    # If there are no non-missing values in train, PSI is purely missingness drift (if requested)
+    if len(train_vals) == 0:
+        if include_na_bin and train_na is not None and val_na is not None:
+            return _psi_from_bins(np.array([1.0 - train_na, train_na]), np.array([1.0 - val_na, val_na]))
+        return np.nan
+
+    # If non-missing train is constant-ish, PSI is either 0 (no missing bin) or missingness drift only
+    if train_vals.nunique(dropna=True) <= 1:
+        if include_na_bin and train_na is not None and val_na is not None:
+            return _psi_from_bins(np.array([1.0 - train_na, train_na]), np.array([1.0 - val_na, val_na]))
+        return 0.0
+
+    # Use effective bins based on uniqueness to reduce duplicate quantiles
+    uniq_cnt = int(train_vals.nunique(dropna=True))
+    n_bins_eff = int(min(n_bins, uniq_cnt))
+    if n_bins_eff < 2:
+        if include_na_bin and train_na is not None and val_na is not None:
+            return _psi_from_bins(np.array([1.0 - train_na, train_na]), np.array([1.0 - val_na, val_na]))
+        return 0.0
+
+    try:
+        q_grid = np.linspace(0, 1, n_bins_eff + 1)
+        q_vals = np.quantile(train_vals.values, q=q_grid)
+        bins_core = np.unique(q_vals)
+    except Exception:
+        return np.nan
+
+    # If ties collapse bins too much, fall back to missingness-only PSI if applicable
+    if len(bins_core) <= 2:
+        if include_na_bin and train_na is not None and val_na is not None:
+            return _psi_from_bins(np.array([1.0 - train_na, train_na]), np.array([1.0 - val_na, val_na]))
+        return 0.0
+
+    # Build histogram edges
+    bins = np.concatenate(([-np.inf], bins_core[1:-1], [np.inf]))
+
+    train_counts, _ = np.histogram(train_vals.values, bins=bins)
+    val_counts, _ = np.histogram(val_vals.values, bins=bins)
+
+    train_sum = float(train_counts.sum())
+    val_sum = float(val_counts.sum())
+
+    train_dist = train_counts / train_sum if train_sum > 0 else np.zeros_like(train_counts, dtype=float)
+    val_dist = val_counts / val_sum if val_sum > 0 else np.zeros_like(val_counts, dtype=float)
+
+    if include_na_bin and train_na is not None and val_na is not None:
+        train_dist = np.append(train_dist * (1.0 - train_na), train_na)
+        val_dist = np.append(val_dist * (1.0 - val_na), val_na)
+
+    return _psi_from_bins(train_dist, val_dist)
+
+
+def psi_validation_with_thin_file(
+    X_train: pd.DataFrame,
+    X_val: pd.DataFrame,
+    thin_file_flag_col: str = "thin_file_flag",
+    n_bins: int = 10,
+    psi_drop_threshold: float = 0.25,
+    psi_monitor_threshold: float = 0.10,
+    nan_psi_decision: str = "MONITOR",
+):
+    """
+    Computes PSI:
+    - Overall
+    - Thin-file only
+    - Thick-file only
+
+    Returns a PSI decision table
+    """
+
+
+    # Register psi_validation_with_thin_file (fix indentation) and make it robust to constant thin_file_flag
+
+    # Update psi_validation_with_thin_file to never use float("") placeholders and to handle degenerate thin flag safely
+
+    results = []
+
+    # If thin flag missing in either dataset, fall back to overall PSI only
+    has_flag = (thin_file_flag_col in X_train.columns) and (thin_file_flag_col in X_val.columns)
+    if not has_flag:
+        feature_cols = [c for c in X_train.columns if c in X_val.columns]
+        for col in feature_cols:
+            psi_overall = compute_feature_psi(X_train[col], X_val[col], n_bins)
+
+            if pd.isna(psi_overall):
+                decision = nan_psi_decision
+            elif psi_overall > psi_drop_threshold:
+                decision = "DROP"
+            elif psi_overall >= psi_monitor_threshold:
+                decision = "MONITOR"
+            else:
+                decision = "KEEP"
+
+            results.append({
+                "feature": col,
+                "psi_overall": float(psi_overall) if pd.notna(psi_overall) else np.nan,
+                "psi_thin_file": np.nan,
+                "psi_thick_file": np.nan,
+                "decision": decision
+            })  
+        psi_df = pd.DataFrame(results)
+        decision_rank_map = {"DROP": 0, "MONITOR": 1, "KEEP": 2}
+        psi_df["decision_rank"] = psi_df["decision"].map(decision_rank_map).fillna(99)
+        psi_df = psi_df.sort_values(by=["decision_rank", "psi_overall"], ascending=[True, False]).drop(columns=["decision_rank"]).reset_index(drop=True)
+
+        psi_df["psi_overall"] = psi_df["psi_overall"].round(4)
+        return psi_df
+
+    # Thin flag present: compute overall + subgroup PSIs when subgroup exists in BOTH splits
+    feature_cols = [c for c in X_train.columns if (c != thin_file_flag_col and c in X_val.columns)]
+
+    train_flag = pd.to_numeric(X_train[thin_file_flag_col], errors="coerce").fillna(0)
+    val_flag = pd.to_numeric(X_val[thin_file_flag_col], errors="coerce").fillna(0)
+
+    train_thin_mask = (train_flag == 1)
+    val_thin_mask = (val_flag == 1)
+    train_thick_mask = ~train_thin_mask
+    val_thick_mask = ~val_thin_mask
+
+    train_has_thin = bool(train_thin_mask.any())
+    val_has_thin = bool(val_thin_mask.any())
+    train_has_thick = bool(train_thick_mask.any())
+    val_has_thick = bool(val_thick_mask.any())
+
+    for col in feature_cols:
+        psi_overall = compute_feature_psi(X_train[col], X_val[col], n_bins)
+
+        psi_thin = np.nan
+        if train_has_thin and val_has_thin:
+            psi_thin = compute_feature_psi(X_train.loc[train_thin_mask, col], X_val.loc[val_thin_mask, col], n_bins)
+
+        psi_thick = np.nan
+        if train_has_thick and val_has_thick:
+            psi_thick = compute_feature_psi(X_train.loc[train_thick_mask, col], X_val.loc[val_thick_mask, col], n_bins)
+
+        psi_vals_for_drop = []
+        if pd.notna(psi_overall):
+            psi_vals_for_drop.append(float(psi_overall))
+        if pd.notna(psi_thin):
+            psi_vals_for_drop.append(float(psi_thin))
+        if pd.notna(psi_thick):
+            psi_vals_for_drop.append(float(psi_thick))
+
+        if len(psi_vals_for_drop) == 0:
+            decision = nan_psi_decision
+        elif max(psi_vals_for_drop) > psi_drop_threshold:
+            decision = "DROP"
+        elif (pd.notna(psi_overall) and psi_overall >= psi_monitor_threshold) or (pd.notna(psi_thin) and psi_thin >= psi_monitor_threshold) or (pd.notna(psi_thick) and psi_thick >= psi_monitor_threshold):
+            decision = "MONITOR"
+        else:
+            decision = "KEEP"
+
+        results.append({
+            "feature": col,
+            "psi_overall": float(psi_overall) if pd.notna(psi_overall) else np.nan,
+            "psi_thin_file": float(psi_thin) if pd.notna(psi_thin) else np.nan,
+            "psi_thick_file": float(psi_thick) if pd.notna(psi_thick) else np.nan,
+            "decision": decision
+        })
+
+    psi_df = pd.DataFrame(results)
+    decision_rank_map = {"DROP": 0, "MONITOR": 1, "KEEP": 2}
+    psi_df["decision_rank"] = psi_df["decision"].map(decision_rank_map).fillna(99)
+    psi_df = psi_df.sort_values(by=["decision_rank", "psi_overall", "psi_thin_file"], ascending=[True, False, False]).drop(columns=["decision_rank"]).reset_index(drop=True)
+
+    psi_df["psi_overall"] = psi_df["psi_overall"].round(4)
+    psi_df["psi_thin_file"] = psi_df["psi_thin_file"].round(4)
+    psi_df["psi_thick_file"] = psi_df["psi_thick_file"].round(4)
+
+    return psi_df
+
+print("psi_validation_with_thin_file updated")
+
+
+# Step 0: Base monotone map for the IV-selected features (ensures no feature vanishes)
+base_mono_map = build_monotonic_map_top50_penalties30d(X_train_iv_filtered.columns)
+
+missing_in_base = [c for c in X_train_iv_filtered.columns if c not in build_monotonic_map_top50_penalties30d()]
+print(len(X_train_iv_filtered.columns))
+print(len(base_mono_map))
+print(len(missing_in_base))
+missing_in_base = [c for c in X_train_iv_filtered.columns if c not in build_monotonic_map_top50_penalties30d()]
+print(missing_in_base)
+
+
+
+# Step 1: Spearman : set monotone direction only, do NOT drop features
+monotonic_map_spearman, spearman_target, spearman_log_df = spearman_set_monotone_direction_safe(
+    X_train=X_train_iv_filtered,
+    y_train=y_train,
+    iv_table=iv_table,                 # optional, for logging only
+    monotonic_map=base_mono_map,        # curated base map
+    min_abs_target_spearman=0.05,       # tune this
+    override_nonzero_base=True          # keep curated non-zero constraints
+)
+
+# Keep features = IV-selected (no spearman pruning)
+kept_features_spearman = list(X_train_iv_filtered.columns)
+
+# Align to validation columns (guard)
+missing_in_val = [c for c in kept_features_spearman if c not in X_val_iv_filtered.columns]
+kept_features_spearman = [c for c in kept_features_spearman if c in X_val_iv_filtered.columns]
+
+# Step 2: PSI testing (validation window, thin-file separated)
+X_train_final = X_train_iv_filtered[kept_features_spearman].copy()
+X_val_final = X_val_iv_filtered[kept_features_spearman].copy()
+
+# Add thin_file_flag for PSI segmentation (index-aligned, not a model feature)
+X_train_final["thin_file_flag"] = thin_file_flag_train.reindex(X_train_final.index)
+X_val_final["thin_file_flag"] = thin_file_flag_val.reindex(X_val_final.index)
+
+psi_report = psi_validation_with_thin_file(
+    X_train_final,
+    X_val_final,
+    thin_file_flag_col="thin_file_flag",
+    n_bins=10,
+    psi_drop_threshold=0.25
+)
+
+# Step 3: Freeze features for PD modeling (exclude DROPs)
+kept_features_final = psi_report.loc[psi_report["decision"] != "DROP", "feature"].tolist()
+
+# Step 4: Freeze final matrices (carry thin_file_flag alongside, but keep it out of model)
+X_train_final = X_train_final[kept_features_final + ["thin_file_flag"]].copy()
+X_val_final = X_val_final[kept_features_final + ["thin_file_flag"]].copy()
+
+# Monotone constraints aligned to final model features
+# IMPORTANT: use the Spearman-updated map so directions carry through
+monotone_constraints = [int(monotonic_map_spearman.get(c, 0)) for c in kept_features_final]
+
+# Optional: model matrices to avoid accidentally using thin_file_flag
+X_train_model = X_train_final[kept_features_final]
+X_val_model = X_val_final[kept_features_final]
+
+len(monotonic_map_spearman)
+spearman_log_df.loc[spearman_log_df["final_mono"] != 0, ["feature", "spearman_target", "base_mono", "final_mono", "iv_after"]].head(25)
+
+
+def generate_monotonic_constraints_with_thin_interactions(
+    df,
+    feature_list,
+    monotonic_map,
+    thin_file_flag_col="thin_file_flag",
+    phase_2_2_prefixes=None,
+    interaction_features=None,              # NEW: pass a fixed list to force consistency
+    interaction_suffix="_thin",
+    interaction_constraint_mode="zero",     # "zero", "flip", "force_negative"
+    disable_if_thin_constant=True
+):
+    if phase_2_2_prefixes is None:
+        phase_2_2_prefixes = ["repayment_", "penalties_", "dpd_", "bad_", "payment_"]
+
+    base_constraints = [int(monotonic_map.get(f, 0)) for f in feature_list]
+    feature_list_out = list(feature_list)
+    constraints_list = list(base_constraints)
+
+    if interaction_features is None:
+        interaction_features = [f for f in feature_list if any(f.startswith(p) for p in phase_2_2_prefixes)]
+    else:
+        interaction_features = [f for f in interaction_features if f in feature_list]
+
+    if df is None:
+        xgb_constraints_arr = np.array(constraints_list, dtype=int)
+        xgb_constraints_str = "(" + ",".join([str(int(v)) for v in xgb_constraints_arr]) + ")"
+        return {
+            "constraints_list": constraints_list,
+            "lgb_constraints": list(constraints_list),
+            "xgb_constraints_arr": xgb_constraints_arr,
+            "xgb_constraints_str": xgb_constraints_str,
+            "df_out": None,
+            "feature_list_out": feature_list_out,
+            "interaction_features": interaction_features
+        }
+
+    df_out = df.copy()
+
+    if thin_file_flag_col not in df_out.columns or len(interaction_features) == 0:
+        xgb_constraints_arr = np.array(constraints_list, dtype=int)
+        xgb_constraints_str = "(" + ",".join([str(int(v)) for v in xgb_constraints_arr]) + ")"
+        return {
+            "constraints_list": constraints_list,
+            "lgb_constraints": list(constraints_list),
+            "xgb_constraints_arr": xgb_constraints_arr,
+            "xgb_constraints_str": xgb_constraints_str,
+            "df_out": df_out,
+            "feature_list_out": feature_list_out,
+            "interaction_features": interaction_features
+        }
+
+    thin_vals_num = pd.to_numeric(df_out[thin_file_flag_col], errors="coerce")
+
+    if disable_if_thin_constant:
+        thin_unique_cnt = int(pd.Series(thin_vals_num).nunique(dropna=False))
+        if thin_unique_cnt < 2:
+            xgb_constraints_arr = np.array(constraints_list, dtype=int)
+            xgb_constraints_str = "(" + ",".join([str(int(v)) for v in xgb_constraints_arr]) + ")"
+            return {
+                "constraints_list": constraints_list,
+                "lgb_constraints": list(constraints_list),
+                "xgb_constraints_arr": xgb_constraints_arr,
+                "xgb_constraints_str": xgb_constraints_str,
+                "df_out": df_out,
+                "feature_list_out": feature_list_out,
+                "interaction_features": []  # disabled
+            }
+
+    for feat_name in interaction_features:
+        inter_name = feat_name + interaction_suffix
+
+        if feat_name in df_out.columns:
+            df_out[inter_name] = pd.to_numeric(df_out[feat_name], errors="coerce") * thin_vals_num
+        else:
+            df_out[inter_name] = 0.0
+
+        feature_list_out.append(inter_name)
+
+        if interaction_constraint_mode == "force_negative":
+            constraints_list.append(-1)
+        elif interaction_constraint_mode == "flip":
+            constraints_list.append(-int(monotonic_map.get(feat_name, 0)))
+        else:
+            constraints_list.append(0)
+
+    lgb_constraints = list(constraints_list)
+    xgb_constraints_arr = np.array(constraints_list, dtype=int)
+    xgb_constraints_str = "(" + ",".join([str(int(v)) for v in xgb_constraints_arr]) + ")"
+
+    return {
+        "constraints_list": constraints_list,
+        "lgb_constraints": lgb_constraints,
+        "xgb_constraints_arr": xgb_constraints_arr,
+        "xgb_constraints_str": xgb_constraints_str,
+        "df_out": df_out,
+        "feature_list_out": feature_list_out,
+        "interaction_features": interaction_features
+    }
+# --- Usage dict-return function + safe alignment
+kept_features_final_model = [c for c in kept_features_final if c != "thin_file_flag"]  
+out_tr = generate_monotonic_constraints_with_thin_interactions(
+    df=X_train_final,
+    feature_list=kept_features_final_model,
+    monotonic_map=monotonic_map_spearman,
+    thin_file_flag_col="thin_file_flag",
+    interaction_constraint_mode="zero",
+    disable_if_thin_constant=True
+)
+
+out_va = generate_monotonic_constraints_with_thin_interactions(
+    df=X_val_final,
+    feature_list=kept_features_final_model,
+    monotonic_map=monotonic_map_spearman,
+    thin_file_flag_col="thin_file_flag",
+    interaction_features=out_tr["interaction_features"],   # key change
+    interaction_constraint_mode="zero",
+    disable_if_thin_constant=True
+)
+
+assert out_tr["feature_list_out"] == out_va["feature_list_out"]
+
+X_train_inter = out_tr["df_out"]
+X_val_inter = out_va["df_out"]
+feature_list_inter = out_tr["feature_list_out"]
+
+Xtr = X_train_inter.reindex(columns=feature_list_inter)
+Xva = X_val_inter.reindex(columns=feature_list_inter).fillna(0)
+
+thin_tr = X_train_inter["thin_file_flag"].copy()
+thin_va = X_val_inter["thin_file_flag"].copy()
+
+lgb_constraints = out_tr["lgb_constraints"]
+xgb_constraints_arr = out_tr["xgb_constraints_arr"]
+xgb_constraints_str = out_tr["xgb_constraints_str"]
+
+assert len(feature_list_inter) == len(lgb_constraints)
+assert Xtr.shape[1] == len(lgb_constraints)
+assert Xva.shape[1] == len(lgb_constraints)
+# Minimal hardening (drop-in)
+assert "thin_file_flag" not in feature_list_inter, "[FATAL] thin_file_flag is in model feature list"
+assert Xtr.columns.tolist() == Xva.columns.tolist(), "[FATAL] Train/val column order mismatch after reindex" 
+
+
+
+print("LightGBM constraints:", lgb_constraints)
+print("XGBoost constraints:", xgb_constraints_arr)
+print("XGBoost xgb_constraints_str:", xgb_constraints_str)
+print("Final training feature count:", len(feature_list_inter))
+
+assert list(Xtr.columns) == list(feature_list_inter)
+
+pd.DataFrame({
+    "pos": range(1, len(feature_list_inter) + 1),
+    "feature": feature_list_inter,
+    "constraint": lgb_constraints
+})
