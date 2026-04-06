@@ -1,0 +1,257 @@
+def build_ensemble_label(row):
+    gmm_label = row["cluster_id_gmm"]
+    tier_label = row["cluster_hdb_500"]
+
+    if pd.isna(gmm_label) or pd.isna(tier_label):
+        return "ENSEMBLE_MISSING"
+
+    return "GMM_" + str(gmm_label) + "__" + str(tier_label)
+
+df_v2["ensemble_cluster"] = df_v2.apply(build_ensemble_label, axis=1)
+
+df_v2["ensemble_cluster"] = df_v2["ensemble_cluster"].replace(
+    {"ENSEMBLE_MISSING": "Dormant_Cluster_kmeans1"}
+)
+
+print(df_v2["ensemble_cluster"].value_counts().head(10))
+
+df_v2["ensemble_cluster"].nunique()
+
+df_v2["ensemble_cluster"].value_counts()
+
+ensemble_profile = (
+    df_v2
+#    .groupby("ensemble_cluster")[feature_cols]
+    .groupby("ensemble_cluster")[profiling_cols]
+    .mean()
+    .round(2)
+    .sort_index()
+)
+
+print(ensemble_profile)
+
+ensemble_profile.to_csv(os.path.join(OUTPUT_DIR,"ensemble_cluster_profiling.csv"), index=True)
+print("Clustered data saved to:", OUTPUT_DIR)
+
+ensemble_to_segment_8 = {
+    # 1. Dormant
+    "Dormant_Cluster_kmeans1": "1_Dormant",
+
+    # 2. Emerging
+    "GMM_1__Emerging / Low Activity": "2_Emerging",
+
+    # 3. Light / Irregular usage
+    "GMM_3__Noise / Irregular": "3_Light_Irregular",
+    "GMM_4__Noise / Irregular": "3_Light_Irregular",
+    "GMM_5__Noise / Irregular": "3_Light_Irregular",
+    "GMM_7__Noise / Irregular": "3_Light_Irregular",
+
+    # 4. Voucher-heavy irregulars
+    "GMM_2__Noise / Irregular": "4_Irregular_Active",
+    "GMM_2__Other HDB Segment": "4_Irregular_Active",
+
+    # 5. Mid Silver (moderate actives)
+    "GMM_3__Silver Strong": "5_Mid_Silver",
+
+    # 6. Mid Bronze+ (strong mid-high actives)
+    "GMM_3__Bronze Active": "6_Mid_BronzePlus",
+    "GMM_3__Developing Active": "6_Mid_BronzePlus",
+    "GMM_3__Other HDB Segment": "6_Mid_BronzePlus",
+    "GMM_6__Developing Active": "6_Mid_BronzePlus",
+    "GMM_6__Other HDB Segment": "6_Mid_BronzePlus",
+    "GMM_6__Noise / Irregular": "6_Mid_BronzePlus",
+
+    # 7. High Power
+    "GMM_5__Platinum Power": "7_High_Power",
+    "GMM_5__Silver Strong": "7_High_Power",
+
+    # 8. Ultra Power
+    "GMM_0__Platinum Power": "8_Ultra_Power",
+    "GMM_5__Gold Power": "8_Ultra_Power",
+}
+
+df_v2["final_segment_8"] = df_v2["ensemble_cluster"].map(ensemble_to_segment_8)
+df_v2["final_segment_8"] = df_v2["final_segment_8"].fillna("Unmapped_ensemble")
+
+# Segment counts
+segment_counts_8 = (
+    df_v2["final_segment_8"]
+    .value_counts(dropna=False)
+    .sort_index()
+)
+print(segment_counts_8)
+
+# Segment profiles (mean of profiling_cols)
+segment_profile_8 = (
+    df_v2
+    .groupby("final_segment_8")[profiling_cols]
+    .mean()
+    .round(2)
+    .sort_index()
+)
+print(segment_profile_8)
+
+df_v2["final_segment_7"] = df_v2["final_segment_8"]
+
+# Merge the tiny Mid_Silver into Mid_BronzePlus (renamed to Mid_Active)
+df_v2.loc[df_v2["final_segment_7"] == "5_Mid_Silver", "final_segment_7"] = "6_Mid_BronzePlus"  # Optionally rename 6_Mid_BronzePlus to 5_Mid_Active and renumber the higher ones
+rename_map_7 = {
+    "1_Dormant": "1_Dormant",
+    "2_Emerging": "2_Emerging",
+    "3_Light_Irregular": "3_Light_Irregular",
+    "4_Voucher_Heavy": "4_Voucher_Heavy",
+    "6_Mid_BronzePlus": "5_Mid_Active",
+    "7_High_Power": "6_High_Power",
+    "8_Ultra_Power": "7_Ultra_Power",
+}
+
+df_v2["final_segment_7"] = df_v2["final_segment_7"].replace(rename_map_7)
+
+# To change
+
+df_v2["final_segment_7"] = df_v2["final_segment_7"].replace(
+    {"4_Voucher_Heavy": "4_Irregular_Active"}
+)
+
+segment_counts_7 = df_v2["final_segment_7"].value_counts().sort_index()
+print(segment_counts_7)
+
+segment_profile_7 = (
+    df_v2
+    .groupby("final_segment_7")[profiling_cols]
+    .mean()
+    .round(2)
+    .sort_index()
+)
+print(segment_profile_7)
+
+# Columns that were log1p-transformed earlier and should be brought back
+inverse_log_cols = [
+    "account_balance",
+    "average_balance",
+    "commission",
+    "cash_in_value_1m",
+    "cash_out_value_1m",
+    "payment_value_1m",
+    "total_peers_6m",
+    "total_customers_6m",
+]
+
+# 1) Compute mean profile per ensemble_cluster (still in log space for some cols)
+ensemble_profile = (
+     df_v2
+    .groupby("final_segment_7")[profiling_cols]
+    .mean()
+    .sort_index()
+)
+
+# 2) Create a copy and inverse the log1p for selected columns
+ensemble_profile_abs = ensemble_profile.copy()
+
+for col in inverse_log_cols:
+    if col in ensemble_profile_abs.columns:
+        ensemble_profile_abs[col] = np.expm1(ensemble_profile_abs[col])
+
+# 3) Round for readability
+ensemble_profile_abs = ensemble_profile_abs.round(4)
+
+print(ensemble_profile_abs)
+print(ensemble_profile)
+
+
+# -------------------------------------------------------------------
+# Compare GMM_0_* , GMM_1_* AND GMM_2_*
+# -------------------------------------------------------------------
+
+# Use all columns as numeric (they are all numeric in this profile table)
+prof_numeric_cols = ensemble_profile_abs.columns
+
+# Standardize columns (z-scores)
+prof_scaler = StandardScaler()
+z_values = prof_scaler.fit_transform(ensemble_profile_abs[prof_numeric_cols])
+
+# Put z-scores into a DataFrame aligned with profile_df
+z_df = pd.DataFrame(z_values, index=ensemble_profile_abs.index, columns=prof_numeric_cols)
+
+# Initialize labels DataFrame with z-score values
+prof_labels_df = z_df.copy()
+
+# Classification rules:
+#   High if z > 0.5
+#   Low  if z < -0.5
+#   Avg  otherwise
+prof_labels_df[z_df > 0.5] = 1
+prof_labels_df[z_df < -0.5] = -1
+prof_labels_df[(z_df >= -0.5) & (z_df <= 0.5)] = 0
+
+# Map numeric codes to textual labels
+label_map = {1: "High", 0: "Avg", -1: "Low"}
+prof_comparison_df = prof_labels_df.replace(label_map)
+
+# Optional: inspect the first few rows
+print(prof_comparison_df.head())
+
+# Key metric groups
+value_metrics = ['commission', 'cash_out_value_3m', 'cash_in_value_6m', 'payment_value_3m']
+volume_metrics = ['cash_out_vol_3m', 'voucher_vol_3m', 'payment_vol_3m']
+commission_ratio_metrics = ['commission_per_value_3m', 'commission_per_value_6m']
+
+profile_df_num = ensemble_profile_abs.copy()
+
+# 1) Overall monetary value
+profile_df_num['overall_value_score'] = profile_df_num[value_metrics].sum(axis=1)
+
+# 2) Commission efficiency (average of commission_per_value)
+profile_df_num['commission_efficiency_score'] = profile_df_num[commission_ratio_metrics].mean(axis=1)
+
+# 3) Activity intensity (overall transaction volumes)
+profile_df_num['activity_intensity_score'] = profile_df_num[volume_metrics].sum(axis=1)
+
+# 4) Normalize scores to 0–1
+for col in ['overall_value_score', 'commission_efficiency_score', 'activity_intensity_score']:
+    col_min = profile_df_num[col].min()
+    col_max = profile_df_num[col].max()
+    if col_max > col_min:
+        profile_df_num[col + '_norm'] = (profile_df_num[col] - col_min) / (col_max - col_min)
+    else:
+        profile_df_num[col + '_norm'] = 0.0
+
+# 5) Composite score (weights: value 50%, activity 30%, efficiency 20%)
+profile_df_num['composite_score'] = (
+    0.5 * profile_df_num['overall_value_score_norm'] +
+    0.3 * profile_df_num['activity_intensity_score_norm'] +
+    0.2 * profile_df_num['commission_efficiency_score_norm']
+)
+
+ranking_df = profile_df_num[
+    ['overall_value_score', 'activity_intensity_score', 'commission_efficiency_score', 'composite_score']
+].sort_values('composite_score', ascending=False)
+
+print(ranking_df)
+
+def map_to_7_segments(ensemble):
+    if ensemble in ["GMM_0__Platinum Power"]:
+        return "Elite Core - Platinum"
+    if ensemble in ["GMM_0__Gold Power"]:
+        return "Elite Core - Gold"
+    if ensemble in [
+        "GMM_5__Gold Power",
+        "GMM_5__Silver Strong",
+        "GMM_5__Platinum Power",
+        "GMM_5__Other HDB Segment",
+    ]:
+        return "Elite Variant - Gold/Silver"
+    if ensemble in ["GMM_3__Other HDB Segment"]:
+        return "Strong Emerging"
+    if ensemble in ["GMM_3__Bronze Developing"]:
+        return "Bronze Developing"
+    if ensemble in ["GMM_4__Other HDB Segment"]:
+        return "Low Active / Occasional"
+    # Everything else (noise, very small tails)
+    return "Irregular / Dormant / Special"
+
+v2_X_with_clusters["segment_7"] = v2_X_with_clusters["ensemble_cluster"].apply(map_to_7_segments)
+
+v2_X_with_clusters["segment_7"].value_counts()
+
+

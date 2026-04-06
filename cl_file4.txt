@@ -1,0 +1,307 @@
+# Features for GMM/HDBSCAN: only Round-2 non-dormant agents
+X_gmm = df_v2.loc[active_mask_round2, pruned_cols_round1].copy()
+X_gmm = X_gmm.fillna(0)
+
+# Scale
+scaler_round3 = RobustScaler()
+X_gmm_scaled = scaler_round3.fit_transform(X_gmm.astype(float))
+
+# PCA
+pca_full_round3 = PCA()
+X_gmm_pca_full = pca_full_round3.fit_transform(X_gmm_scaled)
+cum_var_round3 = np.cumsum(pca_full_round3.explained_variance_ratio_)
+
+n_components_round3 = int(np.argmax(cum_var_round3 >= TARGET_VARIANCE) + 1)
+print("Round 3: PCs to reach", TARGET_VARIANCE, "variance:", n_components_round3)
+
+pca_round3 = PCA(
+    n_components=n_components_round3,
+    svd_solver="randomized",
+    random_state=RANDOM_STATE
+)
+X_active_pca_round2 = pca_round3.fit_transform(X_gmm_scaled)
+print("Shape after PCA (GMM/HDB input):", X_active_pca_round2.shape)
+
+X_for_gmm = X_active_pca_round2  # assuming shape (n_samples, 1)
+
+ks = range(2, 11)
+bic_scores = []
+aic_scores = []
+models = {}
+
+for k in ks:
+    gmm = GaussianMixture(
+        n_components=k,
+        covariance_type="full",
+        random_state=42
+    )
+    gmm.fit(X_for_gmm)
+    bic_scores.append(gmm.bic(X_for_gmm))
+    aic_scores.append(gmm.aic(X_for_gmm))
+    models[k] = gmm
+	
+crit_df = pd.DataFrame({
+    "k": list(ks),
+    "BIC": bic_scores,
+    "AIC": aic_scores
+})
+
+print(crit_df)
+
+X_for_gmm = X_active_pca_round2
+kv3 = 8
+gmm_same = GaussianMixture(
+    n_components=kv3,   # or pick a different number if you like
+    covariance_type="full",
+    random_state=42
+)
+labels_gmm = gmm_same.fit_predict(X_for_gmm)
+
+# Attach to df_v2 using active_mask_round2
+df_v2["cluster_id_gmm"] = np.nan
+df_v2.loc[active_mask_round2, "cluster_id_gmm"] = labels_gmm
+
+df_v2["cluster_id_gmm"] = df_v2["cluster_id_gmm"].astype("Int64")
+
+# Optionally mark dormant as a dedicated label
+df_v2.loc[~active_mask_round2, "cluster_id_gmm"] = -1   # or 'Dormant'
+
+# If you want sizes only for the agents that actually went into GMM
+gmm_sizes = (
+    df_v2
+    .loc[df_v2["cluster_id_gmm"].notna(), "cluster_id_gmm"]
+    .value_counts()
+    .sort_index()
+)
+
+print("GMM cluster sizes:")
+print(gmm_sizes)
+#171626
+
+active_ids = [0, 1, 2, 3, 4, 5, 6]  # excluding -1
+means_7 = []
+
+for cid in active_ids:
+    means_7.append((cid, float(X_for_gmm[labels_gmm == cid].mean())))
+
+means_7_sorted = sorted(means_7, key=lambda x: x[1])
+for cid, m in means_7_sorted:
+    print("Cluster", cid, "mean:", m)
+	
+From lowest to highest:
+
+**Cluster 0 (Very low activity)**
+Very negative PCA score → lowest active intensity.
+
+Cluster 5 (Low activity, but almost same as 0)
+Mean is extremely close to 0’s. Statistically GMM split one low region into two, but behavior‑wise they’re probably both “very low / low”.
+
+Cluster 3 (Low‑mid activity)
+Slightly higher than 0/5, but still clearly on the low side.  Cluster 6 (Mid activity)
+Less negative, closer to zero → more active than 0/5/3.
+
+Cluster 2 (Upper‑mid / high activity)
+Now positive on the PCA axis, so clearly more intense.
+
+Cluster 4 (Very high activity)
+Much higher positive mean, a strong high‑usage group.
+
+Cluster 1 (Extreme tail)
+Mean ~1795 is orders of magnitude away. This is a tiny, extreme group of super‑high activity.
+
+gmm_profile = (
+    df_v2
+    .loc[df_v2["cluster_id_gmm"].notna()]      # only rows that actually got a GMM label
+    .groupby("cluster_id_gmm")[profiling_cols]
+    .mean()
+    .round(2)
+)
+
+gmm_profile.index = gmm_profile.index.astype(int)
+print(gmm_profile)
+
+
+gmm_sizes = (
+    df_v2
+    .loc[df_v2["cluster_id_gmm"].notna(), "cluster_id_gmm"]
+    .value_counts()
+    .sort_index()
+)
+
+# Make sure index is int so it lines up with gmm_profile
+gmm_sizes.index = gmm_sizes.index.astype(int)
+print(gmm_sizes)
+
+gmm_profile_with_size = gmm_profile.copy()
+
+# Add absolute size per cluster
+gmm_profile_with_size["n_agents"] = gmm_sizes
+
+# Add percentage share per cluster
+gmm_profile_with_size["share_pct"] = (
+    gmm_sizes / gmm_sizes.sum() * 100
+).round(1)
+
+print("GMM profile with sizes and shares:")
+print(gmm_profile_with_size)
+
+
+
+X_for_hdbscan = X_active_pca_round2
+n_rows = X_for_hdbscan.shape[0]
+
+use_sample = False
+sample_cap = 300000
+
+if use_sample:
+    sample_n = min(sample_cap, n_rows)
+    rng = np.random.RandomState(42)
+    sample_idx = rng.choice(np.arange(n_rows), size=sample_n, replace=False)
+    X_hdb = X_for_hdbscan[sample_idx]
+    v2_for_hdb = df_v2.loc[active_mask_round2].iloc[sample_idx].copy()
+else:
+    X_hdb = X_for_hdbscan
+    v2_for_hdb = df_v2.loc[active_mask_round2].copy()
+
+print(X_active_pca_round2.shape[0])
+print(df_v2.loc[active_mask_round2].shape[0])
+
+import hdbscan
+from collections import Counter
+'''
+best_min_samples = 150  # chosen based on your tuning
+
+for mcs in [500, 700, 1000]:
+    print("### min_cluster_size =", mcs, ", min_samples =", best_min_samples)
+    hdb_model = hdbscan.HDBSCAN(
+        min_cluster_size=mcs,
+        min_samples=best_min_samples,
+        metric="euclidean",
+        cluster_selection_epsilon=0.0
+    )
+    hdb_labels = hdb_model.fit_predict(X_active_pca_round2)
+    counts = Counter(hdb_labels)
+
+    total = sum(counts.values())
+    noise = counts.get(-1, 0)
+    n_clusters = len([c for c in counts if c != -1])
+
+    print("Total points:", total)
+    print("Noise points (-1):", noise, "(", round(noise / total, 3), ")")
+    print("Number of clusters (excluding noise):", n_clusters)
+    print("Cluster size summary:", counts)
+    print("-" * 60)
+
+
+'''
+hdb_model = hdbscan.HDBSCAN(
+    min_cluster_size=1000,    # tune this; larger -> fewer, bigger clusters
+    min_samples=150,          # tune this; higher -> more noise, more conservative clusters
+    metric="euclidean",
+    cluster_selection_epsilon=0.0
+)
+
+hdb_labels_full = hdb_model.fit_predict(X_hdb)
+
+# Attach labels back to the dataframe aligned with X_hdb
+v2_for_hdb["cluster_hdb"] = hdb_labels_full
+
+from collections import Counter
+hdb_sizes_full = Counter(hdb_labels_full)
+
+print("HDBSCAN cluster sizes (note: -1 is noise):")
+print(hdb_sizes_full)
+
+# Exclude noise (-1) and any potential NaNs
+mask_hdb_non_noise_full = (
+    v2_for_hdb["cluster_hdb"].notna()
+    & (v2_for_hdb["cluster_hdb"] != -1)
+)
+
+hdb_profile_full = (
+    v2_for_hdb[mask_hdb_non_noise_full]
+    .groupby("cluster_hdb")[profiling_cols]
+    .mean()
+    .round(2)
+)
+
+hdb_sizes_no_noise = (
+    v2_for_hdb[mask_hdb_non_noise_full]["cluster_hdb"]
+    .value_counts()
+    .sort_index()
+)
+
+# Make IDs look like integers (optional)
+hdb_profile_full.index = hdb_profile_full.index.astype(int)
+hdb_sizes_no_noise.index = hdb_sizes_no_noise.index.astype(int)
+
+print("HDBSCAN profiles (full data, excluding -1):")
+print(hdb_profile_full)
+
+print("HDBSCAN cluster sizes (full data, excluding -1):")
+print(hdb_sizes_no_noise)
+
+# Top N largest non-noise clusters
+top_n = 8
+
+top_clusters = (
+    hdb_sizes_no_noise
+    .sort_values(ascending=False)
+    .head(top_n)
+    .index
+    .tolist()
+)
+
+print("Top HDBSCAN clusters by size:", top_clusters)
+print("Profiles for top HDBSCAN clusters:")
+print(hdb_profile_full.loc[top_clusters])
+
+
+# 1) Initialize the column for everyone
+df_v2["cluster_hdb_500"] = np.nan
+
+# 2) Fill only for the rows that actually went into HDBSCAN
+#    (v2_for_hdb = df_v2.loc[active_mask_round2].copy() earlier)
+df_v2.loc[v2_for_hdb.index, "cluster_hdb_500"] = v2_for_hdb["cluster_hdb"].values
+
+# 3) Make labels integer-like but still allow
+df_v2["cluster_hdb_500"] = df_v2["cluster_hdb_500"].astype("Int64")
+
+def map_hdb_to_tier(cluster_id):
+    if cluster_id == -1:
+        return "Noise / Irregular"
+    # Very top band: highest activity & value
+    if cluster_id in [3]:
+        return "Platinum Power"
+    # Strong but slightly below Platinum
+    if cluster_id in [5]:
+        return "Gold Power"
+    # Solid mid-high performers
+    if cluster_id in [6]:
+        return "Silver Strong"
+    # Mid-tier active
+    if cluster_id in [7]:
+        return "Bronze Active"
+    # Lower-mid active bands along the ladder
+    if cluster_id in [8, 10, 19]:
+        return "Developing Active"
+    # Very low-activity / semi-dormant band
+    if cluster_id in [0]:
+        return "Emerging / Low Activity"
+    # Everything else: small dense pockets
+    return "Other HDB Segment"
+
+# Rename numeric labels to make it explicit
+df_v2 = df_v2.rename(columns={"cluster_hdb_500": "cluster_hdb_500_raw"})
+
+# Map raw numeric HDB labels to named tiers in a new column
+df_v2["hdb_500_tier"] = df_v2["cluster_hdb_500_raw"].apply(
+    lambda x: map_hdb_to_tier(int(x)) if pd.notna(x) else np.nan
+)
+
+print(df_v2["cluster_hdb_500"] .value_counts())
+
+print(df_v2["cluster_hdb_500"].head())
+print(df_v2["cluster_hdb_500"].dtype)
+print(df_v2["cluster_hdb_500"].value_counts().head(20))
+

@@ -1,0 +1,507 @@
+import os
+import re
+import numpy as np
+import pandas as pd
+pd.set_option('display.float_format', lambda x: '%0.4f' % x)
+from statsmodels.stats.outliers_influence import variance_inflation_factor
+from statsmodels.tools.tools import add_constant
+import matplotlib.pyplot as plt
+import seaborn as sns
+sns.set()
+from sklearn.preprocessing import OneHotEncoder
+from sklearn.compose import ColumnTransformer
+from sklearn.pipeline import Pipeline
+from sklearn.impute import SimpleImputer
+from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import MinMaxScaler
+from tqdm import tqdm
+from sklearn.cluster import KMeans
+from sklearn.decomposition import PCA
+from sklearn.metrics import silhouette_score
+from sklearn.cluster import MiniBatchKMeans,AgglomerativeClustering
+from sklearn.mixture import GaussianMixture, BayesianGaussianMixture
+from sklearn.cluster import MiniBatchKMeans
+from sklearn.cluster import DBSCAN
+from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import RobustScaler
+from sklearn.model_selection import train_test_split
+from sklearn.linear_model import LogisticRegression
+from matplotlib.colors import ListedColormap
+import warnings
+warnings.filterwarnings("ignore")
+from matplotlib.ticker import FuncFormatter
+from millify import millify
+scaler = MinMaxScaler() 
+import pprint
+pd.set_option('display.float_format', lambda x: '%0.4f' % x)
+pd.set_option('display.max_rows', 500)
+pd.set_option('display.max_columns', 500)
+pd.set_option('display.width', 1000)
+tqdm.pandas()
+pd.set_option("display.max_columns", 120)
+sns.set(style="whitegrid")
+
+
+# 2. Parameters
+DATA_PATH = "C:\\Users\\mikiiv.UG\\Documents\\Data\\kpi_mfs_daily_agent_mart as at 20251116.csv"  # TODO: change this
+DATE_FORMAT = "%Y%m%d"  # tbl_dt and activation_dt format 20251116
+
+OUTPUT_DIR = "final_cluster_outputs_momo"
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+# 3. Load data
+agents_df = pd.read_csv(DATA_PATH)
+
+agents_df.shape
+
+agents_df['agent_msisdn'].dtype
+
+commission_agents = ['256789760000','256783891111','256781872222','256772453333',]
+
+commission_agents_int = (
+    pd.Series(commission_agents)
+    .pipe(pd.to_numeric, errors='coerce')
+    .dropna()
+    .astype('int64')
+    .tolist()
+)
+df = agents_df[~agents_df['agent_msisdn'].isin(commission_agents_int)]
+
+
+print("Remaining super agents:",
+      agents_df['agent_msisdn'].isin(commission_agents_int).sum())
+
+df.shape
+
+(df.eq(0).all(axis=1)).sum()
+
+column_names_list = [ 'account_balance', 'average_balance', 'commission', 'revenue_1m', 'revenue_3m', 'revenue_6m', 'cash_out_vol_1m', 'cash_out_vol_3m', 'cash_out_vol_6m', 'cash_out_value_1m', 'cash_out_value_3m', 'cash_out_value_6m', 'cash_out_peers_1m', 'cash_out_peers_3m', 'cash_out_peers_6m', 'cash_out_last', 'cash_out_revenue_1m', 'cash_out_revenue_3m', 'cash_out_revenue_6m', 'cash_out_comm_1m', 'cash_out_comm_3m', 'cash_out_comm_6m', 'cash_out_cust_1m', 'cash_out_cust_3m', 'cash_out_cust_6m', 'cash_in_vol_1m', 'cash_in_vol_3m', 'cash_in_vol_6m', 'cash_in_value_1m', 'cash_in_value_3m', 'cash_in_value_6m', 'cash_in_peers_1m', 'cash_in_peers_3m', 'cash_in_peers_6m', 'cash_in_last', 'cash_in_revenue_1m', 'cash_in_revenue_3m', 'cash_in_revenue_6m', 'cash_in_comm_1m', 'cash_in_comm_3m', 'cash_in_comm_6m', 'cash_in_cust_1m', 'cash_in_cust_3m', 'cash_in_cust_6m', 'voucher_vol_1m', 'voucher_vol_3m', 'voucher_vol_6m', 'voucher_value_1m', 'voucher_value_3m', 'voucher_value_6m', 'voucher_peers_1m', 'voucher_peers_3m', 'voucher_peers_6m', 'voucher_revenue_1m', 'voucher_revenue_3m', 'voucher_revenue_6m', 'voucher_comm_1m', 'voucher_comm_3m', 'voucher_comm_6m', 'voucher_cust_1m', 'voucher_cust_3m', 'voucher_cust_6m', 'payment_vol_1m', 'payment_vol_3m', 'payment_vol_6m', 'payment_value_1m', 'payment_value_3m', 'payment_value_6m', 'payment_peers_1m', 'payment_peers_3m', 'payment_peers_6m', 'payment_last', 'payment_revenue_1m', 'payment_revenue_3m', 'payment_revenue_6m', 'payment_comm_1m', 'payment_comm_3m', 'payment_comm_6m', 'payment_cust_1m', 'payment_cust_3m', 'payment_cust_6m', 'cust_1m', 'cust_3m', 'cust_6m', 'vol_1m', 'vol_3m', 'vol_6m']
+
+dp_drop = ['account_name', 'account_number', 'cash_in_revenue_1m', 'cash_in_revenue_3m', 'cash_in_revenue_6m', 'cash_out_revenue_1m', 'cash_out_revenue_3m', 'cash_out_revenue_6m', 'currency', 'payment_revenue_1m', 'payment_revenue_3m', 'payment_revenue_6m', 'rev_1m', 'rev_3m', 'rev_6m', 'revenue_1m', 'revenue_3m', 'revenue_6m', 'voucher_cust_1m', 'voucher_cust_3m', 'voucher_cust_6m', 'voucher_peers_1m', 'voucher_peers_3m', 'voucher_peers_6m', 'voucher_revenue_1m', 'voucher_revenue_3m', 'voucher_revenue_6m']
+
+s = pd.Series(column_names_list )
+
+result_list = s[~s.isin(dp_drop)].tolist()
+
+
+result_list  = sorted(result_list)
+print(result_list)
+
+# small missing summary print before working with data
+missing_summary_b4 = df.isna().sum().sort_values(ascending=False).to_frame("n_missing")
+missing_summary_b4["pct_missing"] = missing_summary_b4["n_missing"] / len(df)
+print("Missing top 20:\n", missing_summary_b4.head(20))
+
+# ---------- Configuration ----------
+DATE_FORMAT = "%Y%m%d"
+RECENCY_CAP = 3650
+SKEW_THRESHOLD = 1.0
+CORR_THRESHOLD = 0.97
+TARGET_VARIANCE = 0.90
+RANDOM_STATE = 42
+
+# df = your original full agents dataframe
+# Example:
+# df = agents_df.copy()
+
+# ---------- 0) Basic prep ----------
+id_cols = ["pos_msisdn", "agent_msisdn"]
+for c in id_cols:
+    if c in df.columns:
+        df[c] = df[c].astype(str)
+
+# Fix activation_dt if it has ".0" etc
+if "activation_dt" in df.columns:
+    df["activation_dt"] = (
+        df["activation_dt"].astype(str).str.split(".").str[0].replace("", pd.NA)
+    )
+
+# Parse dates
+if "tbl_dt" in df.columns:
+    df["tbl_dt"] = pd.to_datetime(df["tbl_dt"].astype(str), errors="coerce")
+
+if "activation_dt" in df.columns:
+    df["activation_dt"] = pd.to_datetime(
+        df["activation_dt"].astype(str),
+        format=DATE_FORMAT,
+        errors="coerce",
+    )  # parse a few potential date columns robustly
+DATE_COLUMNS = ["date_of_birth", "payment_last", "cash_in_last", "cash_out_last"]
+for c in DATE_COLUMNS:
+    if c in df.columns:
+        df[c] = pd.to_datetime(df[c].astype(str), errors="coerce")
+
+
+# strip whitespace and convert blanks to NaN for object cols
+obj_cols = df.select_dtypes(include="object").columns
+for c in obj_cols:
+    df[c] = df[c].astype(str).str.strip().replace({"": np.nan, "nan": np.nan, "None": np.nan})
+
+# Optional simple region derivation from address
+if "address" in df.columns:
+    addr = df["address"].astype(str).str.upper()
+    addr = addr.replace({"": np.nan, "-": np.nan, "NAN": np.nan})
+    tmp = np.where(addr.str.contains("KAMPALA", na=False), "KAMPALA", addr)
+    tmp = np.where(pd.Series(tmp).str.contains("UGANDA", na=False), "UGANDA", tmp)
+    df["region_simple"] = pd.Series(tmp, index=df.index).fillna("OTHERS")
+
+# Working copy and reference date
+df_work = df.copy()
+tbl_dt = pd.to_datetime(df_work["tbl_dt"].max()) if "tbl_dt" in df_work.columns else pd.Timestamp.now()
+features_df = df_work
+
+# small missing summary print
+missing_summary = features_df.isna().sum().sort_values(ascending=False).to_frame("n_missing")
+missing_summary["pct_missing"] = missing_summary["n_missing"] / len(df)
+print("Missing top 20:\n", missing_summary.head(20))
+
+# Age
+if "date_of_birth" in features_df.columns:
+    features_df["age"] = ((tbl_dt - features_df["date_of_birth"]).dt.days) / 365.25
+    features_df["age"] = features_df["age"].fillna(features_df["age"].median())
+
+# NCR flag
+if "ncr_number" in features_df.columns:
+    features_df["has_ncr"] = features_df["ncr_number"].notna().astype(int)
+else:
+    features_df["has_ncr"] = 0
+
+# Activation / tenure
+features_df["activation_missing"] = (
+    features_df["activation_dt"].isna().astype(int)
+    if "activation_dt" in features_df.columns
+    else 1
+)
+
+if "activation_dt" in features_df.columns:
+    median_activation = features_df["activation_dt"].median()
+    if pd.isna(median_activation):
+        median_activation = pd.Timestamp("2015-01-01")
+    features_df["activation_dt"] = features_df["activation_dt"].fillna(median_activation)
+    features_df["tenure_years"] = ((tbl_dt - features_df["activation_dt"]).dt.days) / 365.25
+
+# Clean categorical profile / gender
+if "agent_profile" in features_df.columns:
+    features_df["agent_profile_clean"] = (
+        features_df["agent_profile"]
+        .astype(str)
+        .str.strip()
+        .str.lower()
+        .replace({"": np.nan})
+    )
+
+if "gender" in features_df.columns:
+    features_df["gender_clean"] = (
+        features_df["gender"]
+        .astype(str)
+        .str.strip()
+        .str.lower()
+        .replace({"": np.nan})
+    ) 
+
+def engineer_kmeans_features(features_df_in, ref_date):
+    features_df_local = features_df_in.copy()
+    old_date = pd.Timestamp("1900-01-01")
+    date_cols_local = ["payment_last", "cash_in_last", "cash_out_last"]
+
+    # Days since and ever flags
+    for c in date_cols_local:
+        if c in features_df_local.columns:
+            features_df_local["days_since_" + c] = (
+                ref_date - features_df_local[c].fillna(old_date)
+            ).dt.days
+            features_df_local[c + "_ever"] = features_df_local[c].notna().astype(int)
+        else:
+            features_df_local["days_since_" + c] = RECENCY_CAP
+            features_df_local[c + "_ever"] = 0
+
+    # Recency (min days since any event)
+    recency_cols = [
+        "days_since_payment_last",
+        "days_since_cash_in_last",
+        "days_since_cash_out_last",
+    ]
+    for rc in recency_cols:
+        if rc in features_df_local.columns:
+            features_df_local[rc] = features_df_local[rc].fillna(RECENCY_CAP).clip(
+                upper=RECENCY_CAP
+            )
+
+    if all([c in features_df_local.columns for c in recency_cols]):
+        features_df_local["recency_min"] = (
+            features_df_local[recency_cols]
+            .min(axis=1)
+            .fillna(RECENCY_CAP)
+            .clip(upper=RECENCY_CAP)
+        )
+
+    # Most recent action one-hot
+    temp = features_df_local[["payment_last", "cash_in_last", "cash_out_last"]].fillna(old_date)
+    features_df_local["most_recent_action"] = temp.idxmax(axis=1)
+    all_missing = features_df_local[["payment_last", "cash_in_last", "cash_out_last"]].isna().all(axis=1)
+    features_df_local.loc[all_missing, "most_recent_action"] = "none"
+    features_df_local = pd.get_dummies(
+        features_df_local,
+        columns=["most_recent_action"],
+        prefix="last_action",
+        dtype=int,
+    )
+
+    # Gaps between events
+    def safe_gap(a, b):
+        if a not in features_df_local.columns or b not in features_df_local.columns:
+            return pd.Series(RECENCY_CAP, index=features_df_local.index)
+        gap = (features_df_local[a] - features_df_local[b]).dt.days.abs()
+        return gap.fillna(RECENCY_CAP)
+
+    features_df_local["gap_cash_in_payment"] = safe_gap("payment_last", "cash_in_last")
+    features_df_local["gap_cash_out_payment"] = safe_gap("payment_last", "cash_out_last")
+
+    for rc in [
+        "days_since_payment_last",
+        "days_since_cash_in_last",
+        "days_since_cash_out_last",
+        "recency_min",
+        "gap_cash_in_payment",
+        "gap_cash_out_payment",
+    ]:
+        if rc in features_df_local.columns:
+            features_df_local[rc] = features_df_local[rc].fillna(RECENCY_CAP).clip(
+                upper=RECENCY_CAP
+            )
+
+    # One-hot for gender/profile
+    for col in ["gender_clean", "agent_profile_clean"]:
+        if col in features_df_local.columns:
+            features_df_local[col] = features_df_local[col].fillna("unknown")
+            features_df_local = pd.get_dummies(
+                features_df_local,
+                columns=[col],
+                prefix=col,
+                dtype=int,
+            )
+
+    return features_df_local
+
+
+features_df = engineer_kmeans_features(features_df, tbl_dt)
+
+
+drop_cols = [
+    "activation_dt",
+    "date_of_birth",
+    "payment_last",
+    "cash_in_last",
+    "cash_out_last",
+    "tbl_dt",
+    "agent_profile",
+    "gender",
+    "ncr_number",
+    "region_simple",
+    "address",
+    "firstname",
+    "lastname",
+]
+for c in drop_cols:
+    if c in features_df.columns:
+        features_df = features_df.drop(columns=c, errors="ignore")
+
+# Drop fully missing and constant columns
+protected_cols = ["agent_msisdn", "pos_msisdn"]
+na_full = features_df.isna().all()
+constant_cols = [
+    c
+    for c in features_df.columns
+    if features_df[c].nunique(dropna=True) <= 1 and c not in protected_cols
+]
+cols_to_drop = sorted(list(set(list(features_df.columns[na_full]) + constant_cols)))
+features_df = features_df.drop(columns=cols_to_drop)
+
+print("Dropped (all NA or constant):", cols_to_drop[:50])  # preview
+
+#--------------v2.1 add_premium_features
+
+def add_premium_features(df):
+    """
+    Adding a minimal set of premium-related engineered features,
+    using only raw columns (1m/3m/6m per product).
+    """
+    df_new = df.copy()
+    eps = 1e-9  # avoid division by zero
+
+    # 1) Total value 3m and 6m (size / scale)
+    df_new["total_value_3m"] = (
+        df_new["cash_in_value_3m"]
+        + df_new["cash_out_value_3m"]
+        + df_new["voucher_value_3m"]
+        + df_new["payment_value_3m"]
+    )
+
+    df_new["total_value_6m"] = (
+        df_new["cash_in_value_6m"]
+        + df_new["cash_out_value_6m"]
+        + df_new["voucher_value_6m"]
+        + df_new["payment_value_6m"]
+    )
+
+    # 2) Commission per value (profitability) ---> commission efficiency "For every 1 unit of value transacted, how much commission did the agent earn?"
+    total_comm_3m = (
+        df_new["cash_in_comm_3m"]
+        + df_new["cash_out_comm_3m"]
+        + df_new["voucher_comm_3m"]
+        + df_new["payment_comm_3m"]
+    )
+
+    total_comm_6m = (
+        df_new["cash_in_comm_6m"]
+        + df_new["cash_out_comm_6m"]
+        + df_new["voucher_comm_6m"]
+        + df_new["payment_comm_6m"]
+    )
+
+    df_new["commission_per_value_3m"] = total_comm_3m / (df_new["total_value_3m"] + eps)
+    df_new["commission_per_value_6m"] = total_comm_6m / (df_new["total_value_6m"] + eps)
+
+    # 3) Recency / momentum (1m vs 3m)
+    df_new["vol_1m_to_3m_ratio"] = df_new["vol_1m"] / (df_new["vol_3m"] + eps)
+    df_new["cash_out_vol_1m_to_3m_ratio"] = df_new["cash_out_vol_1m"] / (
+        df_new["cash_out_vol_3m"] + eps
+    )
+    df_new["payment_vol_1m_to_3m_ratio"] = df_new["payment_vol_1m"] / (
+        df_new["payment_vol_3m"] + eps
+    )
+
+    # 4) Last-month product mix (1m value shares)
+    total_value_1m = (
+        df_new["cash_in_value_1m"]
+        + df_new["cash_out_value_1m"]
+        + df_new["voucher_value_1m"]
+        + df_new["payment_value_1m"]
+    )
+
+    df_new["share_cash_in_value_1m"] = df_new["cash_in_value_1m"] / (total_value_1m + eps)
+    df_new["share_cash_out_value_1m"] = df_new["cash_out_value_1m"] / (total_value_1m + eps)
+    df_new["share_voucher_value_1m"] = df_new["voucher_value_1m"] / (total_value_1m + eps)
+    df_new["share_payment_value_1m"] = df_new["payment_value_1m"] / (total_value_1m + eps)
+
+    # 5) Network richness 6m (peers & customers) and density
+    df_new["total_peers_6m"] = (
+        df_new["cash_in_peers_6m"]
+        + df_new["cash_out_peers_6m"]
+        + df_new["payment_peers_6m"]
+    )
+
+    df_new["total_customers_6m"] = (
+        df_new["cash_in_cust_6m"]
+        + df_new["cash_out_cust_6m"]
+        + df_new["payment_cust_6m"]
+    )
+
+    df_new["peers_per_value_6m"] = df_new["total_peers_6m"] / (df_new["total_value_6m"] + eps)
+    df_new["customers_per_value_6m"] = df_new["total_customers_6m"] / (
+        df_new["total_value_6m"] + eps
+    )
+
+    return df_new
+
+# 1) Add premium features (does not touch agent_msisdn)
+features_df = add_premium_features(features_df)
+
+
+# ===============================================================
+# A) Enhance features with non-linear transformations
+# ===============================================================
+
+features_df_enh = features_df.copy()
+
+# ---------------------------------------------------------------
+# A1) Ratio Features: volume_per_count within the same horizon
+# ---------------------------------------------------------------
+
+num_cols_all = features_df_enh.select_dtypes(include=["number"]).columns
+
+# Use consistent naming: volume vs count/txn
+vol_cols = [c for c in num_cols_all if "value" in c.lower() or "vol" in c.lower()]
+cnt_cols = [c for c in num_cols_all if "count" in c.lower() or "txn" in c.lower()]
+
+# Define horizons safely
+horizons = ["7", "30", "90", "1m", "3m", "6m"]   # expand based on your dataset
+
+for vcol in vol_cols:
+    for ccol in cnt_cols:
+
+        # require matching horizon substring
+        if any(h in vcol.lower() and h in ccol.lower() for h in horizons):
+
+            new_col = f"{vcol}_per_{ccol}"
+
+            # avoid zero division → replace 0 with small epsilon
+            denom = features_df_enh[ccol].replace({0: np.nan})
+
+            features_df_enh[new_col] = (
+                features_df_enh[vcol] / denom
+            ).replace([np.inf, -np.inf], np.nan).fillna(0)
+
+
+# ---------------------------------------------------------------
+# A2) Recency Binning (piecewise non-linearity)
+# ---------------------------------------------------------------
+
+recency_cols = [c for c in features_df_enh.columns if c.startswith("days_since_")]
+
+for rc in recency_cols:
+    features_df_enh[f"{rc}_bin_0_7"]     = (features_df_enh[rc] <= 7).astype(int)
+    features_df_enh[f"{rc}_bin_8_30"]    = ((features_df_enh[rc] > 7) & (features_df_enh[rc] <= 30)).astype(int)
+    features_df_enh[f"{rc}_bin_31_90"]   = ((features_df_enh[rc] > 30) & (features_df_enh[rc] <= 90)).astype(int)
+    features_df_enh[f"{rc}_bin_gt_90"]   = (features_df_enh[rc] > 90).astype(int)
+
+
+# ---------------------------------------------------------------
+# A3) Interaction Terms (keep controlled)
+# ---------------------------------------------------------------
+
+key_num_cols = [
+    c for c in num_cols_all
+    if any(k in c.lower() for k in ["payment", "cash_in", "cash_out", "commission"])
+    and not c.startswith("days_since_")
+]
+
+# Prevent feature explosion
+max_interactions = 10
+key_num_cols = key_num_cols[:max_interactions]
+
+for i in range(len(key_num_cols)):
+    for j in range(i + 1, len(key_num_cols)):
+        c1, c2 = key_num_cols[i], key_num_cols[j]
+        new_col = f"{c1}_times_{c2}"
+
+        features_df_enh[new_col] = features_df_enh[c1] * features_df_enh[c2]
+
+# ---------------------------------------------------------------
+# Summary
+# ---------------------------------------------------------------
+
+print("Enhanced feature shape:", features_df_enh.shape)
+# print(features_df_enh.head())
+
+# ---------- B) Numeric matrix from enhanced features ----------
+
+# id_cols ID columns
+id_cols = ["pos_msisdn", "agent_msisdn"]
+
+numeric_cols = features_df_enh.select_dtypes(include=["number"]).columns.tolist()
+
+# Ensure ID is not part of the numeric feature set
+if id_cols in numeric_cols:
+    numeric_cols.remove(id_cols)
+
+X_raw = features_df_enh[numeric_cols].copy()
+
+# Median impute first
+medians = X_raw.median()
+X_imputed = X_raw.fillna(medians)
+
+# Start from this
+X_out = X_imputed.copy()
+
+

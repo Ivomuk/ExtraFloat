@@ -1,0 +1,250 @@
+# Recreate counts from the user's value_counts
+ensemble_counts = pd.DataFrame({
+    "ensemble_cluster": [
+        "GMM_0__Platinum Power",
+        "GMM_5__Other HDB Segment",
+        "GMM_5__Gold Power",
+        "GMM_0__Gold Power",
+        "GMM_3__Noise / Irregular",
+        "GMM_3__Other HDB Segment",
+        "GMM_5__Silver Strong",
+        "GMM_3__Bronze Developing",
+        "GMM_1__Other HDB Segment",
+        "GMM_4__Other HDB Segment",
+        "GMM_5__Noise / Irregular",
+        "GMM_2__Other HDB Segment",
+        "GMM_1__Noise / Irregular",
+        "GMM_5__Platinum Power",
+        "GMM_2__Noise / Irregular"
+    ],
+    "count": [
+        153367,
+        25549,
+        18455,
+        18217,
+        16904,
+        13057,
+        6012,
+        5836,
+        3852,
+        2362,
+        1749,
+        1641,
+        808,
+        768,
+        62
+    ]
+})
+
+# Sort by count descending for nicer plotting
+ensemble_counts = ensemble_counts.sort_values("count", ascending=False)
+
+print(ensemble_counts.head())
+
+plt.figure(figsize=(12, 6))
+sns.barplot(data=ensemble_counts, x="ensemble_cluster", y="count", color="steelblue")
+plt.xticks(rotation=45, ha="right")
+plt.xlabel("Ensemble Cluster")
+plt.ylabel("Number of Agents")
+plt.title("Agent Counts by Ensemble Cluster")
+plt.tight_layout()
+plt.show()
+
+# 1) Build a 2D PCA space for visualization
+X_for_vis = X_active_pca  # your existing PCA matrix
+
+if X_for_vis.shape[1] > 2:
+    pca_vis = PCA(n_components=2, random_state=42)
+    X_vis_2d = pca_vis.fit_transform(X_for_vis)
+else:
+    X_vis_2d = X_for_vis
+
+vis_df = pd.DataFrame({
+    "pc1": X_vis_2d[:, 0],
+    "pc2": X_vis_2d[:, 1],
+    "cluster_gmm": v2_X_with_clusters["cluster_id_gmm"].astype(str).values,
+    # use HDBSCAN raw labels or your tier labels; I’ll use tiers as they’re more interpretable
+    "cluster_hdb": v2_X_with_clusters["hdb_tier_500"].astype(str).values,
+})
+
+vis_df.head()
+
+max_points = 50000
+
+if len(vis_df) > max_points:
+    rng = np.random.RandomState(42)
+    sample_idx = rng.choice(np.arange(len(vis_df)), size=max_points, replace=False)
+    vis_df_plot = vis_df.iloc[sample_idx].copy()
+else:
+    vis_df_plot = vis_df.copy()
+	
+plt.figure(figsize=(14, 6))
+
+# Left: GMM clusters
+plt.subplot(1, 2, 1)
+sns.scatterplot(
+    data=vis_df_plot,
+    x="pc1",
+    y="pc2",
+    hue="cluster_gmm",
+    s=5,
+    linewidth=0,
+    palette="tab10",
+    legend=False,
+)
+plt.title("GMM clusters on PCA space")
+plt.xlabel("PC1")
+plt.ylabel("PC2")
+
+# Right: HDBSCAN / HDB tiers
+plt.subplot(1, 2, 2)
+sns.scatterplot(
+    data=vis_df_plot,
+    x="pc1",
+    y="pc2",
+    hue="cluster_hdb",
+    s=5,
+    linewidth=0,
+    palette="tab10",
+)  plt.title("HDBSCAN tiers on PCA space")
+plt.xlabel("PC1")
+plt.ylabel("PC2")
+plt.legend(title="HDB tier", bbox_to_anchor=(1.05, 1), loc="upper left")
+
+plt.tight_layout()
+plt.show()
+
+vis_df_plot["ensemble_cluster"] = v2_X_with_clusters["ensemble_cluster"].iloc[vis_df_plot.index].astype(str).values
+
+plt.figure(figsize=(7, 6))
+sns.scatterplot(
+    data=vis_df_plot,
+    x="pc1",
+    y="pc2",
+    hue="ensemble_cluster",
+    s=5,
+    linewidth=0,
+    palette="tab20",
+)
+plt.title("Ensemble clusters (GMM × HDB tier) on PCA space")
+plt.xlabel("PC1")
+plt.ylabel("PC2")
+plt.legend(bbox_to_anchor=(1.05, 1), loc="upper left")
+plt.tight_layout()
+plt.show()
+
+max_points = 100000
+
+if len(vis_df) > max_points:
+    rng = np.random.RandomState(42)
+    sample_idx = rng.choice(np.arange(len(vis_df)), size=max_points, replace=False)
+    vis_df_plot = vis_df.iloc[sample_idx].copy()
+else:
+    vis_df_plot = vis_df.copy()
+
+plt.figure(figsize=(14, 6))
+
+# GMM
+plt.subplot(1, 2, 1)
+sns.scatterplot(
+    data=vis_df_plot,
+    x="pc1",
+    y="pc2",
+    hue="cluster_gmm",
+    s=15,              # bigger points
+    linewidth=0,
+    palette="tab10",
+    legend=False,
+)
+plt.title("GMM clusters (sampled)")
+plt.xlabel("PC1")
+plt.ylabel("PC2")
+
+# HDBSCAN
+plt.subplot(1, 2, 2)
+sns.scatterplot(
+    data=vis_df_plot,
+    x="pc1",
+    y="pc2",
+    hue="cluster_hdb",
+    s=15,              # bigger points
+    linewidth=0,
+    palette="tab10",
+)
+plt.title("HDBSCAN tiers (sampled)")
+plt.xlabel("PC1")
+plt.ylabel("PC2")
+plt.legend(title="HDB tier", bbox_to_anchor=(1.05, 1), loc="upper left")
+
+plt.tight_layout()
+plt.show()
+
+# Project GMM means into the same 2D PCA space
+if X_active_pca.shape[1] > 2:
+    pca_vis = PCA(n_components=2, random_state=42)
+    X_vis_2d = pca_vis.fit_transform(X_active_pca)
+    gmm_means_2d = pca_vis.transform(gmm_same.means_)
+else:
+    X_vis_2d = X_active_pca
+    gmm_means_2d = gmm_same.means_[:, :2]
+
+plt.figure(figsize=(7, 6))
+plt.scatter(X_vis_2d[:, 0], X_vis_2d[:, 1], s=1, alpha=0.05, color="lightgray")
+plt.scatter(gmm_means_2d[:, 0], gmm_means_2d[:, 1], s=200, c="red")
+for i, (x, y) in enumerate(gmm_means_2d):
+    plt.text(x, y, str(i), fontsize=10, ha="center", va="center", color="white")
+plt.title("GMM cluster centers in PCA space")
+plt.xlabel("PC1")
+plt.ylabel("PC2")
+plt.tight_layout()
+plt.show()
+hdb_centers = vis_df.groupby("cluster_hdb")[["pc1", "pc2"]].mean().reset_index()
+
+plt.figure(figsize=(7, 6))
+plt.scatter(vis_df_plot["pc1"], vis_df_plot["pc2"], s=1, alpha=0.05, color="lightgray")
+plt.scatter(hdb_centers["pc1"], hdb_centers["pc2"], s=200, c="blue")
+for _, row in hdb_centers.iterrows():
+    plt.text(row["pc1"], row["pc2"], str(row["cluster_hdb"]), fontsize=10,
+             ha="center", va="center", color="white")
+plt.title("HDBSCAN cluster centers in PCA space")
+plt.xlabel("PC1")
+plt.ylabel("PC2")
+plt.tight_layout()
+plt.show()
+
+
+vis_df = pd.DataFrame({
+    "pc1": X_vis_2d[:, 0],
+    "pc2": X_vis_2d[:, 1],
+}, index=v2_X_with_clusters.index)  # <-- important: align indices
+
+vis_df["cluster_gmm"] = v2_X_with_clusters["cluster_id_gmm"].astype(str)
+vis_df["cluster_hdb"] = v2_X_with_clusters["hdb_tier_500"].astype(str)
+
+
+
+mask_gmm0 = v2_X_with_clusters["cluster_id_gmm"] == 5
+
+vis_gmm0 = vis_df.loc[mask_gmm0].copy()   # index‑aligned selection
+
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+plt.figure(figsize=(7, 6))
+sns.scatterplot(
+    data=vis_gmm0,
+    x="pc1",
+    y="pc2",
+    hue=v2_X_with_clusters.loc[mask_gmm0, "hdb_tier_500"].astype(str),
+    s=20,
+    linewidth=0,
+    palette="tab10",
+)
+plt.title("Zoom: GMM cluster 0 colored by HDB tiers")
+plt.xlabel("PC1")
+plt.ylabel("PC2")
+plt.legend(title="HDB tier", bbox_to_anchor=(1.05, 1), loc="upper left")
+plt.tight_layout()
+plt.show()
+
+ 

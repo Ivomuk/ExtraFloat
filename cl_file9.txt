@@ -1,0 +1,653 @@
+# Existing packs 
+
+Cash_in_support = [
+    'cash_in_comm_1m',
+    'cash_in_cust_1m',
+    'cash_in_peers_1m',
+    'cash_in_peers_3m',
+    'cash_in_cust_3m',
+    'cash_in_cust_6m',
+    'cash_in_comm_3m',
+    'cash_in_peers_6m',
+    'cash_in_comm_6m',
+    'cash_in_value_1m',
+    'cash_in_value_3m',
+    'cash_in_value_6m',
+    'cash_in_vol_1m',
+    'cash_in_vol_3m',
+    'cash_in_vol_6m',
+    'cash_in_revenue_3m',
+    'cash_in_revenue_6m'
+]
+
+Cash_out_activity = [
+    'cash_out_value_6m',
+    'cash_out_value_3m',
+    'cash_out_cust_3m',
+    'cash_out_cust_6m',
+    'cash_out_comm_3m',
+    'cash_out_peers_6m',
+    'cash_out_peers_3m',
+    'cash_out_comm_6m',
+    'cash_out_vol_3m',
+    'cash_out_vol_6m'
+]
+
+Cust_reach_overall_activity = [
+    'cust_6m',
+    'cust_3m',
+    'cust_1m',
+    'vol_1m',
+    'vol_6m',
+    'vol_3m'
+]
+
+Payments = [
+    'payment_revenue_6m',
+    'payment_revenue_3m',
+    'payment_revenue_1m',
+    'payment_value_3m',
+    'payment_value_1m',
+    'payment_comm_3m',
+    'payment_cust_3m',
+    'payment_cust_6m',
+    'payment_peers_1m',
+    'payment_value_6m',
+    'payment_comm_1m',
+    'payment_peers_6m',
+    'payment_cust_1m',
+    'payment_peers_3m',
+    'payment_comm_6m',
+    'payment_vol_1m',
+    'payment_vol_3m',
+    'payment_vol_6m'
+]
+
+Balances = [
+    'account_balance',
+    'average_balance'
+]
+
+global_comm_revenue = [
+    'commission',
+    'voucher_cust_6m',
+    'voucher_cust_3m',
+    'voucher_vol_6m',
+    'voucher_comm_3m',
+    'voucher_value_6m',
+    'voucher_comm_6m',
+    'voucher_vol_1m',
+    'voucher_vol_3m',
+    'voucher_comm_1m',
+    'voucher_peers_1m',
+    'voucher_value_1m',
+    'voucher_value_3m',
+    'voucher_revenue_6m',
+    'voucher_revenue_3m',
+    'voucher_cust_1m',
+    'revenue_3m',
+    'revenue_1m',
+    'cash_out_revenue_6m',
+    'cash_out_revenue_3m',
+    'voucher_revenue_1m',
+    'cash_in_revenue_1m',
+    'revenue_6m',
+    'voucher_peers_6m',
+    'cash_out_revenue_1m',
+    'voucher_peers_3m'
+]
+
+outcome_cols = ["CommissionDecision"]
+
+profiling_packs = {
+    "cash_in_support": Cash_in_support,
+    "cash_out_activity": Cash_out_activity,
+    "cust_reach_overall_activity": Cust_reach_overall_activity,
+    "payments": Payments,
+    "balances": Balances,
+    "global_comm_revenue": global_comm_revenue,
+    "outcomes": outcome_cols
+}  def build_cluster_pack_profiles(df, cluster_col, packs, melt_for_heatmap=True):
+    """
+    df: dataframe with agent-level data
+    cluster_col: name of the column with cluster / tier labels
+    packs: dict of {pack_name: [list of columns]}
+    melt_for_heatmap: if True, also return melted dfs for plotting heatmaps
+
+    Returns:
+        {
+          "means": {pack_name: df_means},
+          "lifts": {pack_name: df_lifts},
+          "melted": {pack_name: melted_df}   # only if melt_for_heatmap
+        }
+    """
+
+    means_dict = {}
+    lifts_dict = {}
+    melted_dict = {} if melt_for_heatmap else None
+
+    # Loop over each pack
+    for pack_name, cols in packs.items():
+        # Only keep columns that exist and are numeric
+        existing_cols = [c for c in cols if c in df.columns]
+        if not existing_cols:
+            continue
+
+        numeric_cols = []
+        for c in existing_cols:
+            if pd.api.types.is_numeric_dtype(df[c]):
+                numeric_cols.append(c)
+
+        if not numeric_cols:
+            continue
+
+        # Per-cluster means
+        means = (
+            df
+            .groupby(cluster_col)[numeric_cols]
+            .mean()
+        )
+
+        # Overall means for lift
+        overall_means = df[numeric_cols].mean()
+        lifts = means.divide(overall_means)
+
+        means_dict[pack_name] = means
+        lifts_dict[pack_name] = lifts
+
+        # Optional: create melted version for heatmaps
+        if melt_for_heatmap:
+            tmp = lifts.reset_index().melt(
+                id_vars=cluster_col,
+                var_name="metric",
+                value_name="lift"
+            )
+            tmp["pack"] = pack_name
+            melted_dict[pack_name] = tmp
+
+    result = {
+        "means": means_dict,
+        "lifts": lifts_dict
+    }
+    if melt_for_heatmap:
+        result["melted"] = melted_dict
+
+    return result
+	
+cluster_col_packs = "ensemble_cluster"
+
+profiling_results = build_cluster_pack_profiles(
+    df=df_joined,
+    cluster_col=cluster_col_packs,
+    packs=profiling_packs,
+    melt_for_heatmap=True
+)
+
+profiling_results["means"]["cash_in_support"].head()
+
+profiling_results["lifts"]["cash_out_activity"].head()
+
+balances_long = profiling_results["melted"]["balances"]
+balances_long.head()
+
+
+# We already have this from earlier:
+# profiling_results = build_cluster_pack_profiles(
+#     df=df_joined,
+#     cluster_col="ensemble_cluster",
+#     packs=profiling_packs,
+#     melt_for_heatmap=False
+# )
+
+lifts_by_pack = profiling_results["lifts"]  # dict: pack_name -> df (index=cluster, cols=metrics)
+
+# Step 1: compute a "pack score" per cluster = median lift across that pack's metrics
+pack_scores_list = []
+
+for pack_name, lifts_df in lifts_by_pack.items():
+    # lifts_df: index = ensemble_cluster, columns = metrics in that pack
+    # Compute median lift across metrics (row-wise)
+    pack_score = lifts_df.median(axis=1)  # one value per cluster
+
+    tmp = pack_score.to_frame(name=pack_name + "_score")
+    pack_scores_list.append(tmp)
+
+# Step 2: assemble into a single dataframe
+cluster_pack_scores = pd.concat(pack_scores_list, axis=1)
+
+# cluster_pack_scores index: ensemble_cluster
+# columns: e.g. "cash_out_activity_score", "cash_in_support_score", "cust_reach_overall_activity_score", ...
+cluster_pack_scores.reset_index(inplace=True)  # so we have a column ensemble_cluster
+
+#------------------------------------------------------------>
+#     Define tier‑mapping logic based on pack scores
+#    Turn “Other HDB Segment” into meaningful tiers
+#------------------------------------------------------------>
+
+def map_cluster_to_tier(row):
+    """
+    row: one row from cluster_pack_scores
+    Returns a string tier label, e.g. "Platinum Power", "Gold Power", "Mid", "Low", "Other"
+    """
+    co = row["cash_out_activity_score"]
+    cr = row["cust_reach_overall_activity_score"]
+
+    # Example thresholds – adjust to your actual distributions
+    if co >= 2.0 and cr >= 1.8:
+        return "Platinum Power"
+
+    if co >= 1.4 and cr >= 1.2:
+        return "Gold Power"
+
+    if co >= 0.8 and cr >= 0.8:
+        return "Mid Core"
+
+    if co < 0.8 and cr < 0.8:
+        return "Low / Peripheral"
+
+    # Fallback
+    return "Other / Unclassified"
+	
+cluster_pack_scores["behavioural_tier"] = cluster_pack_scores.apply(
+    map_cluster_to_tier, axis=1
+)
+
+#-------------------------------------------------->
+# safety filters (volume / tenure / size)
+# We will layer practical business rules on top of the behavioural tier.
+#-------------------------------------------------->
+
+# Ensure activation_dt is a datetime
+df_joined["activation_dt"] = pd.to_datetime(df_joined["activation_dt"], errors="coerce")
+
+# If you already have a snapshot date column, use that; otherwise use "today"
+if "snapshot_dt" in df_joined.columns:
+    df_joined["snapshot_dt"] = pd.to_datetime(df_joined["snapshot_dt"], errors="coerce")
+    ref_date_series = df_joined["snapshot_dt"]
+else:
+    ref_date = pd.Timestamp.today().normalize()
+    ref_date_series = pd.Series(ref_date, index=df_joined.index)
+
+# Tenure in months (approx as days / 30.437, which is common)
+days_active = (ref_date_series - df_joined["activation_dt"]).dt.days
+df_joined["tenure_months"] = (days_active / 30.437).clip(lower=0)
+
+#compute per‑cluster size and basics:
+# Per-cluster counts, median tenure, etc.
+cluster_stats = (
+    df_joined
+    .groupby("ensemble_cluster")
+    .agg(
+        n_agents=("agent_msisdn", "nunique"),
+        median_tenure=("tenure_months", "median"),
+        total_vol_6m=("vol_6m", "sum"),  # change column name if needed # for stability over a longer horizon.
+        total_vol_3m=("vol_3m", "sum") # (for “last 90 days”)
+    )
+    .reset_index()
+)
+
+# Merge these with your pack scores + behavioural tier:
+
+cluster_tier_table = cluster_pack_scores.merge(
+    cluster_stats,
+    on="ensemble_cluster",
+    how="left"
+)
+# define an operational tier that respects safety filters:
+
+# Now cluster_tier_table contains: Original ensemble_cluster, Pack scores, behavioural_tier (purely based on pack scores), final_tier 
+# (behavioural tier plus safety filters).
+
+def apply_safety_filters(row):
+    base_tier = row["behavioural_tier"]
+    n_agents = row["n_agents"]
+    tenure = row["median_tenure"]
+
+    # Example safety thresholds, adjust as needed
+    if n_agents < 30 or tenure < 3:
+        # Too small or too young to fully trust
+        if base_tier in ["Platinum Power", "Gold Power"]:
+            return "Emerging " + base_tier
+        else:
+            return "Emerging / Unstable"
+
+    return base_tier
+
+cluster_tier_table["final_tier"] = cluster_tier_table.apply(
+    apply_safety_filters, axis=1
+)
+
+df_joined = df_joined.merge(
+    cluster_tier_table[["ensemble_cluster", "final_tier"]],
+    on="ensemble_cluster",
+    how="left"
+)
+ 
+
+metrics_for_tuning = [
+    "cash_out_activity_score",
+    "cust_reach_overall_activity_score",
+    "cash_in_support_score",
+    "payments_score",
+    "balances_score",
+    "global_comm_revenue_score"
+]
+
+quantiles = cluster_pack_scores[metrics_for_tuning].quantile(
+    [0.25, 0.5, 0.75, 0.9, 0.95]
+)
+quantiles
+
+def build_cluster_tiers(
+    cluster_pack_scores,
+    cluster_stats=None,
+    primary_axes=(
+        "cash_out_activity_score",
+        "cust_reach_overall_activity_score"
+    ),
+    support_packs=(
+        "cash_in_support_score",
+        "payments_score",
+        "balances_score",
+        "global_comm_revenue_score"
+    ),
+    safety_min_agents=30,
+    safety_min_tenure=3.0,
+    activity_quantile=0.25,
+):
+    """
+    Build a tier mapping table from cluster_pack_scores using quantile-based thresholds,
+    then apply simple safety filters on size / tenure / recent activity to get final_tier.
+
+    Inputs
+    ------
+    cluster_pack_scores : DataFrame
+        Must contain:
+        - 'ensemble_cluster'
+        - primary_axes columns (default: cash_out_activity_score,
+          cust_reach_overall_activity_score)
+        - support_packs columns:
+            cash_in_support_score
+            payments_score
+            balances_score
+            global_comm_revenue_score
+
+    cluster_stats : DataFrame or None
+        Optional. If provided, must contain:
+        - 'ensemble_cluster'
+        - 'n_agents'
+        - 'median_tenure' (in months)
+        - 'total_vol_3m'
+        - 'total_vol_6m'
+
+    Returns
+    -------
+    cluster_tier_table : DataFrame
+        Contains:
+        - ensemble_cluster
+        - behavioural_tier
+        - sublabel_activity_mix
+        - sublabel_balance
+        - sublabel_revenue
+        - (if cluster_stats provided) n_agents, median_tenure,
+          total_vol_3m, total_vol_6m, avg_vol_3m_per_agent
+        - final_tier (behavioural tier with safety filters applied, if stats are present)
+    """
+
+    df_scores = cluster_pack_scores.copy()
+
+    # Unpack primary axes
+    co_col, cr_col = primary_axes
+
+    # ------------------------------------------------------------------
+    # 1. Compute quantiles for tuning
+    # ------------------------------------------------------------------
+    metrics_for_tuning = [co_col, cr_col] + list(support_packs)
+    q = df_scores[metrics_for_tuning].quantile([0.25, 0.5, 0.75, 0.9, 0.95])
+
+    # Primary axes quantiles
+    co_q75, co_q90 = q.loc[0.75, co_col], q.loc[0.9, co_col]
+    cr_q75, cr_q90 = q.loc[0.75, cr_col], q.loc[0.9, cr_col]
+
+    # Support packs quantiles
+    cash_in_col, payments_col, balances_col, revenue_col = support_packs
+    cash_in_q75 = q.loc[0.75, cash_in_col]
+    payments_q75 = q.loc[0.75, payments_col]
+    balances_q95 = q.loc[0.95, balances_col]
+    revenue_q75 = q.loc[0.75, revenue_col]
+
+    # ------------------------------------------------------------------
+    # 2. Behavioural tier based on primary axes
+    # ------------------------------------------------------------------
+    def assign_behavioural_tier(row):
+        co = row[co_col]
+        cr = row[cr_col]
+
+        # Platinum: both very high, around top ~10%
+        if co >= co_q90 and cr >= cr_q90:
+            return "Platinum Power"
+
+        # Gold: both solidly above average (top 25%), with a minimum of ~1.1
+        if co >= max(co_q75, 1.1) and cr >= max(cr_q75, 1.1):
+            return "Gold Power"         # Mid Core: clearly active, but not Gold
+        if co >= 0.5 and cr >= 0.5:
+            return "Mid Core"
+
+        # Low: weak on both axes
+        if co < 0.5 and cr < 0.5:
+            return "Low / Peripheral"
+
+        # Mixed cases
+        return "Other / Mixed"
+
+    df_scores["behavioural_tier"] = df_scores.apply(
+        assign_behavioural_tier,
+        axis=1
+    )
+
+    # ------------------------------------------------------------------
+    # 3. Sub-labels
+    # ------------------------------------------------------------------
+
+    # 3a. Activity mix: cash-out, cash-in, payments
+    def assign_activity_sublabel(row):
+        labels = []
+
+        # Cash-out emphasis
+        co = row[co_col]
+        if co >= co_q90:
+            labels.append("Very High Cash-out")
+        elif co >= co_q75:
+            labels.append("High Cash-out")
+
+        # Cash-in and Payments
+        if row[cash_in_col] >= cash_in_q75:
+            labels.append("High Cash-in")
+        if row[payments_col] >= payments_q75:
+            labels.append("High Payments")
+
+        if not labels:
+            return "Neutral Activity Mix"
+        return " & ".join(labels)
+
+    # 3b. Balance sublabel: heavy-tail high-balance clusters
+    def assign_balance_sublabel(row):
+        if row[balances_col] >= balances_q95:
+            return "High Balance"
+        return "Normal Balance"
+
+    # 3c. Revenue sublabel: low / normal / high
+    def assign_revenue_sublabel(row):
+        if row[revenue_col] >= revenue_q75:
+            return "High Revenue"
+        if row[revenue_col] < 1.0:
+            return "Low Revenue"
+        return "Normal Revenue"
+
+    df_scores["sublabel_activity_mix"] = df_scores.apply(
+        assign_activity_sublabel,
+        axis=1
+    )
+    df_scores["sublabel_balance"] = df_scores.apply(
+        assign_balance_sublabel,
+        axis=1
+    )
+    df_scores["sublabel_revenue"] = df_scores.apply(
+        assign_revenue_sublabel,
+        axis=1
+    )
+
+    # ------------------------------------------------------------------
+    # 4. If no cluster_stats, we cannot apply safety filters
+    # ------------------------------------------------------------------
+    if cluster_stats is None:
+        df_scores["final_tier"] = df_scores["behavioural_tier"]
+        return df_scores
+
+    # ------------------------------------------------------------------
+    # 5. Merge cluster_stats and compute activity metrics
+    # ------------------------------------------------------------------
+    cluster_tier_table = df_scores.merge(
+        cluster_stats,
+        on="ensemble_cluster",
+        how="left"
+    )
+
+    # Guard against missing volume columns
+    if "total_vol_3m" in cluster_tier_table.columns:
+        cluster_tier_table["avg_vol_3m_per_agent"] = (
+            cluster_tier_table["total_vol_3m"]
+            / cluster_tier_table["n_agents"].replace(0, pd.NA)
+        )
+    else:
+        cluster_tier_table["avg_vol_3m_per_agent"] = pd.NA
+    # ------------------------------------------------------------------
+    # 6. Derive activity cutoff (bottom quantile of non-zero activity)
+    # ------------------------------------------------------------------
+    non_zero_mask = cluster_tier_table["avg_vol_3m_per_agent"] > 0
+    if non_zero_mask.any():
+        activity_min_3m_cutoff = cluster_tier_table.loc[
+            non_zero_mask, "avg_vol_3m_per_agent"
+        ].quantile(activity_quantile)
+    else:
+        # Fallback: if everything is zero/, just set a very low cutoff
+        activity_min_3m_cutoff = 0.0
+
+    # ------------------------------------------------------------------
+    # 7. Safety filters → final_tier
+    # ------------------------------------------------------------------
+
+    # Define which behavioural tiers are "core-like" mid tiers
+    core_like_tiers = [
+        "Mid Core",
+        "Silver Strong",
+        "Bronze Developing",
+    ]
+
+    def apply_safety_filters(row):
+        """
+        Apply simple, business-friendly safety logic:
+
+        - If cluster passes size, tenure, activity checks: keep behavioural_tier.
+        - If behavioural_tier is Platinum/Gold and fails any check:
+              downgrade to Emerging Platinum/Gold.
+        - If behavioural_tier is a core-like mid tier and fails:
+              label as Emerging / Unstable.
+        - If already low-value / fringe (Low / Peripheral, Other / Mixed, etc.):
+              just keep as-is even if structurally weak.
+        """
+        base_tier = row["behavioural_tier"]
+        n_agents = row.get("n_agents")
+        tenure = row.get("median_tenure")
+        avg_vol_3m_per_agent = row.get("avg_vol_3m_per_agent")
+
+        # If missing stats, trust behavioural tier
+        if (
+            pd.isna(n_agents)
+            or pd.isna(tenure)
+            or pd.isna(avg_vol_3m_per_agent)
+        ):
+            return base_tier
+
+        # Safety checks
+        fails_size = n_agents < safety_min_agents
+        fails_tenure = tenure < safety_min_tenure
+        fails_activity = avg_vol_3m_per_agent < activity_min_3m_cutoff
+
+        # If passes all checks, keep behavioural tier
+        if not (fails_size or fails_tenure or fails_activity):
+            return base_tier
+
+        # Below here: cluster fails at least one safety check
+
+        # 1) Premium behaviours → Emerging Platinum/Gold
+        if base_tier == "Platinum Power":
+            return "Emerging Platinum Power"
+        if base_tier == "Gold Power":
+            return "Emerging Gold Power"
+
+        # 2) Core-like mid tiers → Emerging / Unstable
+        if base_tier in core_like_tiers:
+            return "Emerging / Unstable"
+
+        # 3) Low / fringe tiers → keep as-is
+        return base_tier
+
+       
+    cluster_tier_table["final_tier"] = cluster_tier_table.apply(
+        apply_safety_filters,
+        axis=1
+    )
+
+     # 1) Apply safety filters to turn behavioural_tier → final_tier
+    cluster_tier_table["final_tier"] = cluster_tier_table.apply(
+    apply_safety_filters,
+    axis=1
+)
+
+
+    # 2) Then apply the GMM guardrail on top of that final_tier
+     # --------------------------------------------------------------
+    # GMM guardrail: if GMM label is Platinum/Gold but final_tier
+    # does not contain that word, force Emerging Platinum/Gold.
+    # --------------------------------------------------------------
+    def apply_gmm_guardrail(row):
+        # Define label and tier inside the function, from the row
+        label = str(row["ensemble_cluster"]).lower()
+        tier = str(row["final_tier"]).lower()
+
+        # If the GMM label says Platinum Power but the tier does
+        # not contain "platinum power", force Emerging Platinum Power
+        if "platinum power" in label and "platinum power" not in tier:
+            return "Emerging Platinum Power"
+
+        # Same for Gold Power
+        if "gold power" in label and "gold power" not in tier:
+            return "Emerging Gold Power"
+
+        # Otherwise leave as is
+        return row["final_tier"]
+
+    cluster_tier_table["final_tier"] = cluster_tier_table.apply(
+        apply_gmm_guardrail,
+        axis=1
+    )
+
+    return cluster_tier_table
+	
+ cluster_tier_table = build_cluster_tiers(
+    cluster_pack_scores=cluster_pack_scores,
+    cluster_stats=cluster_stats,          # or None if you want to skip safety filters
+    safety_min_agents=30,                 # tweak for your scale
+    safety_min_tenure=3.0                 # in months; tweak if you like
+)
+
+cluster_pack_scores.head()
+
+cluster_tier_table.head(16)
+
+cluster_tier_table.final_tier.value_counts()
+
+cluster_pack_scores.head()
+
+cluster_stats

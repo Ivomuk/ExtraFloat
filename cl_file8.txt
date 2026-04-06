@@ -1,0 +1,997 @@
+# 2. Parameters
+DATA_PATH = "C:\\Users\\mikiiv.UG\\Documents\\Data\\xtrafloat_whitelist.csv"  # TODO: change this
+
+DATA_PATH2 = "C:\\Users\\mikiiv.UG\\Documents\\Data\\xtrafloat_blacklist.csv"  # TODO: change this
+
+
+DATE_FORMAT = "%Y%m%d"  # tbl_dt and activation_dt format 20251116
+# 3. Load data
+df_xtrafloat_whitelist = pd.read_csv(DATA_PATH)
+df_xtrafloat_blacklist = pd.read_csv(DATA_PATH2)
+
+df_xtrafloat_whitelist.head(2)
+
+df_xtrafloat_whitelist.agent_category.value_counts()
+
+df_xtrafloat_blacklist.head(2)
+
+df_xtrafloat_blacklist.agent_category.value_counts()
+
+df_xtrafloat_blacklist.reason.value_counts()
+
+df_xtrafloat_whitelist['CommissionDecision'] = 'whitelist'
+
+df_xtrafloat_whitelist.shape
+
+df_xtrafloat_blacklist['CommissionDecision'] = 'blacklist'
+
+df_xtrafloat_blacklist.shape
+
+common_agents = set(df_xtrafloat_whitelist["agent_msisdn"]).intersection(df_xtrafloat_blacklist["agent_msisdn"])
+print(f"Number of agents in both lists: {len(common_agents)}")
+print(list(common_agents)[:5])
+
+df_with_segments.agent_msisdn.dtype
+
+df_xtrafloat_blacklist.agent_msisdn.dtype
+
+(df_with_segments["agent_msisdn"].astype(str).str.startswith("0")).any()
+
+df_joined = (
+    df_with_segments
+    # Clean and convert agent_msisdn to int64
+    .assign(agent_msisdn=lambda df: df["agent_msisdn"]
+            .astype(str).str.strip().str.replace(r"\D", "", regex=True).astype("int64"))
+    
+    # Merge whitelist (CommissionDecision + agent_category)
+    .merge(
+        df_xtrafloat_whitelist
+        .assign(agent_msisdn=lambda df: df["agent_msisdn"]
+                .astype(str).str.strip().str.replace(r"\D", "", regex=True).astype("int64"))
+        [["agent_msisdn", "CommissionDecision", "agent_category"]],
+        on="agent_msisdn",
+        how="left"
+    )
+    .rename(columns={
+        "CommissionDecision": "CommissionDecision_wl",
+        "agent_category": "agent_category_wl"
+    })
+    
+    # Merge blacklist (CommissionDecision + agent_category)
+    .merge(
+        df_xtrafloat_blacklist
+        .assign(agent_msisdn=lambda df: df["agent_msisdn"]
+                .astype(str).str.strip().str.replace(r"\D", "", regex=True).astype("int64"))
+        [["agent_msisdn", "CommissionDecision", "agent_category"]],
+        on="agent_msisdn",
+        how="left"
+    )
+    .rename(columns={
+        "CommissionDecision": "CommissionDecision_bl",
+        "agent_category": "agent_category_bl"
+    })
+    
+    # Final single columns: whitelist takes priority
+    .assign(
+        CommissionDecision=lambda df: df["CommissionDecision_wl"].combine_first(df["CommissionDecision_bl"]),
+        agent_category=lambda df: df["agent_category_wl"].combine_first(df["agent_category_bl"])
+    )
+    
+    # Drop temporary columns
+    .drop(columns=["CommissionDecision_wl", "CommissionDecision_bl", "agent_category_wl", "agent_category_bl"])
+)
+
+df_joined.head(1)
+
+df_joined.to_csv(os.path.join(OUTPUT_DIR,"df_joined.csv"), index=False)
+print("df_joined saved to:", OUTPUT_DIR)
+
+type(df_joined)
+
+df_joined.CommissionDecision.value_counts()
+
+num_blacklist = (df_joined["CommissionDecision"] == "blacklist").sum()
+print(num_blacklist)
+
+# How each ensemble cluster breaks down by rule-based category
+ct = pd.crosstab(df_joined["ensemble_cluster"], df_joined["agent_category"])
+
+# Row-normalized (within each ensemble cluster)
+ct_row_pct = ct.div(ct.sum(axis=1), axis=0).round(3)
+
+print(ct)
+print(ct_row_pct)
+
+# Split into whitelist and blacklist subsets
+df_wl = df_joined[df_joined["CommissionDecision"] == "whitelist"].copy()
+df_bl = df_joined[df_joined["CommissionDecision"] == "blacklist"].copy()
+
+# Whitelist: ensemble vs rule-based category
+ct_wl = pd.crosstab(df_wl["ensemble_cluster"], df_wl["agent_category"])
+ct_wl_row_pct = ct_wl.div(ct_wl.sum(axis=1), axis=0).round(3)
+
+print("Whitelist: counts by ensemble_cluster x agent_category")
+print(ct_wl)  print("\nWhitelist: row-normalized (within each ensemble_cluster)")
+print(ct_wl_row_pct)
+
+# Blacklist: ensemble vs rule-based category
+ct_bl = pd.crosstab(df_bl["ensemble_cluster"], df_bl["agent_category"])
+ct_bl_row_pct = ct_bl.div(ct_bl.sum(axis=1), axis=0).round(3)
+
+print("\n\nBlacklist: counts by ensemble_cluster x agent_category")
+print(ct_bl)
+print("\nBlacklist: row-normalized (within each ensemble_cluster)")
+print(ct_bl_row_pct)
+
+# Crosstab of final_segment_7 vs agent_category
+
+# Whitelist: ensemble vs rule-based category
+ct_fs7 = pd.crosstab(df_wl["final_segment_7"], df_wl["agent_category"])
+
+# Row-wise percentages
+ct_fs7_row_pct = ct_fs7.div(ct_fs7.sum(axis=1), axis=0).round(3)
+
+print(ct_fs7)
+print(ct_fs7_row_pct)
+
+# Assumptions:
+# - df_joined: full agent-level dataset, with one row per agent (or agent-period)
+# - Columns:
+#   - 'ensemble_cluster'  (e.g. 'GMM_1__Noise / Irregular', 'GMM_0__Platinum Power', ...)
+#   - 'agent_category'    (Bronze, Silver, Gold, Platinum, Titanium, Diamond, New Bronze, etc.)
+#   - ''CommissionDecision''      (whitelist/blaclist agents)
+#   - KPI columns as used in profiling (commission, volumes, values, etc.)
+
+high_tiers = ['Gold', 'Platinum', 'Titanium', 'Diamond']
+
+noise_clusters = [
+    'GMM_1__Noise / Irregular',
+    'GMM_4__Other HDB Segment',
+    'GMM_2__Other HDB Segment',
+    'GMM_2__Noise / Irregular',
+    'GMM_1__Other HDB Segment',
+]
+
+mask_noise_high_whitelist = (
+    df_joined['ensemble_cluster'].isin(noise_clusters) &
+    df_joined['agent_category'].isin(high_tiers) &
+    (df_joined['CommissionDecision'] == 'whitelist')
+)
+
+noise_high_whitelist_df = df_joined.loc[mask_noise_high_whitelist].copy()
+print(len(noise_high_whitelist_df))
+
+# Define the high-behaviour "Power" clusters to compare against
+power_clusters = [
+       "GMM_0__Platinum Power",             
+        "GMM_5__Gold Power",               
+        "GMM_0__Gold Power",               
+        "GMM_5__Platinum Power",              
+        "GMM_5__Silver Strong" 
+]
+
+mask_power_whitelist = (
+    df_joined['ensemble_cluster'].isin(power_clusters) &
+    (df_joined['CommissionDecision'] == 'whitelist')
+)
+
+power_whitelist_df = df_joined.loc[mask_power_whitelist].copy()
+#print(power_whitelist_df.head())
+print(len(power_whitelist_df))
+
+# Key KPIs to compare; 
+kpi_cols = [
+#    'agent_msisdn',
+# 'firstname',
+# 'lastname',
+# 'ncr_number',
+# 'address',
+# 'account_number',
+# 'account_name',
+#'pos_msisdn',
+# 'currency',
+# 'agent_profile',
+# 'activation_dt',
+# 'date_of_birth',
+# 'gender',
+ 'account_balance',
+ 'average_balance',
+ 'commission',
+ 'revenue_1m',
+ 'revenue_3m',
+ 'revenue_6m',
+ 'cash_out_vol_1m',
+ 'cash_out_vol_3m',
+ 'cash_out_vol_6m',
+ 'cash_out_value_1m',
+ 'cash_out_value_3m',
+ 'cash_out_value_6m',
+ 'cash_out_peers_1m',
+ 'cash_out_peers_3m',
+ 'cash_out_peers_6m',
+# 'cash_out_last',
+ 'cash_out_revenue_1m',
+ 'cash_out_revenue_3m',
+ 'cash_out_revenue_6m',
+'cash_out_comm_1m',
+ 'cash_out_comm_3m',
+ 'cash_out_comm_6m',
+ 'cash_out_cust_1m',
+ 'cash_out_cust_3m',
+ 'cash_out_cust_6m',
+ 'cash_in_vol_1m',
+ 'cash_in_vol_3m',
+ 'cash_in_vol_6m',
+ 'cash_in_value_1m',
+ 'cash_in_value_3m',
+ 'cash_in_value_6m',
+ 'cash_in_peers_1m',
+ 'cash_in_peers_3m',
+ 'cash_in_peers_6m',
+# 'cash_in_last',
+ 'cash_in_revenue_1m',
+ 'cash_in_revenue_3m',
+ 'cash_in_revenue_6m',
+ 'cash_in_comm_1m',
+ 'cash_in_comm_3m',
+ 'cash_in_comm_6m',
+ 'cash_in_cust_1m',
+ 'cash_in_cust_3m',
+ 'cash_in_cust_6m',
+ 'voucher_vol_1m',
+ 'voucher_vol_3m',
+ 'voucher_vol_6m',
+ 'voucher_value_1m',
+ 'voucher_value_3m',
+ 'voucher_value_6m',
+ 'voucher_peers_1m',
+ 'voucher_peers_3m',
+ 'voucher_peers_6m',
+# 'voucher_last',
+ 'voucher_revenue_1m',
+ 'voucher_revenue_3m',
+ 'voucher_revenue_6m',
+ 'voucher_comm_1m',
+ 'voucher_comm_3m',
+ 'voucher_comm_6m',
+ 'voucher_cust_1m',
+ 'voucher_cust_3m',
+ 'voucher_cust_6m',
+ 'payment_vol_1m',
+ 'payment_vol_3m',
+ 'payment_vol_6m',
+ 'payment_value_1m',
+ 'payment_value_3m',
+ 'payment_value_6m',
+ 'payment_peers_1m',
+ 'payment_peers_3m',
+ 'payment_peers_6m',
+# 'payment_last',
+ 'payment_revenue_1m',
+ 'payment_revenue_3m',
+ 'payment_revenue_6m',
+ 'payment_comm_1m',
+ 'payment_comm_3m',
+ 'payment_comm_6m',
+ 'payment_cust_1m',
+ 'payment_cust_3m',
+ 'payment_cust_6m',
+ 'cust_1m',
+ 'cust_3m',
+ 'cust_6m',
+ 'vol_1m',
+ 'vol_3m',
+ 'vol_6m',
+# 'rev_1m',
+# 'rev_3m',
+# 'rev_6m',
+# 'tbl_dt',
+ 'region_simple'
+#    'commission_per_value_3m', 'commission_per_value_6m',
+#    'age', 'tenure_years'
+]
+
+
+
+# Describe both groups
+summary_noise = (
+    noise_high_whitelist_df[kpi_cols]
+    .describe()
+    .T[['mean', '50%', 'std']]
+    .rename(columns={'50%': 'median'})
+)
+
+summary_power = (
+    power_whitelist_df[kpi_cols]
+    .describe()
+    .T[['mean', '50%', 'std']]
+    .rename(columns={'50%': 'median'})
+)
+
+# Combine side by side
+comparison_kpi = pd.concat(
+    {
+        'Noise_high_tier_whitelist': summary_noise,
+        'Power_whitelist': summary_power
+    },
+    axis=1
+)
+
+print(comparison_kpi) 
+
+
+# Define "good" / well-performing whitelist reference
+good_clusters = [
+    "GMM_0__Platinum Power",             
+        "GMM_5__Gold Power",               
+        "GMM_0__Gold Power",               
+        "GMM_5__Platinum Power",              
+        "GMM_5__Silver Strong"    # include if you want solid but not extreme
+]
+
+mask_good = (
+    df_joined['ensemble_cluster'].isin(good_clusters) &
+    (df_joined['CommissionDecision'] == 'whitelist')
+   
+)
+
+good_whitelist_df = df_joined.loc[mask_good].copy()
+#print(good_whitelist_df.head())
+print(len(good_whitelist_df))
+
+# Define the “suspect” clusters to investigate
+
+suspect_clusters = [
+     'GMM_1__Noise / Irregular',
+    'GMM_4__Other HDB Segment',
+    'GMM_2__Other HDB Segment',
+    'GMM_2__Noise / Irregular',
+    'GMM_1__Other HDB Segment',
+]
+
+mask_suspect_whitelist = (
+    df_joined['ensemble_cluster'].isin(suspect_clusters) &
+    (df_joined['CommissionDecision'] == 'whitelist')
+)
+
+suspect_whitelist_df = df_joined.loc[mask_suspect_whitelist].copy()
+print(suspect_whitelist_df['ensemble_cluster'].value_counts())
+print(len(suspect_whitelist_df))
+
+
+kpi_cols_v1 = [
+'account_balance',
+ 'average_balance',
+ 'commission',
+ 'revenue_1m',
+ 'revenue_3m',
+ 'revenue_6m',
+ 'cash_out_vol_1m',
+ 'cash_out_vol_3m',
+ 'cash_out_vol_6m',
+ 'cash_out_value_1m',
+ 'cash_out_value_3m',
+ 'cash_out_value_6m',
+ 'cash_out_peers_1m',
+ 'cash_out_peers_3m',
+ 'cash_out_peers_6m',
+# 'cash_out_last',
+ 'cash_out_revenue_1m',
+ 'cash_out_revenue_3m',
+ 'cash_out_revenue_6m',
+ 'cash_out_comm_1m',
+ 'cash_out_comm_3m',
+ 'cash_out_comm_6m',
+ 'cash_out_cust_1m',
+ 'cash_out_cust_3m',
+ 'cash_out_cust_6m',
+ 'cash_in_vol_1m',
+ 'cash_in_vol_3m',
+ 'cash_in_vol_6m',
+ 'cash_in_value_1m',
+ 'cash_in_value_3m',
+ 'cash_in_value_6m',
+ 'cash_in_peers_1m',
+ 'cash_in_peers_3m',
+ 'cash_in_peers_6m',
+# 'cash_in_last',
+ 'cash_in_revenue_1m',
+ 'cash_in_revenue_3m',
+ 'cash_in_revenue_6m',
+ 'cash_in_comm_1m',
+ 'cash_in_comm_3m',
+ 'cash_in_comm_6m',
+ 'cash_in_cust_1m',
+ 'cash_in_cust_3m',
+ 'cash_in_cust_6m',
+ 'voucher_vol_1m',
+ 'voucher_vol_3m',
+ 'voucher_vol_6m',
+ 'voucher_value_1m',
+ 'voucher_value_3m',
+ 'voucher_value_6m',
+ 'voucher_peers_1m',
+ 'voucher_peers_3m',
+ 'voucher_peers_6m',
+# 'voucher_last',
+ 'voucher_revenue_1m',
+ 'voucher_revenue_3m',
+ 'voucher_revenue_6m',
+ 'voucher_comm_1m',
+ 'voucher_comm_3m',
+ 'voucher_comm_6m',
+ 'voucher_cust_1m',
+ 'voucher_cust_3m',
+ 'voucher_cust_6m',
+ 'payment_vol_1m',
+ 'payment_vol_3m',
+ 'payment_vol_6m',
+ 'payment_value_1m',
+ 'payment_value_3m',  'payment_value_6m',
+ 'payment_peers_1m',
+ 'payment_peers_3m',
+ 'payment_peers_6m',
+# 'payment_last',
+ 'payment_revenue_1m',
+ 'payment_revenue_3m',
+ 'payment_revenue_6m',
+ 'payment_comm_1m',
+ 'payment_comm_3m',
+ 'payment_comm_6m',
+ 'payment_cust_1m',
+ 'payment_cust_3m',
+ 'payment_cust_6m',
+ 'cust_1m',
+ 'cust_3m',
+ 'cust_6m',
+ 'vol_1m',
+ 'vol_3m',
+ 'vol_6m'
+#
+]
+
+# Global comparison: all suspect vs all good
+summary_good = (
+    good_whitelist_df[kpi_cols_v1]
+    .describe()
+    .T[['mean', '50%', 'std']]
+    .rename(columns={'50%': 'median'})
+)
+
+summary_suspect = (
+    suspect_whitelist_df[kpi_cols_v1]
+    .describe()
+    .T[['mean', '50%', 'std']]
+    .rename(columns={'50%': 'median'})
+)
+
+comparison_global = (
+    pd.concat({'Suspect_whitelist': summary_suspect,
+               'Good_whitelist': summary_good},
+              axis=1)
+)
+
+print(comparison_global) 
+
+
+# Aggregate KPIs per suspect cluster
+cluster_kpi_v1 = (
+    suspect_whitelist_df
+    .groupby('ensemble_cluster')[kpi_cols_v1]
+    .mean()
+    .T
+)
+
+# Add a column with the good-whitelist mean for direct comparison
+good_means = good_whitelist_df[kpi_cols_v1].mean()
+cluster_kpi_with_good = cluster_kpi_v1.copy()
+cluster_kpi_with_good['Good_whitelist_mean'] = good_means
+
+print(cluster_kpi_with_good)
+
+ratio_vs_good = cluster_kpi_v1.div(good_means, axis=0)
+print(ratio_vs_good)
+
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import train_test_split
+
+# Label: 1 = good whitelist, 0 = suspect whitelist
+whitelist_df = pd.concat([good_whitelist_df, suspect_whitelist_df], axis=0)
+whitelist_df['is_good_whitelist'] = whitelist_df['ensemble_cluster'].isin(good_clusters).astype(int)
+
+X = whitelist_df[kpi_cols_v1].fillna(0)
+y = whitelist_df['is_good_whitelist']
+
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.3, stratify=y, random_state=42
+)
+
+rf = RandomForestClassifier(
+    n_estimators=300,
+    max_depth=None,
+    random_state=42,
+    n_jobs=-1
+)
+rf.fit(X_train, y_train)
+
+feat_imp = pd.Series(rf.feature_importances_, index=kpi_cols_v1).sort_values(ascending=False)
+
+feat_imp_pct = (feat_imp * 100).round(2)
+#print(feat_imp_pct)
+feat_imp_pct_sorted = feat_imp_pct.sort_values(ascending=False)
+
+top = feat_imp_pct_sorted[feat_imp_pct_sorted >= 5]       # >= 5%
+mid = feat_imp_pct_sorted[(feat_imp_pct_sorted < 5) & (feat_imp_pct_sorted > 1)]
+low = feat_imp_pct_sorted[feat_imp_pct_sorted <= 1]
+
+print("sum to 1.0 / 100%:")
+print(feat_imp.sum())      
+print(feat_imp_pct.sum())
+
+print("Top features (>= 5%):")
+print(top)
+
+print("\nMedium features (1–5%):")
+print(mid)
+
+print("\nLow / negligible features (<= 1%):")
+print(low)
+
+target_clusters_wl = [
+    "GMM_1__Noise / Irregular",
+    "GMM_1__Other HDB Segment"
+]
+
+mask = (
+    df_joined["ensemble_cluster"].isin(target_clusters_wl)
+    & (df_joined["CommissionDecision"] == "whitelist")
+)
+
+subset = df_joined.loc[mask].copy()
+
+count_agents = subset["agent_msisdn"].nunique()
+print(count_agents)
+
+agent_msisdns = subset["agent_msisdn"].unique().tolist()
+
+first_214 = agent_msisdns[:214]
+
+# Build a string: 'val1','val2','val3',...
+formatted = ",".join(["'" + str(x) + "'" for x in first_20])
+
+print(formatted)
+
+# Split into whitelist and blacklist subsets #-----> Superset Agents 
+
+#df_filtered_SA = df_joined[~df_joined["agent_msisdn"].isin(first_214)].copy()
+df_filtered_SA = df_joined
+# Split into whitelist and blacklist subsets after exclusion
+df_wl_SA = df_filtered_SA[df_filtered_SA["CommissionDecision"] == "whitelist"].copy()
+df_bl_SA = df_filtered_SA[df_filtered_SA["CommissionDecision"] == "blacklist"].copy()
+
+# Whitelist: ensemble vs rule-based category
+ct_wl_SA = pd.crosstab(df_wl_SA["ensemble_cluster"], df_wl_SA["agent_category"])
+ct_wl_row_pct_SA = ct_wl_SA.div(ct_wl_SA.sum(axis=1), axis=0).round(3)
+
+print("Whitelist: counts by ensemble_cluster x agent_category")
+print(ct_wl_SA)
+print("\nWhitelist: row-normalized (within each ensemble_cluster)")
+print(ct_wl_row_pct_SA)  # Blacklist: ensemble vs rule-based category
+ct_bl_SA = pd.crosstab(df_bl_SA["ensemble_cluster"], df_bl_SA["agent_category"])
+ct_bl_row_pct_SA = ct_bl_SA.div(ct_bl_SA.sum(axis=1), axis=0).round(3)
+
+print("\n\nBlacklist: counts by ensemble_cluster x agent_category")
+print(ct_bl_SA)
+print("\nBlacklist: row-normalized (within each ensemble_cluster)")
+print(ct_bl_row_pct_SA )
+
+ct_wl_SA.to_csv(os.path.join(OUTPUT_DIR,"Whitelist_counts_ensemble_cluster_agent_category.csv"), index=True)
+print("Clustered data saved to:", OUTPUT_DIR)
+
+ct_bl_SA.to_csv(os.path.join(OUTPUT_DIR,"Blacklist_counts_ensemble_cluster_agent_category.csv"), index=True)
+print("Clustered data saved to:", OUTPUT_DIR)
+
+# Define the filters
+agent_cats = ["Platinum", "Titanium", "diamond"]
+noise_clusters = ["GMM_3__Noise / Irregular", "GMM_5__Noise / Irregular"]
+
+# Apply filters and sort
+df_plat_tier_noise = (
+    df_joined[
+        df_joined["agent_category"].isin(agent_cats)
+        & df_joined["ensemble_cluster"].isin(noise_clusters)
+    ]
+    .sort_values("ensemble_cluster")
+)
+
+# Inspect the result
+df_plat_tier_noise.head() 
+
+
+agent_cats = ["Platinum", "Titanium", "diamond"]
+noise_clusters = ["GMM_3__Noise / Irregular", "GMM_5__Noise / Irregular"]
+
+df_plat_tier_noise = (
+    df_joined[
+        df_joined["agent_category"].isin(agent_cats)
+        & df_joined["ensemble_cluster"].isin(noise_clusters)
+    ]
+    .sort_values("ensemble_cluster")
+)
+
+print(df_plat_tier_noise.shape)
+
+df_selected = df_joined[
+    df_joined['agent_category'].isin(['Diamond', 'Titanium', 'Gold'])
+]
+
+df_selected.head(1)
+
+mask_plat_noise_gmm6 = (
+    (df_wl_SA["ensemble_cluster"] == "GMM_6__Noise / Irregular") &
+    (df_wl_SA["agent_category"] == "Platinum")
+)
+
+df_platinum_gmm6_noise_wl = df_wl_SA[mask_plat_noise_gmm6].copy()
+
+print(df_platinum_gmm6_noise_wl.shape)  # should show (31, ...)
+df_platinum_gmm6_noise_wl.head(5)
+
+# 1) Platinum agents in a Noise cluster
+mask_platinum_noise = (
+    (df_wl_SA["ensemble_cluster"] == "GMM_6__Noise / Irregular") &
+    (df_wl_SA["agent_category"] == "Platinum")
+)
+df_plat_noise = df_wl_SA[mask_platinum_noise]
+
+# 2) Platinum agents in GMM_0__Platinum Power
+mask_platinum_power = (
+    (df_wl_SA["ensemble_cluster"] == "GMM_0__Platinum Power") &
+    (df_wl_SA["agent_category"] == "Platinum")
+)
+df_plat_power = df_wl_SA[mask_platinum_power]
+
+# 3) Compare mean KPIs side by side
+kpi_cols = kpi_cols_v1_clean  # your cleaned list
+noise_mean = df_plat_noise[kpi_cols].mean()
+power_mean = df_plat_power[kpi_cols].mean()
+
+comparison = (
+    pd.concat([noise_mean, power_mean], axis=1)
+    .rename(columns={0: "Platinum_Noise", 1: "Platinum_Power"})
+)
+
+comparison.sort_values("Platinum_Power", ascending=False).head(50)
+
+plt.figure(figsize=(10, 6))
+sns.heatmap(ct_wl_row_pct, annot=False, cmap="Blues")
+plt.title("Whitelist: Agent_Category distribution within ensemble clusters (row-normalized)")
+plt.ylabel("Ensemble cluster")
+plt.xlabel("Rule-based Agent_Category")
+plt.tight_layout()
+plt.show()
+
+plt.figure(figsize=(10, 6))
+sns.heatmap(ct_bl_row_pct, annot=False, cmap="Reds")
+plt.title("Blacklist: Agent_Category distribution within ensemble clusters (row-normalized)")
+plt.ylabel("Ensemble cluster")
+plt.xlabel("Rule-based Agent_Category")
+plt.tight_layout()
+plt.show()
+
+
+# Overall
+ensemble_rtc_all = (
+    df_joined
+    .groupby("ensemble_cluster")["avg_monthly_rtc"]
+    .agg(["count", "mean", "median"])
+    .sort_values("mean", ascending=False)
+)
+
+# Whitelist only
+ensemble_rtc_wl = (
+    df_joined[df_joined["CommissionDecision"] == "whitelist"]
+    .groupby("ensemble_cluster")["avg_monthly_rtc"]
+    .agg(["count", "mean", "median"])
+    .sort_values("mean", ascending=False)
+)
+
+# Blacklist only
+ensemble_rtc_bl = (
+    df_joined[df_joined["CommissionDecision"] == "blacklist"]
+    .groupby("ensemble_cluster")["avg_monthly_rtc"]
+    .agg(["count", "mean", "median"])
+    .sort_values("mean", ascending=False)
+)
+
+print("Overall (all agents):")
+print(ensemble_rtc_all.head(10))
+
+print("\nWhitelist only:")
+print(ensemble_rtc_wl.head(10))
+
+print("\nBlacklist only:")
+print(ensemble_rtc_bl.head(10))   #df_joined = df_joined[~df_joined["agent_msisdn"].isin(first_214)].copy()
+
+def cluster_purity(df, cluster_col, label_col):
+    tab = pd.crosstab(df[cluster_col], df[label_col])
+    if tab.shape[0] == 0:
+        # Handle empty df (e.g. no blacklist rows)
+        return pd.Series(dtype="float64"), float("")
+    max_in_row = tab.max(axis=1)
+    purity_per_cluster = (max_in_row / tab.sum(axis=1)).rename("purity")
+    overall_purity = max_in_row.sum() / tab.values.sum()
+    return purity_per_cluster, overall_purity
+
+# Overall
+purity_per_ens_all, overall_purity_ens_all = cluster_purity(
+    df_joined,
+    cluster_col="ensemble_cluster",
+    label_col="agent_category"
+)
+
+# Whitelist
+purity_per_ens_wl, overall_purity_ens_wl = cluster_purity(
+    df_joined[df_joined["CommissionDecision"] == "whitelist"],
+    cluster_col="ensemble_cluster",
+    label_col="agent_category"
+)
+
+# Blacklist
+purity_per_ens_bl, overall_purity_ens_bl = cluster_purity(
+    df_joined[df_joined["CommissionDecision"] == "blacklist"],
+    cluster_col="ensemble_cluster",
+    label_col="agent_category"
+)
+
+print("Top 10 clusters by purity (all agents):")
+print(purity_per_ens_all.sort_values(ascending=False).head(10))
+
+print("\nTop 10 clusters by purity (whitelist only):")
+print(purity_per_ens_wl.sort_values(ascending=False).head(10))
+
+print("\nTop 10 clusters by purity (blacklist only):")
+print(purity_per_ens_bl.sort_values(ascending=False).head(10))
+
+print("\nOverall purity (all):", round(overall_purity_ens_all, 3))
+print("Overall purity (whitelist):", round(overall_purity_ens_wl, 3))
+print("Overall purity (blacklist):", round(overall_purity_ens_bl, 3))
+
+from sklearn.metrics import adjusted_rand_score
+import numpy as np
+
+# Helper to compute ARI safely by dropping NaNs
+def safe_ari(labels_true, labels_pred):
+    mask = (~labels_true.isna()) & (~labels_pred.isna())
+    if mask.sum() == 0:
+        return np.nan
+    return adjusted_rand_score(labels_true[mask], labels_pred[mask])
+
+# Overall ARI
+ari_all = safe_ari(
+    df_joined["agent_category"],
+    df_joined["ensemble_cluster"]
+)
+
+# Whitelist ARI
+mask_wl = df_joined["CommissionDecision"] == "whitelist"
+ari_wl = safe_ari(
+    df_joined.loc[mask_wl, "agent_category"],
+    df_joined.loc[mask_wl, "ensemble_cluster"]
+) if mask_wl.sum() > 0 else np.nan
+
+# Blacklist ARI
+mask_bl = df_joined["CommissionDecision"] == "blacklist"
+ari_bl = safe_ari(
+    df_joined.loc[mask_bl, "agent_category"],
+    df_joined.loc[mask_bl, "ensemble_cluster"]
+) if mask_bl.sum() > 0 else np.nan
+
+print("Adjusted Rand Index (all):", round(ari_all, 3) if not np.isnan(ari_all) else "")
+print("Adjusted Rand Index (whitelist):", round(ari_wl, 3) if not np.isnan(ari_wl) else "")
+print("Adjusted Rand Index (blacklist):", round(ari_bl, 3) if not np.isnan(ari_bl) else "") 
+
+
+# Helper: purity for a given dataframe slice
+def cluster_purity_table(df, cluster_col="ensemble_cluster", label_col="agent_category", suffix=""):
+    # crosstab: clusters x labels
+    tab = pd.crosstab(df[cluster_col], df[label_col])
+    if tab.shape[0] == 0:
+        # no rows in this slice
+        return pd.DataFrame(columns=[
+            "dominant_agent_category" + suffix,
+            "purity" + suffix
+        ])
+
+    # majority label per row
+    dominant = tab.idxmax(axis=1)
+    max_in_row = tab.max(axis=1)
+    purity = max_in_row / tab.sum(axis=1)
+
+    out = pd.DataFrame({
+        "ensemble_cluster": tab.index,
+        "dominant_agent_category" + suffix: dominant.values,
+        "purity" + suffix: purity.values
+    }).set_index("ensemble_cluster")
+
+    return out
+	
+# All agents
+pur_all = cluster_purity_table(
+    df_joined,
+    cluster_col="ensemble_cluster",
+    label_col="agent_category",
+    suffix="_all"
+)
+
+# Whitelist
+pur_wl = cluster_purity_table(
+    df_joined[df_joined["CommissionDecision"] == "whitelist"],
+    cluster_col="ensemble_cluster",
+    label_col="agent_category",
+    suffix="_wl"
+)
+
+# Blacklist
+pur_bl = cluster_purity_table(
+    df_joined[df_joined["CommissionDecision"] == "blacklist"],
+    cluster_col="ensemble_cluster",
+    label_col="agent_category",
+    suffix="_bl"
+)
+
+# Join on ensemble_cluster index
+summary_clusters = (
+    pur_all
+    .join(pur_wl, how="left")
+    .join(pur_bl, how="left")
+)
+
+# Optional: sort by purity_all descending
+summary_clusters = summary_clusters.sort_values("purity_all", ascending=False)
+
+print(summary_clusters.head(20))
+
+def bt_counts_for_slice(df, cluster_col="ensemble_cluster", label_col="agent_category", suffix="_all"):
+    # Group by cluster and count rows
+    group = df.groupby(cluster_col)
+
+    counts = group[label_col].agg(
+        total_agents="count",
+        bt_count=lambda x: (x == "Below Threshold").sum()
+    )
+
+    counts["non_bt_count"] = counts["total_agents"] - counts["bt_count"]
+    counts["bt_share"] = counts["bt_count"] / counts["total_agents"]
+
+    # Rename with suffix so we can join cleanly later
+    counts = counts.rename(columns={
+        "total_agents": "total_agents" + suffix,
+        "bt_count": "bt_count" + suffix,
+        "non_bt_count": "non_bt_count" + suffix,
+        "bt_share": "bt_share" + suffix
+    })
+
+    return counts
+	
+# All agents
+bt_all = bt_counts_for_slice(
+    df_joined,
+    cluster_col="ensemble_cluster",
+    label_col="agent_category",
+    suffix="_all"
+)
+
+# Whitelist only
+bt_wl = bt_counts_for_slice(
+    df_joined[df_joined["CommissionDecision"] == "whitelist"],
+    cluster_col="ensemble_cluster",
+    label_col="agent_category",
+    suffix="_wl"
+)
+
+# Blacklist only
+bt_bl = bt_counts_for_slice(
+    df_joined[df_joined["CommissionDecision"] == "blacklist"],
+    cluster_col="ensemble_cluster",
+    label_col="agent_category",
+    suffix="_bl"
+)  
+summary_with_bt = (
+    summary_clusters
+    .join(bt_all, how="left")
+    .join(bt_wl, how="left")
+    .join(bt_bl, how="left")
+)
+
+# Optional: sort by bt_share_all descending to see where Below Threshold dominates most
+summary_with_bt = summary_with_bt.sort_values("bt_share_all", ascending=False)
+
+print(summary_with_bt.head(15))
+
+zero_fraction_threshold = 0.99  # 99% or more zeros
+
+# Make sure we only consider KPI columns that actually exist in df_joined
+kpi_cols_existing = [c for c in kpi_cols_v1 if c in df_joined.columns]
+
+zero_fractions = {}
+for col in kpi_cols_existing:
+    col_series = df_joined[col]
+    # NaNs treated as non-zero here; change if you prefer
+    zero_count = (col_series == 0).sum()
+    total_count = col_series.shape[0]
+    zero_fractions[col] = zero_count / float(total_count) if total_count > 0 else np.nan
+
+almost_zero_cols = [c for c, frac in zero_fractions.items()
+                    if frac >= zero_fraction_threshold]
+
+print("Columns that are nearly all zeros:")
+print(almost_zero_cols)
+print("Count:", len(almost_zero_cols))
+
+kpi_cols_v1_clean = [c for c in kpi_cols_v1 if c not in almost_zero_cols]
+
+print("Original KPI count:", len(kpi_cols_v1))
+print("Clean KPI count:", len(kpi_cols_v1_clean))
+
+df_ensemble_profile = (
+    df_joined
+    .groupby("ensemble_cluster")[kpi_cols_v1_clean]
+    .mean()
+    .sort_index()
+)
+print(df_ensemble_profile)
+
+df_ensemble_profile.to_csv(os.path.join(OUTPUT_DIR,"Base_Dataset_Profiling.csv"), index=True)
+print("Clustered data saved to:", OUTPUT_DIR)
+
+print("Shape (clusters x KPIs):", df_ensemble_profile.shape)
+print("Index (cluster names) sample:")
+print(df_ensemble_profile.index.tolist()[:20])
+print("KPI columns:")
+print(df_ensemble_profile.columns.tolist())
+
+# How many top/bottom clusters to show per KPI
+top_n = 3
+
+for col in df_ensemble_profile.columns:
+    print("\n=== KPI:", col, "===")
+    # Top N clusters for this KPI
+    top = df_ensemble_profile[col].sort_values(ascending=False).head(top_n)
+    print("Top", top_n, "clusters:")
+    print(top)
+    # Bottom N clusters for this KPI
+    bottom = df_ensemble_profile[col].sort_values(ascending=True).head(top_n)
+    print("Bottom", top_n, "clusters:")
+    print(bottom)
+	
+# Z-score normalisation per KPI across clusters
+df_ensemble_profile_z = (
+    df_ensemble_profile - df_ensemble_profile.mean(axis=0)
+) / df_ensemble_profile.std(axis=0)
+
+# Show a small sample to inspect
+print(df_ensemble_profile_z.head())
+
+cluster_names_to_check = [
+    "Dormant_Cluster_kmeans1",
+    "GMM_0__Platinum Power",
+    "GMM_1__Emerging / Low Activity",
+]
+
+for cname in cluster_names_to_check:
+    if cname in df_ensemble_profile_z.index:
+        print("\nProfile (z-scores) for", cname)
+        print(df_ensemble_profile_z.loc[cname].sort_values(ascending=False).head(10))
+		
+
+# For each cluster, list its top 5 KPIs (z-scored) where it's strongest
+top_k = 5
+
+for cname in df_ensemble_profile_z.index:
+    top_kpis = df_ensemble_profile_z.loc[cname].sort_values(ascending=False).head(top_k)
+    print("\nCluster:", cname)
+    print("Top", top_k, "relative KPIs:")
+    print(top_kpis)
+	
+ 

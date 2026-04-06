@@ -1,0 +1,254 @@
+ #---------- Skewness detection ----------
+
+SKEW_THRESHOLD = 1.0  # or 0.75, tune as needed
+
+share_like_cols = [
+    "share_cash_in_value_1m",
+    "share_cash_out_value_1m",
+    "share_voucher_value_1m",
+    "share_payment_value_1m",
+]
+
+protected_ratio_cols = [
+    # e.g. "commission_per_value_3m", "commission_per_value_6m"
+]
+
+exclude_from_transform = set(share_like_cols + protected_ratio_cols)
+
+skewness = X_out.skew()
+
+right_skewed_cols = [
+    col for col in X_out.columns
+    if (col not in exclude_from_transform)
+    and (skewness.get(col, 0) > SKEW_THRESHOLD)
+    and (X_out[col] >= 0).all()
+]
+
+# ---------- THEN apply log1p ----------
+for col in right_skewed_cols:
+    X_out[col] = np.log1p(X_out[col])
+
+# ---------- Winsorize (0.5% – 1%) ----------
+for col in right_skewed_cols:
+    lower_cap = X_out[col].quantile(0.005)
+    upper_cap = X_out[col].quantile(0.995)
+    X_out[col] = X_out[col].clip(lower=lower_cap, upper=upper_cap)
+
+
+# ---------- C) Correlation pruning ----------
+corr_matrix = X_out.corr().abs()
+to_drop = set()
+groups = []
+visited = set()
+
+
+for col in corr_matrix.columns:
+    if col in visited:
+        continue
+    # Features highly correlated with "col"
+    high_corr = corr_matrix.index[
+        (corr_matrix[col] >= CORR_THRESHOLD) &
+        (corr_matrix.index != col)
+    ].tolist()
+    
+    visited.add(col)
+    if high_corr:
+        group = [col] + high_corr
+        visited.update(high_corr)
+        groups.append(group)
+        # Drop only the OTHER features, not the first one
+        to_drop.update(high_corr)
+
+to_drop.update({
+    "age",
+    "gender_clean_female",
+    "gender_clean_male",
+    "gender_clean_nan",
+     "age",
+    "gender_clean_female",
+    "gender_clean_male",
+    "gender_clean_nan",
+    # all your agent_profile one-hot columns
+ 'agent_profile_clean_mtnu agent aggregated territory master',
+ 'agent_profile_clean_mtnu agent bronze class',
+ 'agent_profile_clean_mtnu agent bronze commission',
+ 'agent_profile_clean_mtnu agent derisk class',
+ 'agent_profile_clean_mtnu agent gold commission',
+ 'agent_profile_clean_mtnu agent independent territory master',
+ 'agent_profile_clean_mtnu agent retainer',
+ 'agent_profile_clean_mtnu agent silver class',
+ 'agent_profile_clean_mtnu agent silver commission',
+ 'agent_profile_clean_mtnu aggregated agent bronze',
+ 'agent_profile_clean_mtnu ah agent bronze class',
+ 'agent_profile_clean_mtnu ah service centers',
+ 'agent_profile_clean_mtnu ah super agent branch handler',
+ 'agent_profile_clean_mtnu ah super agent escrow branch handler',
+ 'agent_profile_clean_mtnu ah super agent master account',
+ 'agent_profile_clean_mtnu cdp bronze agent profile',
+ 'agent_profile_clean_mtnu cdp copper agent profile',
+ 'agent_profile_clean_mtnu dealer branch dsd agent profile',
+ 'agent_profile_clean_mtnu direct sales',
+ 'agent_profile_clean_mtnu dsd bronze agent profile',
+ 'agent_profile_clean_mtnu dsd copper agent profile',
+ 'agent_profile_clean_mtnu dsd gold agent profile',
+ 'agent_profile_clean_mtnu dsd iron agent profile',
+ 'agent_profile_clean_mtnu dsd silver agent profile',
+ 'agent_profile_clean_mtnu master agent bronze class',
+ 'agent_profile_clean_mtnu master agent commission',
+ 'agent_profile_clean_mtnu master agent silver class',
+ 'agent_profile_clean_mtnu master agent silver commission',   'agent_profile_clean_mtnu master dsd agent bronze class',
+ 'agent_profile_clean_mtnu merchant master agent hierarchy account',
+ 'agent_profile_clean_mtnu merchant service centers',
+ 'agent_profile_clean_mtnu mobile money dsd agent profile',
+ 'agent_profile_clean_mtnu no end user transactions allowed',
+ 'agent_profile_clean_mtnu open api agent cashin cashout profile',
+ 'agent_profile_clean_mtnu service provider agency profile',
+ 'agent_profile_clean_mtnu super agent branch account',
+ 'agent_profile_clean_mtnu super agent branch handler',
+ 'agent_profile_clean_mtnu super agent commission',
+ 'agent_profile_clean_mtnu super agent escrow branch account',
+ 'agent_profile_clean_mtnu super agent escrow master account',
+ 'agent_profile_clean_mtnu super agent master account',
+ 'agent_profile_clean_referralcampaignbonusprofile',                    
+
+    
+})
+
+selected_features = [c for c in X_out.columns if c not in to_drop]
+X_out_reduced = X_out[selected_features].copy()
+
+print("Correlated groups found:", len(groups), " -> dropping", len(to_drop), "features")
+for i, g in enumerate(groups[:10], 1):
+    print(f"Group {i}: {g}")
+
+print("Remaining numeric features after correlation pruning:", len(selected_features))
+
+
+    # --------------------------
+    # Non-Linearity Test
+    # --------------------------
+
+
+from sklearn.linear_model import LinearRegression
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.model_selection import train_test_split
+
+def test_nonlinearity_sampled(df, target_col=None, sample_size=20000):
+        """
+        Lightweight + RAM-safe non-linearity test using sampling.
+    
+        Tests included:
+        1. PCA (5 components) → checks linear structure strength
+        2. KMeans vs GMM (diag covariance) → clustering linearity
+        3. Linear Regression vs Random Forest → predictive non-linearity
+    
+        df : pandas dataframe
+        target_col : name of the target column or None (RF/LR test skipped)
+        sample_size : max rows to sample
+        """
+    
+        # ------------------------------------------------------------------
+        # STEP 1 — SAMPLE
+        # ------------------------------------------------------------------
+        n = len(df)
+        if n > sample_size:
+            idx = np.random.choice(n, size=sample_size, replace=False)
+            df_sample = df.iloc[idx]
+        else:
+            df_sample = df.copy()
+    
+        # Separate X and y
+        if target_col is not None:
+            y = df_sample[target_col].values
+            X = df_sample.drop(columns=[target_col]).values
+        else:
+            X = df_sample.values
+            y = None
+    
+        results = {}
+    
+        # ------------------------------------------------------------------
+        # STEP 2 — PCA (linear structure)
+        # ------------------------------------------------------------------
+        pca = PCA(n_components=min(5, X.shape[1]))
+        pca.fit(X)
+    
+        var3 = np.sum(pca.explained_variance_ratio_[:3])
+        results["pca_variance_3_components"] = var3
+    
+        # ------------------------------------------------------------------
+        # STEP 3 — KMeans vs GMM (non-linear clustering)
+        # ------------------------------------------------------------------
+        k = 4
+    
+        kmeans = KMeans(n_clusters=k, random_state=42, n_init="auto").fit(X)
+    
+        gmm = GaussianMixture(
+            n_components=k,
+            random_state=42,
+            covariance_type="diag",  # RAM-SAFE
+            max_iter=100
+        ).fit(X)
+    
+        labels_gmm = gmm.predict(X)
+    
+        sil_km = silhouette_score(X, kmeans.labels_)
+        sil_gmm = silhouette_score(X, labels_gmm)
+    
+        results["silhouette_kmeans"] = sil_km
+        results["silhouette_gmm"] = sil_gmm
+        results["gmm_minus_kmeans"] = sil_gmm - sil_km
+    
+        # ------------------------------------------------------------------
+        # STEP 4 — Regression Test (if target_col provided)
+        # ------------------------------------------------------------------
+        if target_col is not None:
+            X_train, X_test, y_train, y_test = train_test_split(
+                X, y, test_size=0.25, random_state=42
+            )
+    
+            lr = LinearRegression().fit(X_train, y_train)
+            rf = RandomForestRegressor(
+                n_estimators=50,   # small
+                max_depth=6,      # small
+                n_jobs=-1,
+                random_state=42
+            ).fit(X_train, y_train)
+    
+            results["r2_linear"] = lr.score(X_test, y_test)
+            results["r2_random_forest"] = rf.score(X_test, y_test)
+            results["rf_minus_lr"] = results["r2_random_forest"] - results["r2_linear"]
+    
+        return results
+           
+results = test_nonlinearity_sampled(X_out_reduced, target_col="commission", sample_size=20000)
+print(results)
+
+
+
+# Safety impute again
+X_out_reduced = (
+    X_out_reduced.fillna(X_out_reduced.median())
+                .fillna(0)
+)
+
+
+# ---------- D) Scaling ----------
+from sklearn.preprocessing import RobustScaler
+
+scaler = RobustScaler()
+X_scaled_reduced = scaler.fit_transform(X_out_reduced.astype(float))
+
+print("Shape after scaling (enhanced):", X_scaled_reduced.shape)
+
+# ---------- E) PCA ----------
+pca_full = PCA()
+X_pca_full = pca_full.fit_transform(X_scaled_reduced)
+cum_var = np.cumsum(pca_full.explained_variance_ratio_)
+n_components = int(np.argmax(cum_var >= TARGET_VARIANCE) + 1)
+
+pca = PCA(n_components=n_components, svd_solver="randomized", random_state=RANDOM_STATE)
+X_pca = pca.fit_transform(X_scaled_reduced)
+
+print("Shape after PCA (enhanced):", X_pca.shape)
+

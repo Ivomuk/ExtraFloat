@@ -1,0 +1,94 @@
+# 1) Work on a final copy so the original df_v2 stays unchanged
+df_v2_final = df_v2.copy()
+
+# 2) Bring msisdn columns from features_df_enh onto df_v2_final
+df_v2_final["agent_msisdn"] = features_df_enh.loc[df_v2_final.index, "agent_msisdn"]
+df_v2_final["pos_msisdn"] = features_df_enh.loc[df_v2_final.index, "pos_msisdn"]
+
+df_v2_final.head(2)
+
+id_col = "agent_msisdn"  # adjust if needed
+
+cluster_cols = [
+    id_col,
+      "cluster_id_k4",	
+    "cluster_round1",	
+    "cluster_id_k6",	
+    "cluster_round2",	
+    "cluster_id_gmm",	
+    "cluster_hdb_500",	
+    "ensemble_cluster",	
+    "hdb_500_tier",
+    "final_segment_8",	
+    "final_segment_7"
+]
+
+cluster_mapping = df_v2_final[cluster_cols].copy()
+
+df_with_segments = df.copy()
+
+df_with_segments = df_with_segments.merge(
+    cluster_mapping,
+    how="left",
+    on=id_col,
+)
+
+df_with_segments.head(2)
+
+print(len(df), len(df_with_segments))
+
+print(df_with_segments["final_segment_7"].isna().mean())
+print(df_with_segments["final_segment_8"].isna().mean())
+
+# How many rows in the original vs final
+print(df.shape)
+print(df_with_segments.shape) #cash_out_vol_1m,cash_out_value_1m,cash_in_vol_1m,	cash_in_value_1m
+
+print(df_with_segments[[id_col, "ensemble_cluster", "hdb_500_tier"]].head())
+
+df_with_segments[["agent_msisdn","commission"]].sort_values("commission",ascending=False).head(5)
+
+df_filtered = (
+    df_with_segments
+    .query('ensemble_cluster == "GMM_0__Platinum Power"')
+    .loc[:, [
+       # "agent_msisdn",
+        "average_balance",
+        "commission",
+         "cash_out_vol_1m",
+         "cash_out_value_1m",
+         "cash_in_vol_1m",	
+         "cash_in_value_1m",
+        #"cash_out_revenue_1m",
+        #"cash_in_value_1m",
+        "cust_1m",
+        "ensemble_cluster"
+    ]]
+     .sort_values("commission",ascending=False)
+)
+
+# Identify numeric columns (excluding the cluster label)
+num_cols = df_filtered.select_dtypes(include=["number"]).columns.tolist()
+
+# Round → then convert to integer safely
+df_filtered[num_cols] = (
+    df_filtered[num_cols]
+    .round(0)
+    .astype("Int64")     # safe integer type that handles missing values
+)
+
+print(df_filtered.head(20))
+
+
+df_with_segments[[
+        "agent_msisdn",
+        "average_balance",
+        "commission",
+        "cash_out_value_1m",
+        "cash_out_revenue_1m",
+        "cash_in_value_1m",
+        "cust_1m",
+        "ensemble_cluster"
+    ]].query('agent_msisdn == "256780009876"')
+
+

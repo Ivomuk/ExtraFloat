@@ -1,0 +1,309 @@
+k4 = 6
+
+kmeans_k4 = KMeans(
+    n_clusters=k4,
+    random_state=42,
+    n_init=20,
+    max_iter=300
+)
+
+labels_k4 = kmeans_k4.fit_predict(X_pca)
+
+# Attach labels to your cleaned dataframe
+X_with_clusters = X_out_reduced.copy()
+X_with_clusters["cluster_id_k4"] = labels_k4
+
+cluster_sizes_k4 = X_with_clusters["cluster_id_k4"].value_counts().sort_index()
+cluster_sizes_k4 = cluster_sizes_k4.reset_index()
+cluster_sizes_k4.columns = ["cluster_id_k4", "count"]
+print(cluster_sizes_k4)
+
+# sample 20k points for silhouette
+sample_size = 20000
+idx = np.random.choice(len(X_pca), sample_size, replace=False)
+
+sil_score_sampled = silhouette_score(X_pca[idx], labels_k4[idx])
+print("Sampled Silhouette Score:", sil_score_sampled)
+
+n_samples = X_pca.shape[0]
+max_n = 20000  # adjust based on speed vs accuracy
+
+if n_samples > max_n:
+    idx = np.random.choice(n_samples, size=max_n, replace=False)
+    X_pca_sample = X_pca[idx]
+    labels_sample = labels_k4[idx]
+else:
+    X_pca_sample = X_pca
+    labels_sample = labels_k4
+
+sil = silhouette_score(X_pca_sample, labels_sample)
+print("Sampled Silhouette Score:", sil)
+
+pd.Series(labels_k4).value_counts(normalize=True)
+
+
+def make_cluster_profile(
+    X_out,
+    labels,
+    cols,
+    inverse_log_cols=None,
+    agg_func="mean"
+):
+    """
+    Build a cluster profile table from X_out and labels.
+
+    - X_out: dataframe of features used for clustering (after log1p / winsor).
+    - labels: cluster labels (array-like, same length as X_out).
+    - cols: list of columns to include in the profile.
+    - inverse_log_cols: subset of cols that were log1p-transformed and
+      should be inverse-transformed (exp - 1) for interpretability.
+    - agg_func: "mean" or "median" (or any valid pandas agg name).
+
+    Returns a dataframe:
+      profile_log: aggregated values on the transformed scale
+      profile_abs: same, but with inverse log1p applied to inverse_log_cols
+    """
+    if inverse_log_cols is None:
+        inverse_log_cols = []
+
+    # Copy to avoid mutating original
+    df_clusters = X_out.copy()
+    df_clusters["cluster"] = labels
+
+    # Ensure we only use columns that exist
+    cols_existing = [c for c in cols if c in df_clusters.columns]
+    if not cols_existing:
+        raise ValueError("None of the requested cols exist in X_out.")
+
+    # Group by cluster and aggregate
+    if agg_func == "mean":
+        profile_log = df_clusters.groupby("cluster")[cols_existing].mean()
+    else:
+        profile_log = df_clusters.groupby("cluster")[cols_existing].agg(agg_func)
+
+    # Make a copy for absolute-scale interpretation
+    profile_abs = profile_log.copy()
+
+    # Apply inverse log1p only to the specified columns that are present
+    for col in inverse_log_cols:
+        if col in profile_abs.columns:
+            profile_abs[col] = np.expm1(profile_abs[col])
+
+    return profile_log, profile_abs
+
+
+premium_cols_v1 = [
+    # Overall monetization / size
+    "total_value_3m",
+    "total_value_6m",
+    "commission",
+    "commission_per_value_3m",
+    "commission_per_value_6m",
+
+    # Recent dynamics / change
+    "vol_1m_to_3m_ratio",
+    "cash_out_vol_1m_to_3m_ratio",
+    "payment_vol_1m_to_3m_ratio",
+
+    # Product mix (shares) – keep as levels
+    "share_cash_in_value_1m",
+    "share_cash_out_value_1m",
+    "share_voucher_value_1m",
+    "share_payment_value_1m",
+
+    # Network scale and intensity
+    "total_peers_6m",
+    "total_customers_6m",
+    "peers_per_value_6m",
+    "customers_per_value_6m",
+]
+
+profile_cols = premium_cols_v1
+
+inverse_log_cols = [
+    "total_value_3m",
+    "total_value_6m",
+    "commission",
+    "cash_in_value_1m",
+    "cash_out_value_1m",
+    "payment_value_1m",
+    "total_peers_6m",
+    "total_customers_6m",
+]
+
+profile_log, profile_abs = make_cluster_profile(
+    X_out=X_out,
+    labels=labels_k4,
+    cols=profile_cols,
+    inverse_log_cols=inverse_log_cols,
+    agg_func="mean",
+)
+
+
+cluster_profile_v21_log = profile_log
+cluster_profile_v21_abs = profile_abs
+
+print(cluster_profile_v21_log )   # the log scale
+print(cluster_profile_v21_abs )   #  absolute units
+
+
+df_clusters = X_out.copy()
+df_clusters["cluster"] = labels_k4
+
+inverse_log_cols = [
+    "total_value_3m",
+    "total_value_6m",
+    "commission",
+    "cash_in_value_1m",
+    "cash_out_value_1m",
+    "payment_value_1m",
+    "total_peers_6m",
+    "total_customers_6m",
+]
+
+for col in inverse_log_cols:
+    df_clusters[col + "_orig"] = np.expm1(df_clusters[col])
+
+df4 = df_clusters[df_clusters["cluster"] == 4].copy()
+n_agents_4 = len(df4)
+
+n_agents_4
+
+pruned_cols_round1 = selected_features
+
+# Attach labels to your cleaned dataframe
+X_with_clusters_v2 = X_out_reduced.copy()
+X_with_clusters_v2["cluster_id_k4"] = labels_k4
+
+df_v2 = X_with_clusters_v2 # main working dataframe
+df_v2["cluster_round1"] = df_v2["cluster_id_k4"]
+
+dormant_label_round1 = 1
+
+# Active agents mask (non-dormant from Round 1)
+active_mask_round1 = df_v2["cluster_round1"] != dormant_label_round1 
+
+
+# Feature matrix for active agents
+X_active_round1 = df_v2.loc[active_mask_round1, pruned_cols_round1].copy()
+
+# Simple NA handling – you can replace with your own imputer
+X_active_round1 = X_active_round1.fillna(0)
+
+# ---------- D) Scaling ----------
+from sklearn.preprocessing import RobustScaler
+
+scaler_round2 = RobustScaler()
+X_active_scaled_round1 = scaler_round2.fit_transform(X_active_round1.astype(float))
+
+# 1) Fit full PCA on already-scaled active features
+pca_full_round2 = PCA()
+X_active_pca_full_round1 = pca_full_round2.fit_transform(X_active_scaled_round1)
+cum_var_round2 = np.cumsum(pca_full_round2.explained_variance_ratio_)
+
+# 2) Determine number of components to reach TARGET_VARIANCE
+n_components_round2 = int(np.argmax(cum_var_round2 >= TARGET_VARIANCE) + 1)
+print("Round 2: PCs to reach", TARGET_VARIANCE, "variance:", n_components_round2)
+
+# 3) Refit PCA with that number of components
+pca_round2 = PCA(
+    n_components=n_components_round2,
+    svd_solver="randomized",
+    random_state=RANDOM_STATE
+)
+X_active_pca_round1 = pca_round2.fit_transform(X_active_scaled_round1)
+print("Shape after PCA (Round 2 input):", X_active_pca_round1.shape)
+
+kv2 = 6  # 6 clusters for Round 2 (active agents)
+
+kmeans_round2 = KMeans(
+    n_clusters=kv2,
+    random_state=42,
+    n_init=20,
+    max_iter=300
+)
+
+labels_k6 = kmeans_round2.fit_predict(X_active_pca_round1)
+
+# Attach cluster_id_k6 back to df_v2 using active_mask_round1 index
+df_v2.loc[active_mask_round1, "cluster_id_k6"] = labels_k6
+df_v2["cluster_round2"] = df_v2["cluster_id_k6"]
+
+df_v2["cluster_id_k6"] = df_v2["cluster_id_k6"].astype("Int64")
+
+cluster_sizes_k6_full = df_v2["cluster_id_k6"].value_counts(dropna=False).sort_index()
+cluster_sizes_k6_full = cluster_sizes_k6_full.reset_index()
+cluster_sizes_k6_full.columns = ["cluster_id_k6", "count"]
+print(cluster_sizes_k6_full)
+
+
+max_n = 20000  # max sample size for speed
+n_samples = X_active_pca_round1.shape[0]
+
+if n_samples > max_n:
+    idx = np.random.choice(n_samples, size=max_n, replace=False)
+    X_active_pca_sample = X_active_pca_round1[idx]
+    labels_samplev2 = labels_k6[idx]
+else:
+    X_active_pca_sample = X_active_pca_round1
+    labels_samplev2 = labels_k6
+
+sil = silhouette_score(X_active_pca_sample, labels_samplev2)
+print("Sampled Silhouette Score (Round 2, k=6):", sil)
+
+print(X_active_pca_round1.shape[0])
+print(active_mask_round1.sum())
+print(len(labels_k6))
+
+profiling_cols = ['commission',
+'cash_in_value_1m',
+#'cash_in_value_3m',
+'cash_in_value_6m',
+#'cash_in_vol_1m',
+#'cash_in_vol_3m',
+    'cash_out_value_1m',
+    'cash_out_value_3m',
+#    'cash_out_value_6m',
+    'cash_out_vol_1m',
+    'cash_out_vol_3m',
+#    'cash_out_cust_3m',
+#    'cash_out_cust_6m',
+  'payment_value_3m',
+    'payment_value_1m',
+# 'cust_3m',
+#    'cust_1m',
+'payment_vol_1m',
+ 'payment_vol_3m',
+ 'payment_value_1m',
+ 'payment_value_3m',
+ 'payment_peers_6m',
+# 'age',
+'tenure_years',
+# 'gender_clean_female',
+# 'gender_clean_male',
+# 'gender_clean_nan',
+'commission_per_value_3m',
+ 'commission_per_value_6m']
+
+kmeans_round2_profile = (
+    df_v2
+    .loc[df_v2["cluster_id_k6"].notna()]         # restrict to rows that actually have a k=6 label
+    .groupby("cluster_id_k6")[profiling_cols]
+    .mean()
+    .round(2)
+)
+print(kmeans_round2_profile)
+
+
+dormant_label_round2 = None  # pure-zero / degenerate cluster from k6
+
+if dormant_label_round2 is None:
+    # No dormant cluster chosen → just use all labeled rows
+    active_mask_round2 = df_v2["cluster_round2"].notna()
+else:
+    # Drop the cluster you have manually chosen as dormant
+    active_mask_round2 = (
+        df_v2["cluster_round2"].notna()
+        & (df_v2["cluster_round2"] != dormant_label_round2)
+    )
+
