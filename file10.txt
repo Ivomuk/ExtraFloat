@@ -1,0 +1,292 @@
+# Build a unified ops_scored table via concat: thick-file PD placement output + thin-file scorecard output
+# Then apply a thin-file operating point (approve best 50% by never_loan_pd_like)
+agent_policy_placement_ops_risk = globals().get('agent_policy_placement_ops_risk')
+df_pd_sc = globals().get('df_pd_sc')
+
+if not isinstance(agent_policy_placement_ops_risk, pd.DataFrame):
+    raise ValueError('agent_policy_placement_ops_risk is not in memory.')
+if not isinstance(df_pd_sc, pd.DataFrame):
+    raise ValueError('df_pd_sc is not in memory.')
+
+# 1) Thick-file block (already filtered to thin_file_flag==0)
+thick_out = agent_policy_placement_ops_risk.copy()
+thick_out['decision_source'] = 'PD_MODEL'
+
+# 2) Thin-file block from scorecard
+thin_cols = ['agent_msisdn','never_loan_points','never_loan_score_0_100','never_loan_pd_like','never_loan_top_drivers']
+thin_cols = [c for c in thin_cols if c in df_pd_sc.columns]
+thin_out = df_pd_sc[thin_cols].copy()
+
+thin_out['thin_file_flag'] = 1
+thin_out['decision_source'] = 'SCORECARD'
+
+# Ensure schema compatibility: add missing columns from thick to thin as NaN
+for c in thick_out.columns:
+    if c not in thin_out.columns:
+        thin_out[c] = np.nan
+
+# (Optional) keep any extra scorecard columns by appending them to thick as NaN
+for c in thin_out.columns:
+    if c not in thick_out.columns:
+        thick_out[c] = np.nan
+
+# Align column order
+final_cols = list(thick_out.columns)
+thin_out = thin_out[final_cols]
+thick_out = thick_out[final_cols]
+
+# 3) Concat
+ops_scored = pd.concat([thick_out, thin_out], ignore_index=True)
+
+# 4) Apply thin-file operating point
+ops_scored['thin_file_flag'] = pd.to_numeric(ops_scored['thin_file_flag'], errors='coerce')
+thin_mask = ops_scored['thin_file_flag'].eq(1)
+
+if thin_mask.sum() > 0 and 'never_loan_pd_like' in ops_scored.columns:
+    ops_scored['never_loan_pd_like'] = pd.to_numeric(ops_scored['never_loan_pd_like'], errors='coerce')
+    if ops_scored.loc[thin_mask, 'never_loan_pd_like'].notna().sum() > 0:
+        thin_cutoff_50 = ops_scored.loc[thin_mask, 'never_loan_pd_like'].quantile(0.50)
+        ops_scored.loc[thin_mask, 'final_approved'] = (
+            ops_scored.loc[thin_mask, 'never_loan_pd_like'] <= thin_cutoff_50
+        ).astype(int).values
+        ops_scored.loc[thin_mask, 'final_policy_bucket'] = np.where(
+            ops_scored.loc[thin_mask, 'final_approved'].eq(1),
+            'SCORECARD_APPROVE_50',
+            'SCORECARD_DECLINE_50'
+        )
+
+# Persist in memory
+globals()['ops_scored'] = ops_scored
+
+# Quick sanity checks
+print(ops_scored.head())
+print(ops_scored.shape)
+print(ops_scored['decision_source'].value_counts(dropna=False))
+print(ops_scored['thin_file_flag'].value_counts(dropna=False).head(10))
+
+# Show thin-file fill rate
+if 'never_loan_pd_like' in ops_scored.columns:
+    print(ops_scored.loc[thin_mask, 'never_loan_pd_like'].notna().mean())
+    ops_scored.to_csv('full_agent_policy_placement_ops_risk.csv', index=False)
+
+
+ops_scored_no_history = (
+    ops_scored
+    [['agent_msisdn','final_policy_bucket','final_approved','decision_source','never_loan_points','never_loan_score_0_100','never_loan_pd_like','never_loan_top_drivers']]
+    .loc[ops_scored["thin_file_flag"] == 1]
+    .copy()
+)
+ops_scored_no_history.head()
+
+ops_scored["thin_file_flag"] = pd.to_numeric(ops_scored["thin_file_flag"], errors="coerce")
+
+pd_mask = ops_scored["thin_file_flag"].eq(0)
+thin_mask = ops_scored["thin_file_flag"].eq(1)
+
+pd_fill = pd.to_numeric(ops_scored["cal_pd_xgb"], errors="coerce").loc[pd_mask].notna().mean()
+sc_fill = pd.to_numeric(ops_scored["never_loan_pd_like"], errors="coerce").loc[thin_mask].notna().mean()
+
+print(pd_fill)
+print(sc_fill)
+
+thick = ops_scored[pd.to_numeric(ops_scored["thin_file_flag"], errors="coerce").eq(0)].copy()
+thick["cal_pd_xgb_num"] = pd.to_numeric(thick["cal_pd_xgb"], errors="coerce")
+miss = thick[thick["cal_pd_xgb_num"].isna()].copy()
+
+print(miss["final_policy_bucket"].value_counts(dropna=False).head(10))
+print(miss["xgb_policy_bucket"].value_counts(dropna=False).head(10))
+
+if "bad_state" in miss.columns:
+    print(miss["bad_state"].value_counts(dropna=False))
+	
+print(agent_policy_placement["final_approved"].value_counts(dropna=False))
+print(agent_policy_placement["final_policy_bucket"].value_counts(dropna=False))
+
+bucket_summary = (
+    agent_policy_placement
+    .groupby(["final_policy_bucket", "thin_file_flag"], dropna=False)
+    .agg(
+        n=("agent_msisdn", "count"),
+        obs_bad_rate=("bad_state", "mean"),
+        avg_cal_pd=("cal_pd_xgb", "mean"),
+    )
+    .reset_index()
+    .sort_values(["final_policy_bucket", "thin_file_flag"])
+)
+
+bucket_summary
+
+bucket_summary["share"] = bucket_summary["n"] / bucket_summary["n"].sum()
+bucket_summary
+
+approved_obs_br = agent_policy_placement.loc[agent_policy_placement["final_approved"] == 1, "bad_state"].mean()
+approved_obs_br
+
+declined_obs_br = agent_policy_placement.loc[agent_policy_placement["final_approved"] == 0, "bad_state"].mean()
+declined_obs_br
+
+# An executive-ready policy summary (2x2 style) for the chosen operating point.
+
+
+agent_policy_placement = globals().get('agent_policy_placement')
+
+# Compute approval/decline rates and bad rates using the existing final_approved column
+if isinstance(agent_policy_placement, pd.DataFrame) and 'final_approved' in agent_policy_placement.columns:
+    total_n = int(agent_policy_placement.shape[0])
+    approved_mask = agent_policy_placement['final_approved'] == 1
+    declined_mask = agent_policy_placement['final_approved'] == 0
+
+    approved_n = int(approved_mask.sum())
+    declined_n = int(declined_mask.sum())
+
+    approval_rate = approved_n / total_n if total_n > 0 else np.nan
+    decline_rate = declined_n / total_n if total_n > 0 else np.nan
+
+    approved_obs_br = float(agent_policy_placement.loc[approved_mask, 'bad_state'].mean())
+    declined_obs_br = float(agent_policy_placement.loc[declined_mask, 'bad_state'].mean())
+
+    gap_pp = (declined_obs_br - approved_obs_br) * 100.0
+
+    exec_tbl = pd.DataFrame({
+        'segment': ['Approved', 'Declined', 'Gap (Declined - Approved)'],
+        'n': [approved_n, declined_n, np.nan],
+        'share': [approval_rate, decline_rate, np.nan],
+        'obs_bad_rate': [approved_obs_br, declined_obs_br, np.nan],
+        'gap_pp': [np.nan, np.nan, gap_pp]
+    })
+
+    # Format-friendly versions
+    exec_tbl_fmt = exec_tbl.copy()
+    exec_tbl_fmt['n'] = exec_tbl_fmt['n'].map(lambda x: '' if pd.isna(x) else str(int(x)))
+    exec_tbl_fmt['share'] = exec_tbl_fmt['share'].map(lambda x: '' if pd.isna(x) else str(round(x * 100.0, 2)) + '%')
+    exec_tbl_fmt['obs_bad_rate'] = exec_tbl_fmt['obs_bad_rate'].map(lambda x: '' if pd.isna(x) else str(round(x * 100.0, 2)) + '%')
+    exec_tbl_fmt['gap_pp'] = exec_tbl_fmt['gap_pp'].map(lambda x: '' if pd.isna(x) else str(round(x, 2)) + ' pp')
+
+    print(exec_tbl_fmt)
+
+    # Also compute the overall bad rate for context
+    overall_obs_br = float(agent_policy_placement['bad_state'].mean())
+    print(round(overall_obs_br * 100.0, 2))
+else:
+    print('agent_policy_placement missing or final_approved column not found')
+
+
+# Restore lgb_val_df to the full validation dataframe by leveraging row alignment with xgb_df_val_scored.
+# Then build a per-agent PD export with both models.
+
+lgb_candidate = None
+if 'lgb_df' in globals() and isinstance(lgb_df, pd.DataFrame) and len(lgb_df) == len(xgb_df_val_scored):
+    lgb_candidate = lgb_df.copy()
+elif 'val_scored_lgbm' in globals() and isinstance(val_scored_lgbm, pd.DataFrame) and len(val_scored_lgbm) == len(xgb_df_val_scored):
+    lgb_candidate = val_scored_lgbm.copy()
+else:
+    # Reconstruct an agent-keyed LGB frame by assuming raw_score in lgb_val_df was overwritten/truncated.
+    # We can't recover missing rows without the original array, so mark as unavailable.
+    lgb_candidate = None
+
+print('len_xgb')
+print(len(xgb_df_val_scored))
+print('len_lgb_val_df_current')
+print(len(lgb_val_df) if isinstance(lgb_val_df, pd.DataFrame) else None)
+print('len_lgb_candidate')
+print(len(lgb_candidate) if isinstance(lgb_candidate, pd.DataFrame) else None)
+
+if lgb_candidate is not None:
+    # Ensure required columns exist
+    if 'agent_msisdn' not in lgb_candidate.columns and 'agent_msisdn' in xgb_df_val_scored.columns:
+        lgb_candidate = lgb_candidate.copy()
+        lgb_candidate['agent_msisdn'] = xgb_df_val_scored['agent_msisdn'].values
+    lgb_val_df = lgb_candidate
+
+# Build PD export
+xgb_pd_tbl = xgb_df_val_scored[['agent_msisdn', 'bad_state', 'thin_file_flag', 'raw_score']].copy()
+xgb_pd_tbl = xgb_pd_tbl.rename(columns={'raw_score': 'pd_xgb'})
+xgb_pd_tbl['pd_xgb'] = pd.to_numeric(xgb_pd_tbl['pd_xgb'], errors='coerce').clip(0, 1)
+
+if isinstance(lgb_val_df, pd.DataFrame) and 'raw_score' in lgb_val_df.columns:
+    # If agent id is still missing, attach it from xgb ordering (valid only if row-aligned)
+    lgb_pd_tbl = lgb_val_df.copy()
+    if 'agent_msisdn' not in lgb_pd_tbl.columns and 'agent_msisdn' in xgb_df_val_scored.columns and len(lgb_pd_tbl) == len(xgb_df_val_scored):
+        lgb_pd_tbl['agent_msisdn'] = xgb_df_val_scored['agent_msisdn'].values
+    keep_cols = [c for c in ['agent_msisdn', 'raw_score'] if c in lgb_pd_tbl.columns]
+    lgb_pd_tbl = lgb_pd_tbl[keep_cols].copy()
+    if 'raw_score' in lgb_pd_tbl.columns:
+        lgb_pd_tbl = lgb_pd_tbl.rename(columns={'raw_score': 'pd_lgb'})
+        lgb_pd_tbl['pd_lgb'] = pd.to_numeric(lgb_pd_tbl['pd_lgb'], errors='coerce').clip(0, 1)
+else:
+    lgb_pd_tbl = pd.DataFrame({'agent_msisdn': xgb_pd_tbl['agent_msisdn'].values, 'pd_lgb': np.nan})
+
+pd_all_agents_df = xgb_pd_tbl.merge(lgb_pd_tbl, on='agent_msisdn', how='left')
+
+print(pd_all_agents_df.head())
+print(pd_all_agents_df[['pd_xgb', 'pd_lgb']].describe())
+
+out_name = 'pd_all_agents_v3.csv'
+pd_all_agents_df.to_csv(out_name, index=False)
+print(out_name)
+
+# Verify that lgb_val_df is the full scored validation dataframe and fix if it's been overwritten.
+# If valid, rebuild a per-agent PD export by joining XGB and LGB scores on agent_msisdn.
+
+print(lgb_val_df.shape)
+print(list(lgb_val_df.columns))
+print(lgb_val_df.head())
+
+print(xgb_df_val_scored.shape)
+print(list(xgb_df_val_scored.columns))
+print(xgb_df_val_scored.head())
+
+# Ensure LGB has agent_msisdn; if not, try to restore from val_scored_lgbm if present
+if 'agent_msisdn' not in lgb_val_df.columns:
+    if 'val_scored_lgbm' in globals() and isinstance(val_scored_lgbm, pd.DataFrame) and 'agent_msisdn' in val_scored_lgbm.columns:
+        lgb_val_df = val_scored_lgbm.copy()
+
+# Build joined PD table
+xgb_pd_tbl = xgb_df_val_scored[['agent_msisdn', 'raw_score']].copy()
+xgb_pd_tbl = xgb_pd_tbl.rename(columns={'raw_score': 'pd_xgb'})
+xgb_pd_tbl['pd_xgb'] = pd.to_numeric(xgb_pd_tbl['pd_xgb'], errors='coerce').clip(0, 1)
+
+lgb_pd_tbl = lgb_val_df[['agent_msisdn', 'raw_score']].copy()
+lgb_pd_tbl = lgb_pd_tbl.rename(columns={'raw_score': 'pd_lgb'})
+lgb_pd_tbl['pd_lgb'] = pd.to_numeric(lgb_pd_tbl['pd_lgb'], errors='coerce').clip(0, 1)
+
+pd_all_agents_df = xgb_pd_tbl.merge(lgb_pd_tbl, on='agent_msisdn', how='inner')
+print(pd_all_agents_df.shape)
+print(pd_all_agents_df.head())
+
+out_name = 'pd_all_agents_v2.csv'
+pd_all_agents_df.to_csv(out_name, index=False)
+print(out_name)
+
+# Diagnose why agent_msisdn is missing in the exported PD file and write a corrected export.
+
+
+print(pd_all_agents_df.shape if 'pd_all_agents_df' in globals() else 'pd_all_agents_df_not_in_memory')
+if 'pd_all_agents_df' in globals():
+    print(list(pd_all_agents_df.columns))
+    print(pd_all_agents_df.head())
+
+# If agent_msisdn exists in xgb_df_val_scored, rebuild PD table using it as backbone
+pd_all_agents_fixed = None
+if 'xgb_df_val_scored' in globals() and isinstance(xgb_df_val_scored, pd.DataFrame) and 'agent_msisdn' in xgb_df_val_scored.columns:
+    pd_all_agents_fixed = pd.DataFrame({
+        'agent_msisdn': xgb_df_val_scored['agent_msisdn'].values,
+        'pd_xgb': pd.to_numeric(xgb_df_val_scored['raw_score'], errors='coerce').clip(0, 1)
+    })   
+    # Add LGB if we can align by agent_msisdn; otherwise align by row-order if lengths match
+    if 'lgb_val_df' in globals() and isinstance(lgb_val_df, pd.DataFrame) and 'agent_msisdn' in lgb_val_df.columns and 'raw_score' in lgb_val_df.columns:
+        lgb_pd_tbl = lgb_val_df[['agent_msisdn', 'raw_score']].copy()
+        lgb_pd_tbl = lgb_pd_tbl.rename(columns={'raw_score': 'pd_lgb'})
+        lgb_pd_tbl['pd_lgb'] = pd.to_numeric(lgb_pd_tbl['pd_lgb'], errors='coerce').clip(0, 1)
+        pd_all_agents_fixed = pd_all_agents_fixed.merge(lgb_pd_tbl, on='agent_msisdn', how='left')
+    elif 'lgb_val_df' in globals() and isinstance(lgb_val_df, pd.DataFrame) and 'raw_score' in lgb_val_df.columns and len(lgb_val_df) == len(xgb_df_val_scored):
+        pd_all_agents_fixed['pd_lgb'] = pd.to_numeric(lgb_val_df['raw_score'].reset_index(drop=True), errors='coerce').clip(0, 1)
+    else:
+        pd_all_agents_fixed['pd_lgb'] = pd.NA
+
+print(pd_all_agents_fixed.head() if pd_all_agents_fixed is not None else 'could_not_rebuild')
+
+out_name = 'pd_all_agents_fixed.csv'
+if pd_all_agents_fixed is not None:
+    pd_all_agents_fixed.to_csv(out_name, index=False)
+    print(out_name)

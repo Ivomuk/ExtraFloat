@@ -1,0 +1,697 @@
+# Build_decile_tables/compare_models_deciles pipeline,
+# preserve fallbacks for variable names, and export both overall + by-segment deciles.
+
+# Grab candidate scored frames from memory
+xgb_df = globals().get("xgb_df_val_scored")
+lgb_df = globals().get("lgb_val_df")
+
+# Fallbacks if names differ
+if not isinstance(xgb_df, pd.DataFrame):
+    xgb_df = globals().get("df_val_scored")
+if not isinstance(xgb_df, pd.DataFrame):
+    xgb_df = globals().get("val_scored_df")
+
+if not isinstance(lgb_df, pd.DataFrame):
+    lgb_df = globals().get("df_lgb_val")
+if not isinstance(lgb_df, pd.DataFrame):
+    lgb_df = globals().get("val_scored_lgbm")
+
+# If xgb_df accidentally points to the same object as lgb_df, try another candidate
+if isinstance(xgb_df, pd.DataFrame) and isinstance(lgb_df, pd.DataFrame) and (xgb_df is lgb_df):
+    alt_xgb = globals().get("val_scored_df")
+    if isinstance(alt_xgb, pd.DataFrame) and (alt_xgb is not lgb_df):
+        xgb_df = alt_xgb
+
+# Run comparison if both exist; otherwise just compute for LGB
+cmp_tbl = None
+xgb_res = None
+lgb_res = None
+
+if isinstance(xgb_df, pd.DataFrame) and isinstance(lgb_df, pd.DataFrame):
+    cmp_tbl, xgb_res, lgb_res = compare_models_deciles(
+        xgb_df,
+        lgb_df,
+        score_a="raw_score",
+        score_b="raw_score",
+        target_col="bad_state",
+        segment_col="thin_segment",
+        n_bins=10,
+        name_a="xgb",
+        name_b="lgb"
+    )
+else:
+    if isinstance(lgb_df, pd.DataFrame):
+        lgb_res = build_decile_tables(
+            lgb_df,
+            score_col="raw_score",
+            target_col="bad_state",
+            segment_col="thin_segment",
+            n_bins=10
+        )
+
+# Print compact outputs
+print("have_xgb_df")
+print(isinstance(xgb_df, pd.DataFrame))
+print("have_lgb_df")
+print(isinstance(lgb_df, pd.DataFrame))
+
+if isinstance(cmp_tbl, pd.DataFrame):
+    print(cmp_tbl)
+
+if isinstance(lgb_res, dict):
+    print("lgb_seg_col")
+    print(lgb_res.get("seg_col"))
+    print(lgb_res.get("seg_summary"))
+    print(lgb_res.get("overall").head(12))
+
+if isinstance(xgb_res, dict):
+    print("xgb_seg_col")
+    print(xgb_res.get("seg_col"))
+    print(xgb_res.get("seg_summary"))
+    print(xgb_res.get("overall").head(12))
+
+# Export deciles: overall + by-segment for each model (when available)
+exported_files = []
+
+def _export_res(res, prefix):
+    if not isinstance(res, dict):
+        return
+
+    overall_df = res.get("overall")
+    if isinstance(overall_df, pd.DataFrame):
+        fn_overall = prefix + "_deciles_overall.csv"
+        overall_df.to_csv(fn_overall, index=False)
+        exported_files.append(fn_overall)
+
+    by_seg = res.get("by_segment")
+    if isinstance(by_seg, dict) and len(by_seg) > 0:
+        seg_frames = []
+        for seg_name, seg_df in by_seg.items():
+            if isinstance(seg_df, pd.DataFrame):
+                tmp_df = seg_df.copy()
+                tmp_df.insert(0, "segment", str(seg_name))
+                seg_frames.append(tmp_df)
+        if len(seg_frames) > 0:
+            by_seg_all = pd.concat(seg_frames, ignore_index=True)
+            fn_byseg = prefix + "_deciles_by_segment.csv"
+            by_seg_all.to_csv(fn_byseg, index=False)
+            exported_files.append(fn_byseg)  _export_res(xgb_res, "xgb")
+_export_res(lgb_res, "lgb")
+
+for fn in exported_files:
+    print(fn)
+
+# Persist for downstream use
+cmp_models_tbl = cmp_tbl
+xgb_val_deciles_tbl = xgb_res.get("overall") if isinstance(xgb_res, dict) else None
+lgb_val_deciles_tbl = lgb_res.get("overall") if isinstance(lgb_res, dict) else None
+xgb_val_deciles_by_segment = xgb_res.get("by_segment") if isinstance(xgb_res, dict) else None
+lgb_val_deciles_by_segment = lgb_res.get("by_segment") if isinstance(lgb_res, dict) else None 
+
+
+# Paired bootstrap for (LGB AUC - XGB AUC) + XGB AUC CI on the same holdout rows
+# --- Locate scored validation frames in memory
+xgb_candidates = [
+    "xgb_df_val_scored", "val_scored", "val_scored_xgb", "xgb_val_scored",
+    "xgb_df_val", "xgb_val_df", "val_scored_df"
+]
+lgb_candidates = [
+    "lgb_val_df", "val_scored_lgbm", "lgb_val_scored",
+    "lgb_df_val_scored", "df_lgb_val", "df_lgb_val_scored", "df_val_scored"
+]
+
+def _find_scored_df(candidates):
+    for nm in candidates:
+        df_try = globals().get(nm)
+        if isinstance(df_try, pd.DataFrame) and ("bad_state" in df_try.columns) and ("raw_score" in df_try.columns):
+            return df_try, nm
+    return None, None
+
+xgb_df, xgb_src = _find_scored_df(xgb_candidates)
+lgb_df, lgb_src = _find_scored_df(lgb_candidates)
+
+print("xgb_source"); print(xgb_src)
+print("lgb_source"); print(lgb_src)
+
+if not isinstance(xgb_df, pd.DataFrame) or not isinstance(lgb_df, pd.DataFrame):
+    raise ValueError(
+        "Could not find both XGB and LGB scored validation DataFrames with columns bad_state and raw_score. "
+        "Tip: set xgb_df_val_scored = val_scored (from XGB block) and lgb_val_df = val_scored_lgbm (from LGB block)."
+    )
+
+# --- Align rows: prefer join on agent_msisdn (true paired); fallback to index intersection
+id_candidates = ["agent_msisdn", "msisdn", "agent_id", "agent_key"]
+join_key = None
+for c in id_candidates:
+    if (c in xgb_df.columns) and (c in lgb_df.columns):
+        join_key = c
+        break
+
+if join_key is not None:
+    xgb_small = xgb_df[[join_key, "bad_state", "raw_score"]].copy()
+    lgb_small = lgb_df[[join_key, "bad_state", "raw_score"]].copy()
+
+    # If multiple rows per agent exist, keep first to enforce 1:1 pairing
+    xgb_small = xgb_small.drop_duplicates(subset=[join_key], keep="first")
+    lgb_small = lgb_small.drop_duplicates(subset=[join_key], keep="first")
+
+    merged = xgb_small.merge(lgb_small, on=join_key, how="inner", suffixes=("_xgb", "_lgb"))
+
+    cmp_df = pd.DataFrame({
+        "y_xgb": pd.to_numeric(merged["bad_state_xgb"], errors="coerce"),
+        "xgb":   pd.to_numeric(merged["raw_score_xgb"], errors="coerce"),
+        "y_lgb": pd.to_numeric(merged["bad_state_lgb"], errors="coerce"),
+        "lgb":   pd.to_numeric(merged["raw_score_lgb"], errors="coerce"),
+    }).dropna()
+
+    align_mode = "join_on_" + str(join_key)
+else:
+    common_idx = xgb_df.index.intersection(lgb_df.index)
+    cmp_df = pd.DataFrame({
+        "y_xgb": pd.to_numeric(xgb_df.loc[common_idx, "bad_state"], errors="coerce"),
+        "xgb":   pd.to_numeric(xgb_df.loc[common_idx, "raw_score"], errors="coerce"),
+        "y_lgb": pd.to_numeric(lgb_df.loc[common_idx, "bad_state"], errors="coerce"),
+        "lgb":   pd.to_numeric(lgb_df.loc[common_idx, "raw_score"], errors="coerce"),
+    }).dropna()
+
+    align_mode = "index_intersection"
+
+cmp_df["y_xgb"] = cmp_df["y_xgb"].astype(int)
+cmp_df["y_lgb"] = cmp_df["y_lgb"].astype(int)
+
+y_mismatch = int((cmp_df["y_xgb"] != cmp_df["y_lgb"]).sum())
+
+print("align_mode"); print(align_mode)
+print("aligned_shape"); print(cmp_df.shape)
+print("y_mismatch"); print(y_mismatch)
+
+# Use XGB y as canonical (they should match)
+cmp_df = cmp_df.drop(columns=["y_lgb"]).rename(columns={"y_xgb": "y"})
+
+# --- Point estimates (guard against single-class holdout)
+xgb_point = np.nan
+lgb_point = np.nan
+diff_point = np.nan
+if int(cmp_df.shape[0]) > 0 and int(np.unique(cmp_df["y"].values).size) >= 2:
+    xgb_point = float(roc_auc_score(cmp_df["y"], cmp_df["xgb"]))
+    lgb_point = float(roc_auc_score(cmp_df["y"], cmp_df["lgb"]))
+    diff_point = float(lgb_point - xgb_point)
+
+print("xgb_point_auc"); print(xgb_point)
+print("lgb_point_auc"); print(lgb_point)
+print("diff_point_lgb_minus_xgb"); print(diff_point)
+
+# --- Bootstrap
+boot_n = 2000
+rng = np.random.default_rng(20260115)
+
+n_rows = int(cmp_df.shape[0])
+y_vals = cmp_df["y"].to_numpy()
+xgb_vals = cmp_df["xgb"].to_numpy()
+lgb_vals = cmp_df["lgb"].to_numpy()   xgb_auc_boot = np.full(boot_n, np.nan)
+diff_auc_boot = np.full(boot_n, np.nan)
+
+for b in tqdm(range(boot_n)):
+    samp_idx = rng.integers(0, n_rows, size=n_rows)
+    y_b = y_vals[samp_idx]
+    if int(np.unique(y_b).size) < 2:
+        continue
+    auc_x = roc_auc_score(y_b, xgb_vals[samp_idx])
+    auc_l = roc_auc_score(y_b, lgb_vals[samp_idx])
+    xgb_auc_boot[b] = auc_x
+    diff_auc_boot[b] = auc_l - auc_x
+
+xgb_ser = pd.Series(xgb_auc_boot).dropna()
+diff_ser = pd.Series(diff_auc_boot).dropna()
+
+out_tbl = pd.DataFrame({
+    "metric": [
+        "align_mode",
+        "n_rows_aligned",
+        "y_mismatch",
+        "xgb_point_auc", "xgb_ci95_lo", "xgb_ci95_hi",
+        "lgb_point_auc",
+        "diff_point_lgb_minus_xgb", "diff_ci95_lo", "diff_ci95_hi",
+        "p_lgb_better"
+    ],
+    "value": [
+        align_mode,
+        float(n_rows),
+        float(y_mismatch),
+        xgb_point,
+        float(xgb_ser.quantile(0.025)) if int(xgb_ser.shape[0]) > 0 else np.nan,
+        float(xgb_ser.quantile(0.975)) if int(xgb_ser.shape[0]) > 0 else np.nan,
+        lgb_point,
+        diff_point,
+        float(diff_ser.quantile(0.025)) if int(diff_ser.shape[0]) > 0 else np.nan,
+        float(diff_ser.quantile(0.975)) if int(diff_ser.shape[0]) > 0 else np.nan,
+        float((diff_ser > 0).mean()) if int(diff_ser.shape[0]) > 0 else np.nan
+    ]
+})
+
+print(out_tbl)
+
+# Persist outputs for later
+bootstrap_auc_tbl = out_tbl
+bootstrap_xgb_auc_samples = xgb_ser
+bootstrap_diff_auc_samples = diff_ser 
+
+
+# PD Calibration Phase 1 + Phase 2 pipeline as reusable functions.
+# It will fail-closed on small samples / too few bads, enforce monotonic calibration via isotonic regression,
+# and require calibrated PD coverage before producing policy CSV outputs.
+
+def _standardize_scored_df(scored_df, model_key):
+    df_local = scored_df.copy()
+
+    # Label
+    if 'y' not in df_local.columns and 'bad_state' in df_local.columns:
+        df_local['y'] = pd.to_numeric(df_local['bad_state'], errors='coerce')
+    df_local['y'] = (pd.to_numeric(df_local['y'], errors='coerce') > 0.5).astype(int)
+
+    # ID
+    if 'agent_msisdn' not in df_local.columns:
+        df_local['agent_msisdn'] = df_local.index.astype(str)
+    else:
+        df_local['agent_msisdn'] = df_local['agent_msisdn'].astype(str)
+
+    # Score
+    score_col_local = None
+    if model_key == 'xgb':
+        if 'xgb_score' in df_local.columns:
+            score_col_local = 'xgb_score'
+        elif 'score' in df_local.columns:
+            score_col_local = 'score'
+    if model_key == 'lgb':
+        if 'lgb_score' in df_local.columns:
+            score_col_local = 'lgb_score'
+        elif 'score' in df_local.columns:
+            score_col_local = 'score'
+
+    if score_col_local is None:
+        # fallback: first column containing 'score'
+        score_cands = [c for c in df_local.columns if 'score' in str(c).lower()]
+        if len(score_cands) > 0:
+            score_col_local = score_cands[0]
+
+    if score_col_local is None:
+        raise ValueError('No score column found for model ' + str(model_key))
+
+    df_local['model_score'] = pd.to_numeric(df_local[score_col_local], errors='coerce')
+
+    df_local = df_local.replace([np.inf, -np.inf], np.nan)
+    df_local = df_local[['agent_msisdn','y','model_score']].dropna()
+
+    return df_local, score_col_local
+
+
+def build_pd_calibration_map(scored_df, model_key, n_bins=50, min_n=5000, min_bads=50):
+    df_local, score_col_local = _standardize_scored_df(scored_df, model_key)
+
+    n_obs = int(df_local.shape[0])
+    n_bads = int(df_local['y'].sum())
+    event_rate = float(df_local['y'].mean())
+
+    if n_obs < int(min_n):
+        raise ValueError('Fail-closed: n=' + str(n_obs) + ' < min_n=' + str(min_n) + ' for model ' + model_key)
+    if n_bads < int(min_bads):
+        raise ValueError('Fail-closed: bads=' + str(n_bads) + ' < min_bads=' + str(min_bads) + ' for model ' + model_key)
+    if event_rate <= 0.0 or event_rate >= 1.0:
+        raise ValueError('Fail-closed: event_rate=' + str(event_rate) + ' is degenerate for model ' + model_key)
+
+    # Determine risk orientation
+    corr_val = float(pd.Series(df_local['model_score']).corr(pd.Series(df_local['y'])))
+    if np.isnan(corr_val):
+        raise ValueError('Fail-closed: correlation undefined (label constant?) for model ' + model_key)
+    ascending_risk = bool(corr_val > 0)
+
+    # Bin by score quantiles
+    df_local = df_local.sort_values('model_score', ascending=True).reset_index(drop=True)
+    try:
+        df_local['bin'] = pd.qcut(df_local['model_score'], q=int(n_bins), labels=False, duplicates='drop')
+    except Exception:
+        # fallback: fewer bins
+        df_local['bin'] = pd.qcut(df_local['model_score'], q=20, labels=False, duplicates='drop')
+
+    bin_tbl = df_local.groupby('bin', as_index=False).agg(
+        n=('y','size'),
+        bad_rate=('y','mean'),
+        score_min=('model_score','min'),
+        score_max=('model_score','max'),
+        score_mean=('model_score','mean')
+    ).sort_values('score_mean').reset_index(drop=True)
+
+    # Apply isotonic regression for monotonic PD
+    x_vals = bin_tbl['score_mean'].to_numpy()
+    y_vals = bin_tbl['bad_rate'].to_numpy()
+
+    # If higher score means higher risk, PD should be increasing in score_mean, else decreasing.
+    if ascending_risk:
+        iso = IsotonicRegression(increasing=True, out_of_bounds='clip')
+        pd_hat = iso.fit_transform(x_vals, y_vals)
+    else:
+        iso = IsotonicRegression(increasing=False, out_of_bounds='clip')
+        pd_hat = iso.fit_transform(x_vals, y_vals)
+
+    # Clip PD away from 0/1 for operational stability
+    eps = 1e-6
+    pd_hat = np.clip(pd_hat, eps, 1.0 - eps)  
+    bin_tbl['pd'] = pd_hat
+    bin_tbl['model'] = model_key
+    bin_tbl['ascending_risk'] = ascending_risk
+    bin_tbl['score_col'] = score_col_local
+
+    # Construct mapping edges as half-open intervals [min, max) except last bin inclusive.
+    map_tbl = bin_tbl[['model','score_min','score_max','pd','ascending_risk','score_col','n','bad_rate']].copy()
+
+    # Make score_max strictly increasing to avoid gaps due to floating point ties
+    map_tbl = map_tbl.sort_values(['score_min','score_max']).reset_index(drop=True)
+
+    return map_tbl
+
+
+def attach_cal_pd(scored_df, cal_map_tbl, model_key, min_coverage=0.98):
+    df_local, score_col_local = _standardize_scored_df(scored_df, model_key)
+
+    cal_sub = cal_map_tbl[cal_map_tbl['model'].astype(str) == str(model_key)].copy()
+    if cal_sub.shape[0] == 0:
+        raise ValueError('Fail-closed: no calibration mapping for model ' + model_key)
+
+    cal_sub['score_min'] = pd.to_numeric(cal_sub['score_min'], errors='coerce')
+    cal_sub['score_max'] = pd.to_numeric(cal_sub['score_max'], errors='coerce')
+    cal_sub['pd'] = pd.to_numeric(cal_sub['pd'], errors='coerce')
+    cal_sub = cal_sub.dropna(subset=['score_min','score_max','pd']).sort_values(['score_min','score_max']).reset_index(drop=True)
+
+    score_vals = pd.to_numeric(df_local['model_score'], errors='coerce').to_numpy()
+    pd_vals = np.full(int(df_local.shape[0]), np.nan)
+
+    min_edge = float(cal_sub['score_min'].min())
+    max_edge = float(cal_sub['score_max'].max())
+
+    for i in range(int(cal_sub.shape[0])):
+        lo = float(cal_sub.loc[i, 'score_min'])
+        hi = float(cal_sub.loc[i, 'score_max'])
+        if i < int(cal_sub.shape[0]) - 1:
+            msk = (score_vals >= lo) & (score_vals < hi)
+        else:
+            msk = (score_vals >= lo) & (score_vals <= hi)
+        pd_vals[msk] = float(cal_sub.loc[i, 'pd'])
+
+    # Clip out-of-range
+    msk_low = np.isnan(pd_vals) & (score_vals < min_edge)
+    msk_high = np.isnan(pd_vals) & (score_vals > max_edge)
+    if msk_low.any():
+        pd_vals[msk_low] = float(cal_sub.iloc[0]['pd'])
+    if msk_high.any():
+        pd_vals[msk_high] = float(cal_sub.iloc[-1]['pd'])
+
+    df_local['cal_pd'] = pd_vals
+    cov = float(pd.Series(df_local['cal_pd']).notna().mean())
+    if cov < float(min_coverage):
+        raise ValueError('Fail-closed: cal_pd coverage=' + str(cov) + ' < min_coverage=' + str(min_coverage) + ' for model ' + model_key)
+
+    return df_local
+
+
+def build_policy_tables(scored_df_with_pd, prefer_pd=True, n_deciles=10):
+    df_local = scored_df_with_pd.copy()
+
+    if prefer_pd:
+        if 'cal_pd' not in df_local.columns:
+            raise ValueError('Fail-closed: cal_pd missing but prefer_pd=True')
+        band_var = 'cal_pd'
+        # lower PD is better; we want approve lowest PD
+        sort_var = 'cal_pd'
+        sort_ascending = True
+    else:
+        band_var = 'model_score'
+        corr_val = float(pd.Series(df_local['model_score']).corr(pd.Series(df_local['y'])))
+        if np.isnan(corr_val):
+            raise ValueError('Fail-closed: correlation undefined in raw-score policy build')
+        ascending_risk = bool(corr_val > 0)
+        # best first ordering: lower risk first
+        sort_var = 'model_score'
+        sort_ascending = not ascending_risk
+
+    df_sorted = df_local.sort_values(sort_var, ascending=sort_ascending).reset_index(drop=True)
+    df_sorted['rank'] = np.arange(1, int(df_sorted.shape[0]) + 1)
+    df_sorted['approval_rate'] = df_sorted['rank'] / float(df_sorted.shape[0])
+    df_sorted['cum_bad_rate'] = df_sorted['y'].cumsum() / df_sorted['rank']
+
+    grid = np.linspace(0.05, 0.95, 19)
+    rows = []
+    for ar in grid:
+        k = int(np.floor(ar * float(df_sorted.shape[0])))
+        if k < 1:
+            continue
+        sub_df = df_sorted.iloc[:k]
+        cutoff = float(sub_df[sort_var].max())
+        rows.append([float(ar), int(k), float(sub_df['y'].mean()), cutoff])
+
+    thresh_tbl = pd.DataFrame(rows, columns=['approve_rate_target','n_approved','expected_bad_rate','cutoff'])
+    thresh_tbl['cutoff_var'] = sort_var
+
+    # Decile bands
+    df_local = df_local.replace([np.inf, -np.inf], np.nan).dropna(subset=[band_var,'y']).copy()
+    df_local['band_decile'] = pd.qcut(df_local[band_var], q=int(n_deciles), labels=False, duplicates='drop')
+
+    dec_tbl = df_local.groupby('band_decile').agg(
+        n=('y','size'),
+        obs_bad_rate=('y','mean'),
+        band_min=(band_var,'min'),
+        band_max=(band_var,'max'),
+        band_mean=(band_var,'mean')
+    ).reset_index().sort_values('band_decile')
+    dec_tbl['band_var'] = band_var
+
+    return thresh_tbl, dec_tbl, df_sorted
+
+
+def run_locked_policy_pipeline(xgb_df_val_scored, lgb_df_val_scored,
+                              n_bins=50, min_n=5000, min_bads=50,
+                              min_coverage=0.98, export_prefix=''):
+    # Phase 1: build calibration maps
+    xgb_map = build_pd_calibration_map(xgb_df_val_scored, 'xgb', n_bins=n_bins, min_n=min_n, min_bads=min_bads)
+    lgb_map = build_pd_calibration_map(lgb_df_val_scored, 'lgb', n_bins=n_bins, min_n=min_n, min_bads=min_bads)
+
+    pd_calibration_map_tbl = pd.concat([xgb_map, lgb_map], axis=0, ignore_index=True)
+
+    # Phase 2: attach cal_pd + build policy tables
+    xgb_with_pd = attach_cal_pd(xgb_df_val_scored, pd_calibration_map_tbl, 'xgb', min_coverage=min_coverage)
+    lgb_with_pd = attach_cal_pd(lgb_df_val_scored, pd_calibration_map_tbl, 'lgb', min_coverage=min_coverage)
+
+    xgb_thresh, xgb_band, xgb_sorted = build_policy_tables(xgb_with_pd, prefer_pd=True)
+    lgb_thresh, lgb_band, lgb_sorted = build_policy_tables(lgb_with_pd, prefer_pd=True)
+
+    # Export
+    xgb_thresh_path = export_prefix + 'xgb_approval_policy_by_approval_rate.csv'
+    xgb_band_path = export_prefix + 'xgb_policy_by_band_decile.csv'
+    lgb_thresh_path = export_prefix + 'lgb_approval_policy_by_approval_rate.csv'
+    lgb_band_path = export_prefix + 'lgb_policy_by_band_decile.csv'
+
+    xgb_thresh.to_csv(xgb_thresh_path, index=False)
+    xgb_band.to_csv(xgb_band_path, index=False)
+    lgb_thresh.to_csv(lgb_thresh_path, index=False)
+    lgb_band.to_csv(lgb_band_path, index=False)
+
+    artifacts = {
+        'pd_calibration_map_tbl': pd_calibration_map_tbl,
+        'xgb_policy_threshold_tbl': xgb_thresh,
+        'xgb_policy_band_tbl': xgb_band,
+        'lgb_policy_threshold_tbl': lgb_thresh,
+        'lgb_policy_band_tbl': lgb_band,
+        'xgb_policy_df_sorted': xgb_sorted,
+        'lgb_policy_df_sorted': lgb_sorted,
+        'paths': {
+            'xgb_thresh': xgb_thresh_path,
+            'xgb_band': xgb_band_path,
+            'lgb_thresh': lgb_thresh_path,
+            'lgb_band': lgb_band_path
+        }
+    }
+
+    return artifacts
+
+
+print('locked_policy_functions_ready') 
+
+
+# LGB: alias raw_score -> lgb_score
+lgb_df_val_scored = lgb_val_df.copy()
+lgb_df_val_scored["lgb_score"] = lgb_df_val_scored["raw_score"]
+
+locked_artifacts = run_locked_policy_pipeline(
+    xgb_df_val_scored,
+    lgb_df_val_scored,
+    n_bins=50,        # calibration bins
+    min_n=5000,       # fail-closed minimum rows
+    min_bads=50,      # fail-closed minimum bads
+    min_coverage=0.98,# fail-closed minimum % rows that get a cal_pd assigned
+    export_prefix=''  # optional folder/prefix for filenames
+)
+
+locked_artifacts['paths']                 # shows exported CSV paths
+locked_artifacts["pd_calibration_map_tbl"].head()
+locked_artifacts["xgb_policy_threshold_tbl"].head()
+locked_artifacts["xgb_policy_band_tbl"].head()
+locked_artifacts["lgb_policy_threshold_tbl"].head()
+locked_artifacts["lgb_policy_band_tbl"].head()
+
+locked_artifacts["paths"]
+
+locked_artifacts["pd_calibration_map_tbl"].groupby("model")[["n","bad_rate","pd"]].head()
+
+cal = locked_artifacts["pd_calibration_map_tbl"].copy()
+cal = cal.sort_values(["model", "score_min"])
+
+cal["pd_diff"] = cal.groupby("model")["pd"].diff()
+cal.groupby("model")["pd_diff"].min()
+
+locked_artifacts["xgb_policy_threshold_tbl"][["approve_rate_target","n_approved","expected_bad_rate","cutoff"]]
+
+locked_artifacts["lgb_policy_threshold_tbl"][["approve_rate_target","n_approved","expected_bad_rate","cutoff"]]
+
+
+# Bring agent_msisdn into the policy outputs (so you can see exactly where each agent falls)
+# agent-level policy assignment table
+
+'''
+Export 
+
+agent_policy_placement.to_csv("agent_policy_placement.csv", index=False)
+"agent_policy_placement.csv"
+
+How to look up a specific agent quickly
+
+agent_policy_placement[agent_policy_placement["agent_msisdn"] == "<PUT_MSISDN_HERE>"]
+'''
+
+def attach_cal_pd_from_map(scored_df, cal_map_df, model_name, score_col):
+    # Interval-join score -> calibrated PD using the map’s score_min/score_max
+    cal_model = cal_map_df[cal_map_df["model"] == model_name].copy()
+    cal_model = cal_model.sort_values("score_min")
+
+    work_df = scored_df.copy()
+    work_df["_score"] = pd.to_numeric(work_df[score_col], errors="coerce")
+
+    # Build bin edges and use pd.cut to assign bins
+    bin_edges = sorted(set(cal_model["score_min"].tolist() + [float(cal_model["score_max"].max())]))
+    work_df["_bin"] = pd.cut(work_df["_score"], bins=bin_edges, include_lowest=True, right=True)
+
+    # Map each bin -> PD (using max PD in that bin)
+    cal_model["_bin"] = pd.cut(cal_model["score_min"], bins=bin_edges, include_lowest=True, right=True)
+    lookup = cal_model.groupby("_bin", dropna=False).agg(cal_pd=("pd","max")).reset_index()
+
+    out_df = work_df.merge(lookup, on="_bin", how="left")
+    out_df = out_df.drop(columns=["_score","_bin"])
+    return out_df
+
+def add_policy_flags(agent_df, policy_threshold_tbl, prefix):
+    out_df = agent_df.copy()
+    for ar in [0.10, 0.20, 0.50, 0.80]:
+        idx = policy_threshold_tbl["approve_rate_target"].sub(ar).abs().idxmin()
+        cutoff_val = float(policy_threshold_tbl.loc[idx, "cutoff"])
+        out_df[prefix + "_approved_at_" + str(int(ar*100))] = (out_df["cal_pd"] <= cutoff_val).astype(int)
+    return out_df
+
+# ----- XGB agent placement
+xgb_agents = attach_cal_pd_from_map(
+    scored_df=xgb_df_val_scored,
+    cal_map_df=locked_artifacts["pd_calibration_map_tbl"],
+    model_name="xgb",
+    score_col="xgb_score" if "xgb_score" in xgb_df_val_scored.columns else "raw_score"
+)
+
+xgb_agents["xgb_band_decile"] = pd.qcut(xgb_agents["cal_pd"], q=10, duplicates="drop")
+xgb_agents = add_policy_flags(xgb_agents, locked_artifacts["xgb_policy_threshold_tbl"], "xgb")
+
+xgb_agents_view = xgb_agents[["agent_msisdn","thin_file_flag","bad_state","cal_pd","xgb_band_decile",
+                              "xgb_approved_at_10","xgb_approved_at_20","xgb_approved_at_50","xgb_approved_at_80"]]
+
+# ----- LGB agent placement
+lgb_score_col = "lgb_score" if "lgb_score" in lgb_df_val_scored.columns else ("raw_score" if "raw_score" in lgb_df_val_scored.columns else "score")
+
+lgb_agents = attach_cal_pd_from_map(
+    scored_df=lgb_df_val_scored,
+    cal_map_df=locked_artifacts["pd_calibration_map_tbl"],
+    model_name="lgb",
+    score_col=lgb_score_col
+)   lgb_agents["lgb_band_decile"] = pd.qcut(lgb_agents["cal_pd"], q=10, duplicates="drop")
+lgb_agents = add_policy_flags(lgb_agents, locked_artifacts["lgb_policy_threshold_tbl"], "lgb")
+
+lgb_agents_view = lgb_agents[["agent_msisdn","thin_file_flag","bad_state","cal_pd","lgb_band_decile",
+                              "lgb_approved_at_10","lgb_approved_at_20","lgb_approved_at_50","lgb_approved_at_80"]]
+
+# ----- Combine (optional)
+agent_policy_placement = xgb_agents_view.merge(
+    lgb_agents_view,
+    on=["agent_msisdn","thin_file_flag","bad_state"],
+    how="outer",
+    suffixes=("_xgb","_lgb")
+)
+
+agent_policy_placement.head()
+ 
+
+# Create Ops/Risk-friendly agent placement views: final decision at a chosen operating point + compact placement labels.
+
+agent_policy_placement = globals().get('agent_policy_placement')
+
+print(isinstance(agent_policy_placement, pd.DataFrame))
+if isinstance(agent_policy_placement, pd.DataFrame):
+    # 1) Final decision column at chosen operating point (assume champion is XGB at 50%)
+    if 'xgb_approved_at_50' in agent_policy_placement.columns:
+        agent_policy_placement['final_approved'] = agent_policy_placement['xgb_approved_at_50'].astype(int)
+    else:
+        agent_policy_placement['final_approved'] = np.nan
+
+    # 2) Compact placement label per model
+    def make_bucket(df_in, prefix):
+        c10 = prefix + '_approved_at_10'
+        c20 = prefix + '_approved_at_20'
+        c50 = prefix + '_approved_at_50'
+        c80 = prefix + '_approved_at_80'
+        out = np.select(
+            [
+                (c10 in df_in.columns) & (df_in[c10] == 1),
+                (c20 in df_in.columns) & (df_in[c20] == 1),
+                (c50 in df_in.columns) & (df_in[c50] == 1),
+                (c80 in df_in.columns) & (df_in[c80] == 1),
+            ],
+            ['APPROVE_10','APPROVE_20','APPROVE_50','APPROVE_80'],
+            default='DECLINE_ALL'
+        )
+        return out
+
+    if 'xgb_approved_at_10' in agent_policy_placement.columns:
+        agent_policy_placement['xgb_policy_bucket'] = make_bucket(agent_policy_placement, 'xgb')
+    if 'lgb_approved_at_10' in agent_policy_placement.columns:
+        agent_policy_placement['lgb_policy_bucket'] = make_bucket(agent_policy_placement, 'lgb')
+
+    # Champion bucket aligned with final decision (assume champion is XGB)
+    if 'xgb_policy_bucket' in agent_policy_placement.columns:
+        agent_policy_placement['final_policy_bucket'] = agent_policy_placement['xgb_policy_bucket']
+
+    # Show quick distributions + a small preview
+    if 'final_policy_bucket' in agent_policy_placement.columns:
+        print(agent_policy_placement['final_policy_bucket'].value_counts(dropna=False))
+    if 'final_approved' in agent_policy_placement.columns:
+        print(agent_policy_placement['final_approved'].value_counts(dropna=False))
+
+    preview_cols = [c for c in [
+        'agent_msisdn','thin_file_flag','bad_state',
+        'cal_pd_xgb','xgb_policy_bucket','xgb_approved_at_50',
+        'cal_pd_lgb','lgb_policy_bucket',
+        'final_policy_bucket','final_approved'
+    ] if c in agent_policy_placement.columns]
+
+    print(agent_policy_placement[preview_cols].head(15))
+
+    # Export an Ops/Risk ready file
+    export_cols = preview_cols + [c for c in agent_policy_placement.columns if c.endswith('_approved_at_10') or c.endswith('_approved_at_20') or c.endswith('_approved_at_80')]
+    export_cols = list(dict.fromkeys(export_cols))
+    # create the dataframe in memory first
+    agent_policy_placement_ops_risk = agent_policy_placement[export_cols].copy()
+    agent_policy_placement_ops_risk.to_csv('agent_policy_placement_ops_risk.csv', index=False)
+    print('agent_policy_placement_ops_risk.csv')
+

@@ -1,0 +1,352 @@
+# 2. Parameters
+WHITE_DATA_PATH = "C:\\Users\\mikiiv.UG\\Documents\\Data\\xtrafloat_whitelist.csv"  # TODO: change this
+
+BLACK_DATA_PATH2 = "C:\\Users\\mikiiv.UG\\Documents\\Data\\xtrafloat_blacklist.csv"  # TODO: change this
+
+
+DATE_FORMAT = "%Y%m%d"  # tbl_dt and activation_dt format 20251116
+# 3. Load data
+df_xtrafloat_whitelist = pd.read_csv(WHITE_DATA_PATH)
+df_xtrafloat_blacklist = pd.read_csv(BLACK_DATA_PATH2)
+
+df_wl = df_xtrafloat_whitelist.copy()
+df_bl = df_xtrafloat_blacklist.copy()
+
+df_wl["xtrafloat_list_type"] = "whitelist"
+df_bl["xtrafloat_list_type"] = "blacklist"
+
+df_xtrafloat_eval = pd.concat([df_wl, df_bl], ignore_index=True, sort=False)
+
+print(df_xtrafloat_eval.shape)
+print(df_xtrafloat_eval["xtrafloat_list_type"].value_counts(dropna=False))
+print(df_xtrafloat_eval.head())
+
+df_xtrafloat_eval.reason.value_counts()
+
+import pandas as pd
+import numpy as np
+
+# Normalize MSISDN join keys
+ops_eval = ops_scored_no_history.copy()
+xf = df_xtrafloat_eval.copy()
+
+ops_eval["agent_msisdn_key"] = ops_eval["agent_msisdn"].astype(str).str.replace(".0", "", regex=False).str.strip()
+xf["agent_msisdn_key"] = xf["agent_msisdn"].astype(str).str.replace(".0", "", regex=False).str.strip()
+
+# If the xtrafloat list has duplicates per agent, keep blacklist over whitelist
+xf["xtrafloat_list_type"] = xf["xtrafloat_list_type"].astype(str).str.lower()
+xf["list_priority"] = np.where(xf["xtrafloat_list_type"].eq("blacklist"), 1, 0)
+xf_dedup = xf.sort_values("list_priority", ascending=False).drop_duplicates("agent_msisdn_key")
+
+# Merge (labels onto scored)
+ops_eval = ops_eval.merge(
+    xf_dedup[["agent_msisdn_key", "xtrafloat_list_type", "agent_category", "reason"]],
+    on="agent_msisdn_key",
+    how="left"
+)
+
+# Target label and score
+ops_eval["is_blacklisted"] = (ops_eval["xtrafloat_list_type"] == "blacklist").astype(int)
+ops_eval["never_loan_pd_like_num"] = pd.to_numeric(ops_eval["never_loan_pd_like"], errors="coerce")
+
+print(ops_eval.shape)
+print(ops_eval["xtrafloat_list_type"].value_counts(dropna=False).head(10))
+ops_eval.head()
+
+#   Scorecard ranking performance (AUC + deciles)
+
+perf = ops_eval[["never_loan_pd_like_num", "is_blacklisted"]].dropna().copy()
+
+print(perf.shape)
+print(perf["is_blacklisted"].value_counts(dropna=False))
+
+# AUC via Mann–Whitney (no sklearn)
+auc_val = np.nan
+if perf["is_blacklisted"].nunique() == 2:
+    ranks = perf["never_loan_pd_like_num"].rank(method="average")
+    n_pos = int((perf["is_blacklisted"] == 1).sum())
+    n_neg = int((perf["is_blacklisted"] == 0).sum())
+    sum_ranks_pos = float(ranks[perf["is_blacklisted"] == 1].sum())
+    auc_val = (sum_ranks_pos - n_pos * (n_pos + 1) / 2.0) / (n_pos * n_neg)
+
+print(auc_val)
+
+# Decile lift table (higher decile should have higher blacklist_rate if score works)
+perf["decile"] = pd.qcut(perf["never_loan_pd_like_num"], 10, labels=False, duplicates="drop") + 1
+dec = perf.groupby("decile").agg(
+    n=("is_blacklisted", "size"),
+    blacklist_rate=("is_blacklisted", "mean"),
+    avg_pd_like=("never_loan_pd_like_num", "mean")
+).sort_index()
+
+dec
+
+tmp = ops_eval.copy()
+tmp["final_approved_num"] = pd.to_numeric(tmp["final_approved"], errors="coerce")
+
+bucket_summary = tmp.groupby("final_policy_bucket").agg(
+    n=("final_approved_num", "size"),
+    approved_rate=("final_approved_num", "mean"),
+    blacklist_rate=("is_blacklisted", "mean"),
+    avg_pd_like=("never_loan_pd_like_num", "mean")
+).sort_values("n", ascending=False)
+
+bucket_summary
+
+
+import pandas as pd
+import numpy as np
+
+# 1) Define non-performance reasons to exclude from evaluation
+non_perf_reasons = [
+    "As requested by Director",
+    "Agent active less than 3 months"
+]
+
+tmp = ops_eval.copy()
+
+# 2) Keep only labeled rows (whitelist/blacklist) and drop non-performance blacklist reasons
+tmp["reason_str"] = tmp["reason"].astype(str)
+
+perf_eval = tmp[
+    tmp["xtrafloat_list_type"].isin(["whitelist", "blacklist"])
+].copy()
+
+perf_eval = perf_eval[
+    ~((perf_eval["xtrafloat_list_type"] == "blacklist") & (perf_eval["reason_str"].isin(non_perf_reasons)))
+].copy()
+
+print(perf_eval.shape)
+print(perf_eval["xtrafloat_list_type"].value_counts(dropna=False))
+print(perf_eval.loc[perf_eval["xtrafloat_list_type"] == "blacklist", "reason"].value_counts(dropna=False).head(20))
+
+# 3) AUC using never_loan_pd_like_num
+perf = perf_eval[["never_loan_pd_like_num", "is_blacklisted"]].dropna().copy()
+
+auc_val = np.nan
+if perf.shape[0] > 0 and perf["is_blacklisted"].nunique() == 2:
+    ranks = perf["never_loan_pd_like_num"].rank(method="average")
+    n_pos = int((perf["is_blacklisted"] == 1).sum())
+    n_neg = int((perf["is_blacklisted"] == 0).sum())
+    sum_ranks_pos = float(ranks[perf["is_blacklisted"] == 1].sum())
+    auc_val = (sum_ranks_pos - n_pos * (n_pos + 1) / 2.0) / (n_pos * n_neg)
+
+print("AUC_performance_filtered")
+print(auc_val)
+
+# 4) True 10 buckets (deciles) using rank(pct=True), robust to ties
+perf_rank = perf.copy()
+
+perf_rank["score_pct"] = perf_rank["never_loan_pd_like_num"].rank(pct=True, method="average")
+
+eps_val = 1e-12
+perf_rank["decile"] = np.ceil(np.clip(perf_rank["score_pct"], eps_val, 1.0) * 10).astype(int)
+
+dec_perf = perf_rank.groupby("decile").agg(
+    n=("is_blacklisted", "size"),
+    blacklist_rate=("is_blacklisted", "mean"),
+    avg_pd_like=("never_loan_pd_like_num", "mean"),
+    min_pd_like=("never_loan_pd_like_num", "min"),
+    max_pd_like=("never_loan_pd_like_num", "max")
+).sort_index()
+
+print(dec_perf)
+print(perf_rank["decile"].value_counts().sort_index())
+
+# 5) Approve vs Decline bucket comparison (same filtered set)
+perf_eval["final_approved_num"] = pd.to_numeric(perf_eval["final_approved"], errors="coerce")
+bucket_summary_perf = perf_eval.groupby("final_policy_bucket").agg(
+    n=("final_approved_num", "size"),
+    approved_rate=("final_approved_num", "mean"),
+    blacklist_rate=("is_blacklisted", "mean"),
+    avg_pd_like=("never_loan_pd_like_num", "mean")
+).sort_values("n", ascending=False)
+
+print(bucket_summary_perf)1b
+
+# True 10 equal-sized buckets using deterministic tie-break (deck-friendly)
+perf_bins = perf_eval[["agent_msisdn_key", "never_loan_pd_like_num", "is_blacklisted"]].dropna().copy()
+
+# Sort by score, then tie-break by msisdn so bins are stable and reproducible
+perf_bins = perf_bins.sort_values(["never_loan_pd_like_num", "agent_msisdn_key"], ascending=[True, True]).reset_index(drop=True)
+
+n_rows = perf_bins.shape[0]
+perf_bins["row_num"] = np.arange(n_rows)
+
+# 10 equal-frequency buckets based on sorted row number
+perf_bins["decile"] = (np.floor(perf_bins["row_num"] * 10.0 / n_rows).astype(int) + 1).clip(1, 10)
+
+lift_10_forced = perf_bins.groupby("decile").agg(
+    n=("is_blacklisted", "size"),
+    blacklist_rate=("is_blacklisted", "mean"),
+    avg_pd_like=("never_loan_pd_like_num", "mean"),
+    min_pd_like=("never_loan_pd_like_num", "min"),
+    max_pd_like=("never_loan_pd_like_num", "max")
+).sort_index()
+
+print(lift_10_forced)
+print(perf_bins["decile"].value_counts().sort_index())
+
+
+import pandas as pd
+import numpy as np
+
+# 1) Define non-performance reasons to exclude from evaluation
+non_perf_reasons = [
+    "As requested by Director",
+    "Agent active less than 3 months"
+]
+
+tmp = ops_eval.copy()
+
+# 2) Keep only labeled rows (whitelist/blacklist) and drop non-performance blacklist reasons
+tmp["reason_str"] = tmp["reason"].astype(str)
+
+perf_eval = tmp[
+    tmp["xtrafloat_list_type"].isin(["whitelist", "blacklist"])
+].copy()
+
+perf_eval = perf_eval[
+    ~((perf_eval["xtrafloat_list_type"] == "blacklist") & (perf_eval["reason_str"].isin(non_perf_reasons)))
+].copy()
+
+print(perf_eval.shape)
+print(perf_eval["xtrafloat_list_type"].value_counts(dropna=False))
+print(perf_eval.loc[perf_eval["xtrafloat_list_type"] == "blacklist", "reason"].value_counts(dropna=False).head(20))
+
+# 3) AUC using never_loan_pd_like_num
+perf = perf_eval[["never_loan_pd_like_num", "is_blacklisted"]].dropna().copy()
+
+auc_val = np.nan
+if perf.shape[0] > 0 and perf["is_blacklisted"].nunique() == 2:
+    ranks = perf["never_loan_pd_like_num"].rank(method="average")
+    n_pos = int((perf["is_blacklisted"] == 1).sum())
+    n_neg = int((perf["is_blacklisted"] == 0).sum())
+    sum_ranks_pos = float(ranks[perf["is_blacklisted"] == 1].sum())
+    auc_val = (sum_ranks_pos - n_pos * (n_pos + 1) / 2.0) / (n_pos * n_neg)
+
+print("AUC_performance_filtered")
+print(auc_val)
+
+# 4) True 10 buckets (deciles) using rank(pct=True), robust to ties
+perf_rank = perf.copy()
+
+perf_rank["score_pct"] = perf_rank["never_loan_pd_like_num"].rank(pct=True, method="average")
+
+eps_val = 1e-12
+perf_rank["decile"] = np.ceil(np.clip(perf_rank["score_pct"], eps_val, 1.0) * 10).astype(int)
+
+dec_perf = perf_rank.groupby("decile").agg(
+    n=("is_blacklisted", "size"),
+    blacklist_rate=("is_blacklisted", "mean"),
+    avg_pd_like=("never_loan_pd_like_num", "mean"),
+    min_pd_like=("never_loan_pd_like_num", "min"),
+    max_pd_like=("never_loan_pd_like_num", "max")
+).sort_index()
+
+print(dec_perf)
+print(perf_rank["decile"].value_counts().sort_index())
+
+# 5) Approve vs Decline bucket comparison (same filtered set)
+perf_eval["final_approved_num"] = pd.to_numeric(perf_eval["final_approved"], errors="coerce")
+bucket_summary_perf = perf_eval.groupby("final_policy_bucket").agg(
+    n=("final_approved_num", "size"),
+    approved_rate=("final_approved_num", "mean"),
+    blacklist_rate=("is_blacklisted", "mean"),
+    avg_pd_like=("never_loan_pd_like_num", "mean")
+).sort_values("n", ascending=False)
+
+print(bucket_summary_perf)1b
+
+# True 10 equal-sized buckets using deterministic tie-break (deck-friendly)
+perf_bins = perf_eval[["agent_msisdn_key", "never_loan_pd_like_num", "is_blacklisted"]].dropna().copy()
+
+# Sort by score, then tie-break by msisdn so bins are stable and reproducible
+perf_bins = perf_bins.sort_values(["never_loan_pd_like_num", "agent_msisdn_key"], ascending=[True, True]).reset_index(drop=True)
+
+n_rows = perf_bins.shape[0]
+perf_bins["row_num"] = np.arange(n_rows)
+
+# 10 equal-frequency buckets based on sorted row number
+perf_bins["decile"] = (np.floor(perf_bins["row_num"] * 10.0 / n_rows).astype(int) + 1).clip(1, 10)
+
+lift_10_forced = perf_bins.groupby("decile").agg(
+    n=("is_blacklisted", "size"),
+    blacklist_rate=("is_blacklisted", "mean"),
+    avg_pd_like=("never_loan_pd_like_num", "mean"),
+    min_pd_like=("never_loan_pd_like_num", "min"),
+    max_pd_like=("never_loan_pd_like_num", "max")
+).sort_index()
+
+print(lift_10_forced)
+print(perf_bins["decile"].value_counts().sort_index())
+
+#  Cutoff sweep code
+
+sweep_df = perf_eval[["never_loan_pd_like_num", "is_blacklisted"]].dropna().copy()
+sweep_df = sweep_df.sort_values("never_loan_pd_like_num").reset_index(drop=True)
+
+# Lower PD-like = safer, so approve if pd_like <= threshold
+pd_vals = sweep_df["never_loan_pd_like_num"].values
+y_vals = sweep_df["is_blacklisted"].values.astype(int)  n_total = int(sweep_df.shape[0])
+n_black_total = int(y_vals.sum())
+n_white_total = int(n_total - n_black_total)
+
+baseline_black_rate = n_black_total / n_total
+
+# Use percentile cutoffs as candidate operating points
+pct_grid = list(range(5, 100, 5))  # 5%, 10%, ..., 95%
+rows_out = []
+
+for pct in pct_grid:
+    idx = int(np.floor(n_total * pct / 100.0)) - 1
+    if idx < 0:
+        idx = 0
+    if idx >= n_total:
+        idx = n_total - 1
+
+    thr = float(pd_vals[idx])
+
+    approved_mask = (pd_vals <= thr)
+    declined_mask = ~approved_mask
+
+    n_app = int(approved_mask.sum())
+    n_dec = int(declined_mask.sum())
+
+    app_black = int(y_vals[approved_mask].sum())
+    app_white = int(n_app - app_black)
+
+    dec_black = int(y_vals[declined_mask].sum())
+    dec_white = int(n_dec - dec_black)
+
+    app_black_rate = app_black / n_app if n_app > 0 else np.nan
+    app_white_rate = app_white / n_app if n_app > 0 else np.nan
+
+    # Of all blacklists, what fraction did we catch by declining?
+    blacklist_capture_decline = dec_black / n_black_total if n_black_total > 0 else np.nan
+
+    # Of all whitelists, what fraction did we incorrectly decline?
+    whitelist_decline_rate = dec_white / n_white_total if n_white_total > 0 else np.nan
+
+    rows_out.append({
+        "approval_pct": pct,
+        "threshold_pd_like": thr,
+        "approved_n": n_app,
+        "approved_blacklist_rate": app_black_rate,
+        "approved_whitelist_rate": app_white_rate,
+        "declined_blacklist_capture": blacklist_capture_decline,
+        "declined_whitelist_rate": whitelist_decline_rate,
+        "improvement_vs_baseline_black_rate": baseline_black_rate - app_black_rate
+    })
+
+cutoff_sweep = pd.DataFrame(rows_out)
+
+# Make it readable
+cutoff_sweep_display = cutoff_sweep.copy()
+for colnm in ["approved_blacklist_rate","approved_whitelist_rate","declined_blacklist_capture","declined_whitelist_rate","improvement_vs_baseline_black_rate"]:
+    cutoff_sweep_display[colnm] = (cutoff_sweep_display[colnm] * 100.0).round(2)
+
+cutoff_sweep_display["threshold_pd_like"] = cutoff_sweep_display["threshold_pd_like"].round(4)
+
+print(cutoff_sweep_display.head(12))
+print(cutoff_sweep_display.tail(6)) 

@@ -1,0 +1,401 @@
+# --- XGBoost: fit + score (alignment-safe)
+
+# Hard alignment checks (do not skip)
+assert Xtr.shape[1] == len(xgb_constraints_arr), "[FATAL] Xtr width != constraints length"
+assert Xva.shape[1] == len(xgb_constraints_arr), "[FATAL] Xva width != constraints length"
+assert Xtr.columns.tolist() == Xva.columns.tolist(), "[FATAL] Train/val column order mismatch"
+assert "thin_file_flag" not in Xtr.columns.tolist(), "[FATAL] thin_file_flag leaked into model matrix"
+
+# Ensure constraints string format for XGBoost
+xgb_constraints_str = "(" + ",".join([str(int(v)) for v in list(xgb_constraints_arr)]) + ")"
+
+xgb_model = xgb.XGBClassifier(
+    n_estimators=800,
+    learning_rate=0.03,
+    max_depth=4,
+    subsample=0.8,
+    colsample_bytree=0.8,
+    reg_lambda=1.0,
+    objective="binary:logistic",
+    tree_method="hist",
+    eval_metric="auc",
+    random_state=42
+)
+
+xgb_model.set_params(monotone_constraints=xgb_constraints_str)
+
+# Fit
+xgb_model.fit(
+    Xtr,
+    y_train,
+    eval_set=[(Xva, y_val)],
+    verbose=False
+)
+
+# Score (raw probabilities)
+train_raw = xgb_model.predict_proba(Xtr)[:, 1]
+val_raw = xgb_model.predict_proba(Xva)[:, 1]
+
+# Hard row alignment checks
+assert len(train_raw) == Xtr.shape[0] == len(y_train), "[FATAL] Train rows misaligned at scoring time"
+assert len(val_raw) == Xva.shape[0] == len(y_val), "[FATAL] Val rows misaligned at scoring time"
+assert len(agent_msisdn_train) == Xtr.shape[0], "[FATAL] agent_msisdn_train length mismatch"
+assert len(agent_msisdn_val) == Xva.shape[0], "[FATAL] agent_msisdn_val length mismatch"
+
+# Canonical scored frames (KEYED) - reuse these everywhere downstream
+train_scored = pd.DataFrame(
+    {
+        "agent_msisdn": np.asarray(agent_msisdn_train),
+        "thin_file_flag": np.asarray(thin_tr),
+        "bad_state": np.asarray(y_train).astype(int),
+        "raw_score": train_raw,
+    },
+    index=Xtr.index
+)
+
+val_scored = pd.DataFrame(
+    {
+        "agent_msisdn": np.asarray(agent_msisdn_val),
+        "thin_file_flag": np.asarray(thin_va),
+        "bad_state": np.asarray(y_val).astype(int),
+        "raw_score": val_raw,
+    },
+    index=Xva.index
+)
+
+xgb_df_val_scored = val_scored
+
+
+# --- Evaluation (alignment-safe and consistent)
+
+# Align y to X indices for AUC computation (paranoid but safe)
+y_train_eval = pd.Series(np.asarray(y_train).astype(int), index=Xtr.index)
+y_val_eval = pd.Series(np.asarray(y_val).astype(int), index=Xva.index)
+
+assert y_train_eval.index.equals(Xtr.index), "[FATAL] y_train_eval index != Xtr index"
+assert y_val_eval.index.equals(Xva.index), "[FATAL] y_val_eval index != Xva index"
+
+train_auc = roc_auc_score(y_train_eval, train_raw)
+val_auc = roc_auc_score(y_val_eval, val_raw)
+print(train_auc)
+print(val_auc)
+
+# Small scored view (validation) - now includes agent_msisdn
+print(val_scored[["agent_msisdn", "raw_score", "bad_state", "thin_file_flag"]].head(10))
+
+# Score distributions
+plt.figure(figsize=(7, 4))
+plt.hist(train_raw, bins=50, alpha=0.5, label="train")
+plt.hist(val_raw, bins=50, alpha=0.5, label="val")
+plt.legend()
+plt.title("XGBoost predicted probability distribution")
+plt.xlabel("predicted probability")
+plt.ylabel("count")
+plt.tight_layout()
+plt.show()
+
+# Feature importance (gain)
+booster = xgb_model.get_booster()
+imp_gain = booster.get_score(importance_type="gain")
+imp_gain_ser = pd.Series(imp_gain).sort_values(ascending=False)
+print(imp_gain_ser.head(15))
+
+plt.figure(figsize=(7, 4))
+imp_gain_ser.head(15).sort_values().plot(kind="barh")
+plt.title("Top 15 features by gain")
+plt.tight_layout()
+plt.show()
+
+
+def safe_auc_with_reason(y_vals, p_vals):
+    df_tmp = pd.DataFrame(
+        {
+            "y": pd.Series(y_vals),
+            "p": pd.Series(p_vals)
+        }
+    ).dropna()
+
+    if int(df_tmp.shape[0]) == 0:
+        return np.nan, "no_rows"
+    if int(df_tmp["y"].nunique()) < 2:
+        return np.nan, "single_class"
+    return float(roc_auc_score(df_tmp["y"], df_tmp["p"])), "ok"
+
+
+# --- Optional paranoid alignment checks (keep if you like)
+assert train_scored.shape[0] == Xtr.shape[0], "[FATAL] train_scored rows != Xtr rows"
+assert val_scored.shape[0] == Xva.shape[0], "[FATAL] val_scored rows != Xva rows"
+
+
+# --- Overall AUC (train / val)
+train_auc, train_why = safe_auc_with_reason(train_scored["bad_state"], train_scored["raw_score"])
+val_auc, val_why = safe_auc_with_reason(val_scored["bad_state"], val_scored["raw_score"])
+
+print(train_auc)
+print(val_auc)
+
+if train_why != "ok":
+    print("train auc reason: " + train_why)
+if val_why != "ok":
+    print("val auc reason: " + val_why)
+
+
+# --- Segment AUCs by thin_file_flag (prints reason if cannot compute)
+for split_name, scored_df in [
+    ("train", train_scored),
+    ("val", val_scored),
+]:
+    thin_ser = scored_df["thin_file_flag"]
+
+    for thin_value in [0, 1]:
+        mask = (thin_ser == thin_value)
+        auc_val, why = safe_auc_with_reason(scored_df.loc[mask, "bad_state"], scored_df.loc[mask, "raw_score"])
+        print(split_name + " thin=" + str(thin_value) + " auc=" + str(auc_val) + " (" + why + ")")
+
+# -----------------------------
+# Thin flag resolver (only if needed) + build canonical scored frames
+# -----------------------------
+
+# --- pick best thin source (prefer existing scored frames, then raw dfs)
+thin_source_df = None
+if "df_pd_raw" in globals() and isinstance(df_pd_raw, pd.DataFrame) and "thin_file_flag" in df_pd_raw.columns:
+    thin_source_df = df_pd_raw
+elif "before_df" in globals() and isinstance(before_df, pd.DataFrame) and "thin_file_flag" in before_df.columns:
+    thin_source_df = before_df
+
+def attach_thin_flag(x_df, source_df):
+    if source_df is None:
+        return pd.Series(np.full(len(x_df), np.nan), index=x_df.index)
+
+    src_idx = source_df.index
+    x_idx = x_df.index
+    overlap = len(pd.Index(x_idx).intersection(pd.Index(src_idx)))
+    overlap_rate = float(overlap) / float(len(x_df)) if len(x_df) > 0 else 0.0
+
+    if overlap_rate > 0.95:
+        return source_df.reindex(x_df.index)["thin_file_flag"]
+
+    candidate_keys = [
+        "app_id","application_id","loan_id","account_id","acct_id",
+        "customer_id","member_id","user_id","id"
+    ]
+    usable_keys = [k for k in candidate_keys if (k in x_df.columns) and (k in source_df.columns)]
+    if len(usable_keys) > 0:
+        join_key = usable_keys[0]
+        src_map = (
+            source_df[[join_key, "thin_file_flag"]]
+            .drop_duplicates(subset=[join_key])
+            .set_index(join_key)["thin_file_flag"]
+        )
+        return x_df[join_key].map(src_map)
+
+    return pd.Series(np.full(len(x_df), np.nan), index=x_df.index)
+
+def binarize_preserve_nan(ser):
+    ser_num = pd.to_numeric(ser, errors="coerce")
+    out_vals = np.where(pd.isna(ser_num.values), np.nan, (ser_num.values >= 0.5).astype(int))
+    return pd.Series(out_vals, index=ser.index)
+
+def flag_is_informative(flag_vals, min_pos=50, min_neg=50):
+    ser = pd.to_numeric(pd.Series(flag_vals), errors="coerce")
+    miss_rate = float(ser.isna().mean())
+    vc = ser.value_counts(dropna=True).to_dict()
+    n0 = int(vc.get(0.0, 0))
+    n1 = int(vc.get(1.0, 0))
+    informative = (n0 >= min_neg) and (n1 >= min_pos)
+    diag = {"n0": n0, "n1": n1, "missing_rate": miss_rate}
+    return informative, diag
+
+# --- Start from the canonical scored frames you already created earlier
+# If they don't exist (older notebook state), fall back to constructing them.
+if "train_scored" not in globals() or "val_scored" not in globals():
+    train_scored = pd.DataFrame(
+        {
+            "agent_msisdn": np.asarray(agent_msisdn_train),
+            "bad_state": np.asarray(y_train).astype(int),
+            "raw_score": train_raw
+        },
+        index=Xtr.index
+    )
+    val_scored = pd.DataFrame(
+        {
+            "agent_msisdn": np.asarray(agent_msisdn_val),
+            "bad_state": np.asarray(y_val).astype(int),
+            "raw_score": val_raw
+        },
+        index=Xva.index
+    )
+
+# --- Resolve thin flag only if missing or mostly  in scored frames
+need_thin_train = ("thin_file_flag" not in train_scored.columns) or (float(pd.Series(train_scored.get("thin_file_flag")).isna().mean()) > 0.80)
+need_thin_val = ("thin_file_flag" not in val_scored.columns) or (float(pd.Series(val_scored.get("thin_file_flag")).isna().mean()) > 0.80)
+
+if need_thin_train:
+    thin_tr_ser = attach_thin_flag(Xtr, thin_source_df)
+    train_scored["thin_file_flag"] = binarize_preserve_nan(thin_tr_ser).values
+
+if need_thin_val:
+    thin_va_ser = attach_thin_flag(Xva, thin_source_df)
+    val_scored["thin_file_flag"] = binarize_preserve_nan(thin_va_ser).values
+
+# --- Diagnostics (thin rates + missingness)
+train_flag = pd.to_numeric(train_scored["thin_file_flag"], errors="coerce").values
+val_flag = pd.to_numeric(val_scored["thin_file_flag"], errors="coerce").values
+
+train_informative, train_diag = flag_is_informative(train_flag)
+val_informative, val_diag = flag_is_informative(val_flag)
+
+print(train_scored[["agent_msisdn", "raw_score", "bad_state", "thin_file_flag"]].head(10))
+print(val_scored[["agent_msisdn", "raw_score", "bad_state", "thin_file_flag"]].head(10))
+
+print(pd.Series({
+    "train_thin_rate_nanmean": float(np.nanmean(train_flag)),
+    "val_thin_rate_nanmean": float(np.nanmean(val_flag)),
+    "train_flag_missing_rate": float(np.mean(pd.isna(train_flag))),
+    "val_flag_missing_rate": float(np.mean(pd.isna(val_flag))),
+    "train_flag_informative": bool(train_informative),
+    "val_flag_informative": bool(val_informative),
+    "train_n0": float(train_diag["n0"]),
+    "train_n1": float(train_diag["n1"]),
+    "val_n0": float(val_diag["n0"]),
+    "val_n1": float(val_diag["n1"])
+}))
+
+# --- Quick viz  plt.figure(figsize=(7, 4))
+plt.hist(train_scored["raw_score"], bins=50, alpha=0.5, label="train")
+plt.hist(val_scored["raw_score"], bins=50, alpha=0.5, label="val")
+plt.legend()
+plt.title("XGB raw_score distribution")
+plt.xlabel("raw_score")
+plt.ylabel("count")
+plt.tight_layout()
+plt.show()
+
+# Optional: explicitly warn and skip segmentation downstream
+if (not train_informative) and (not val_informative):
+    print(pd.DataFrame({
+        "note": ["thin_file_flag is constant or too imbalanced in BOTH train and val; skip thin/non-thin segmentation."],
+        "train_n0": [train_diag["n0"]],
+        "train_n1": [train_diag["n1"]],
+        "val_n0": [val_diag["n0"]],
+        "val_n1": [val_diag["n1"]]
+    }))
+
+# OPTIONAL: only if full feature matrices + scores needed
+# (keeps agent_msisdn anchored)
+# xgb_df_train_scored_full = train_scored.join(Xtr)
+# xgb_df_val_scored_full = val_scored.join(Xva)
+
+
+# Recompute thin vs non-thin tables with robust flag handling + useful fallbacks
+df_va_seg3 = val_scored.copy()
+
+# Coerce core columns
+df_va_seg3["raw_score"] = pd.to_numeric(df_va_seg3["raw_score"], errors="coerce")
+df_va_seg3["bad_state"] = pd.to_numeric(df_va_seg3["bad_state"], errors="coerce").fillna(0).astype(int)
+
+# --- thin_file_flag coercion (preserve missingness) ---
+thin_series = df_va_seg3["thin_file_flag"]
+
+if thin_series.dtype == bool:
+    thin_num = thin_series.astype(int)
+else:
+    thin_num = pd.to_numeric(thin_series, errors="coerce")
+
+df_va_seg3["thin_file_flag_bin"] = np.where(
+    pd.isna(thin_num.values),
+    np.nan,
+    (thin_num.values >= 0.5).astype(int)
+)
+
+# Helpful segment label including missing
+df_va_seg3["thin_segment"] = pd.Series(df_va_seg3["thin_file_flag_bin"]).map({0: "non_thin", 1: "thin"})
+df_va_seg3["thin_segment"] = df_va_seg3["thin_segment"].fillna("missing_flag")
+
+print(df_va_seg3["thin_segment"].value_counts(dropna=False))
+
+# --- Segment performance table ---
+seg_rows = []
+for seg_name in ["non_thin", "thin", "missing_flag"]:
+    seg_df = df_va_seg3.loc[df_va_seg3["thin_segment"] == seg_name].copy()
+    if int(len(seg_df)) == 0:
+        continue
+
+    y_vals = seg_df["bad_state"].values
+    p_vals = seg_df["raw_score"].values
+
+    auc_val = np.nan
+    if int(pd.Series(y_vals).nunique()) >= 2:
+        ok_mask = pd.notna(p_vals)
+        if int(ok_mask.sum()) > 0 and int(pd.Series(y_vals[ok_mask]).nunique()) >= 2:
+            auc_val = float(roc_auc_score(y_vals[ok_mask], p_vals[ok_mask]))
+
+    seg_rows.append({
+        "segment": seg_name,
+        "n": int(len(seg_df)),
+        "bad_rate": float(np.mean(y_vals)),
+        "avg_raw_score": float(np.nanmean(p_vals)),
+        "auc": auc_val,
+        "score_null_rate": float(np.mean(pd.isna(seg_df["raw_score"])))
+    })
+
+seg_tbl3 = pd.DataFrame(seg_rows)
+if int(seg_tbl3.shape[0]) > 0:
+    seg_order = pd.Categorical(seg_tbl3["segment"], categories=["non_thin", "thin", "missing_flag"], ordered=True)
+    seg_tbl3 = seg_tbl3.assign(segment=seg_order).sort_values("segment")
+print(seg_tbl3)
+
+# --- Deciles helper ---
+def build_decile_table(tmp_df, score_col, label_prefix):
+    tmp_df2 = tmp_df.copy()
+    tmp_df2 = tmp_df2[pd.notna(tmp_df2[score_col])]
+
+    if int(len(tmp_df2)) == 0:
+        note_df = pd.DataFrame({"note": [label_prefix + ": no non-null scores to form deciles"], "n": [0]})
+        print(note_df)
+        return
+
+    uniq_scores = int(tmp_df2[score_col].nunique(dropna=True))
+    if int(uniq_scores) < 10:
+        note_df = pd.DataFrame({
+            "note": [label_prefix + ": not enough unique scores for deciles"],
+            "unique_scores": [uniq_scores],
+            "n": [len(tmp_df2)]
+        })
+        print(note_df)
+
+        q_vals = tmp_df2[score_col].quantile([0, 0.1, 0.5, 0.9, 1.0]).reset_index()
+        q_vals.columns = ["quantile", score_col]
+        print(q_vals)
+        return
+
+    tmp_df2["decile"] = pd.qcut(tmp_df2[score_col], 10, labels=False, duplicates="drop")
+    tmp_df2["decile"] = tmp_df2["decile"].astype(int) + 1
+
+    dec_tbl = (
+        tmp_df2.groupby("decile")
+        .agg(
+            n=("bad_state", "size"),
+            bad_rate=("bad_state", "mean"),
+            avg_score=(score_col, "mean"),
+            min_score=(score_col, "min"),
+            max_score=(score_col, "max")
+        )
+        .reset_index()
+        .sort_values("decile")
+    )
+    print(dec_tbl)
+
+# --- Thin deciles if possible; otherwise tell you plainly it's missing ---
+thin_df3 = df_va_seg3.loc[df_va_seg3["thin_segment"] == "thin"].copy()
+if int(len(thin_df3)) > 0:
+    build_decile_table(thin_df3, "raw_score", "thin_segment")
+else:
+    print(pd.DataFrame({
+        "note": ["No thin rows found after coercion (thin_segment == thin)"],
+        "n_total": [len(df_va_seg3)]
+    }))
+
+# --- Always also compute overall deciles as a useful fallback ---
+build_decile_table(df_va_seg3, "raw_score", "overall")
+

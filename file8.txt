@@ -1,0 +1,451 @@
+# --- REQUIRE: Xtr/Xva must already exist as DataFrames
+assert "Xtr" in globals() and isinstance(Xtr, pd.DataFrame), "Define Xtr (DataFrame) first"
+assert "Xva" in globals() and isinstance(Xva, pd.DataFrame), "Define Xva (DataFrame) first"
+assert Xtr.columns.tolist() == Xva.columns.tolist(), "[FATAL] Train/val column order mismatch"
+
+# --- Ensure y's are aligned + 1d int arrays
+y_train_arr = pd.Series(y_train, index=Xtr.index).astype(int).values
+y_val_arr   = pd.Series(y_val,   index=Xva.index).astype(int).values
+
+# --- Monotone constraints
+if "lgb_constraints" in globals() and lgb_constraints is not None and len(lgb_constraints) == Xtr.shape[1]:
+    mono_constraints = list(lgb_constraints)
+else:
+    mono_constraints = [0] * int(Xtr.shape[1])
+
+# --- Fit LGBMClassifier
+lgb_model = lgb.LGBMClassifier(
+    n_estimators=800,
+    learning_rate=0.03,
+    num_leaves=31,
+    subsample=0.85,
+    colsample_bytree=0.85,
+    min_child_samples=40,
+    reg_lambda=1.0,
+    random_state=42,
+    n_jobs=-1
+)
+lgb_model.set_params(monotone_constraints=mono_constraints)
+
+lgb_model.fit(
+    Xtr, y_train_arr,
+    eval_set=[(Xva, y_val_arr)],
+    eval_metric="auc"
+)
+
+# --- Score
+train_raw = lgb_model.predict_proba(Xtr)[:, 1]
+val_raw   = lgb_model.predict_proba(Xva)[:, 1]
+
+# --- Resolve agent_msisdn
+if "agent_msisdn_train" in globals():
+    agent_msisdn_tr = pd.Series(agent_msisdn_train, index=Xtr.index)
+elif "X_train_inter" in globals() and isinstance(X_train_inter, pd.DataFrame) and "agent_msisdn" in X_train_inter.columns:
+    agent_msisdn_tr = X_train_inter.reindex(Xtr.index)["agent_msisdn"]
+elif "df_pd_raw" in globals() and isinstance(df_pd_raw, pd.DataFrame) and "agent_msisdn" in df_pd_raw.columns:
+    agent_msisdn_tr = df_pd_raw.reindex(Xtr.index)["agent_msisdn"]
+else:
+    agent_msisdn_tr = pd.Series(np.arange(Xtr.shape[0]), index=Xtr.index)
+
+if "agent_msisdn_val" in globals():
+    agent_msisdn_va = pd.Series(agent_msisdn_val, index=Xva.index)
+elif "X_val_inter" in globals() and isinstance(X_val_inter, pd.DataFrame) and "agent_msisdn" in X_val_inter.columns:
+    agent_msisdn_va = X_val_inter.reindex(Xva.index)["agent_msisdn"]
+elif "df_pd_raw" in globals() and isinstance(df_pd_raw, pd.DataFrame) and "agent_msisdn" in df_pd_raw.columns:
+    agent_msisdn_va = df_pd_raw.reindex(Xva.index)["agent_msisdn"]
+else:
+    agent_msisdn_va = pd.Series(np.arange(Xva.shape[0]), index=Xva.index)
+
+# --- Resolve thin_file_flag (preserve missingness)
+if "X_train_inter" in globals() and isinstance(X_train_inter, pd.DataFrame) and "thin_file_flag" in X_train_inter.columns:
+    thin_tr_vals = pd.to_numeric(X_train_inter.reindex(Xtr.index)["thin_file_flag"], errors="coerce").values
+elif "df_pd_raw" in globals() and isinstance(df_pd_raw, pd.DataFrame) and "thin_file_flag" in df_pd_raw.columns:
+    thin_tr_vals = pd.to_numeric(df_pd_raw.reindex(Xtr.index)["thin_file_flag"], errors="coerce").values
+else:
+    thin_tr_vals = np.full(int(Xtr.shape[0]), np.nan)
+
+if "X_val_inter" in globals() and isinstance(X_val_inter, pd.DataFrame) and "thin_file_flag" in X_val_inter.columns:
+    thin_va_vals = pd.to_numeric(X_val_inter.reindex(Xva.index)["thin_file_flag"], errors="coerce").values
+elif "df_pd_raw" in globals() and isinstance(df_pd_raw, pd.DataFrame) and "thin_file_flag" in df_pd_raw.columns:
+    thin_va_vals = pd.to_numeric(df_pd_raw.reindex(Xva.index)["thin_file_flag"], errors="coerce").values
+else:
+    thin_va_vals = np.full(int(Xva.shape[0]), np.nan)
+
+# --- Canonical scored outputs (small, keyed)
+train_scored_lgbm = pd.DataFrame({
+    "agent_msisdn": np.asarray(agent_msisdn_tr),
+    "thin_file_flag": thin_tr_vals,
+    "bad_state": y_train_arr,
+    "raw_score": train_raw
+}, index=Xtr.index)
+
+val_scored_lgbm = pd.DataFrame({
+    "agent_msisdn": np.asarray(agent_msisdn_va),
+    "thin_file_flag": thin_va_vals,
+    "bad_state": y_val_arr,
+    "raw_score": val_raw
+}, index=Xva.index)
+
+lgb_val_df = val_scored_lgbm
+
+print(roc_auc_score(train_scored_lgbm["bad_state"], train_scored_lgbm["raw_score"]))
+print(roc_auc_score(val_scored_lgbm["bad_state"], val_scored_lgbm["raw_score"]))
+print(train_scored_lgbm.head())
+print(val_scored_lgbm.head())
+
+
+# Build LightGBM decile tables using the same segmentation logic used for XGBoost.
+
+# --- Pick validation scored DF (prefer canonical)
+cand_names = [
+    "val_scored_lgbm",          # canonical
+    "lgb_val_df",
+    "lgb_df_val_scored",
+    "df_val_scored",
+    "lgb_val_scored",
+    "df_lgb_val_scored",
+    "scored_df"                 # last-resort
+]
+
+cands = []
+for cand_nm in cand_names:
+    if cand_nm in globals() and isinstance(globals()[cand_nm], pd.DataFrame):
+        df_c = globals()[cand_nm]
+        cands.append({"name": cand_nm, "rows": int(df_c.shape[0]), "cols": int(df_c.shape[1])})
+
+cands_df = pd.DataFrame(cands).sort_values(["rows", "cols"], ascending=[False, False])
+print(cands_df.head(20))
+
+if int(cands_df.shape[0]) == 0:
+    raise ValueError("No scored LightGBM validation dataframe found in memory.")
+
+best_name = cands_df.iloc[0]["name"]
+df_lgb_val = globals()[best_name].copy()
+print(best_name)
+print(df_lgb_val.shape)
+print(df_lgb_val.head())
+
+# --- Ensure required columns exist + coerce
+need_cols = ["raw_score", "bad_state"]
+missing = [c for c in need_cols if c not in df_lgb_val.columns]
+print(missing)
+if len(missing) > 0:
+    raise ValueError("Missing required columns: " + str(missing))
+
+df_lgb_val["raw_score"] = pd.to_numeric(df_lgb_val["raw_score"], errors="coerce")
+df_lgb_val["bad_state"] = pd.to_numeric(df_lgb_val["bad_state"], errors="coerce").fillna(0).astype(int)
+
+# --- Thin segmentation (preserve missing)
+if "thin_file_flag" in df_lgb_val.columns:
+    thin_series2 = df_lgb_val["thin_file_flag"]
+    if thin_series2.dtype == bool:
+        thin_num2 = thin_series2.astype(int)
+    else:
+        thin_num2 = pd.to_numeric(thin_series2, errors="coerce")
+
+    df_lgb_val["thin_file_flag_bin"] = np.where(thin_num2.isna(), np.nan, (thin_num2 >= 0.5).astype(int))
+    df_lgb_val["thin_segment"] = df_lgb_val["thin_file_flag_bin"].map({0: "non_thin", 1: "thin"}).fillna("missing_flag")
+else:
+    df_lgb_val["thin_segment"] = "missing_flag"
+
+print(df_lgb_val["thin_segment"].value_counts(dropna=False))
+
+# --- Segment summary table
+seg_rows_lgb = []
+for seg_name2 in ["non_thin", "thin", "missing_flag"]:
+    seg_df2 = df_lgb_val[df_lgb_val["thin_segment"] == seg_name2].copy()
+    if int(seg_df2.shape[0]) == 0:
+        continue
+
+    y_vals2 = seg_df2["bad_state"].values
+    p_vals2 = seg_df2["raw_score"].values
+
+    ok_mask = ~pd.isna(p_vals2)
+    auc_val2 = np.nan
+    if int(np.unique(y_vals2[ok_mask]).shape[0]) >= 2:
+        try:
+            auc_val2 = roc_auc_score(y_vals2[ok_mask], p_vals2[ok_mask])
+        except Exception:
+            auc_val2 = np.nan
+
+    seg_rows_lgb.append({
+        "segment": seg_name2,
+        "n": int(seg_df2.shape[0]),
+        "bad_rate": float(np.mean(y_vals2)),
+        "avg_raw_score": float(np.nanmean(p_vals2)),
+        "auc": auc_val2,
+        "score_null_rate": float(np.mean(pd.isna(seg_df2["raw_score"])))
+    })
+
+seg_tbl_lgb = pd.DataFrame(seg_rows_lgb)
+if int(seg_tbl_lgb.shape[0]) > 0:
+    seg_order2 = pd.Categorical(seg_tbl_lgb["segment"], categories=["non_thin", "thin", "missing_flag"], ordered=True)
+    seg_tbl_lgb = seg_tbl_lgb.assign(segment=seg_order2).sort_values("segment")
+print(seg_tbl_lgb)
+
+# --- Decile builder (returns DF)
+def build_decile_table_return(tmp_df, score_col, label_prefix, n_bins=10, target_col="bad_state"):
+    tmp_df2 = tmp_df.copy()
+    tmp_df2 = tmp_df2[pd.notna(tmp_df2[score_col])]
+
+    if int(tmp_df2.shape[0]) == 0:
+        return pd.DataFrame({"note": [label_prefix + ": no non-null scores to form deciles"], "n": [0]})
+
+    uniq_scores2 = int(tmp_df2[score_col].nunique(dropna=True))
+    if uniq_scores2 < int(n_bins):
+        return pd.DataFrame({
+            "note": [label_prefix + ": not enough unique scores for deciles"],
+            "unique_scores": [uniq_scores2],
+            "n": [int(tmp_df2.shape[0])]
+        })      tmp_df2["decile"] = pd.qcut(tmp_df2[score_col], int(n_bins), labels=False, duplicates="drop").astype(int) + 1
+    dec_tbl2 = tmp_df2.groupby("decile").agg(
+        n=(target_col, "size"),
+        bad_rate=(target_col, "mean"),
+        avg_score=(score_col, "mean"),
+        min_score=(score_col, "min"),
+        max_score=(score_col, "max")
+    ).reset_index().sort_values("decile")
+    return dec_tbl2
+
+# --- Thin deciles + overall deciles
+thin_df_lgb = df_lgb_val[df_lgb_val["thin_segment"] == "thin"].copy()
+if int(thin_df_lgb.shape[0]) > 0:
+    dec_thin_lgb = build_decile_table_return(thin_df_lgb, "raw_score", "lgb_thin", n_bins=10)
+else:
+    dec_thin_lgb = pd.DataFrame({"note": ["No thin rows found after coercion (thin_segment == thin)"], "n_total": [int(df_lgb_val.shape[0])]})
+
+dec_all_lgb = build_decile_table_return(df_lgb_val, "raw_score", "lgb_overall", n_bins=10)
+
+print(dec_thin_lgb.head(30))
+print(dec_all_lgb.head(30)) 
+
+
+def build_decile_tables(
+    df_in,
+    score_col="raw_score",
+    target_col="bad_state",
+    segment_col=None,
+    n_bins=10,
+    thin_flag_col="thin_file_flag",
+    make_thin_segment_if_missing=True,
+    thin_threshold=0.5
+):
+    df_work = df_in.copy()
+
+    # Coerce score/target
+    df_work[score_col] = pd.to_numeric(df_work[score_col], errors="coerce")
+    df_work[target_col] = pd.to_numeric(df_work[target_col], errors="coerce").fillna(0).astype(int)
+
+    # Segment selection
+    if segment_col is not None and segment_col in df_work.columns:
+        seg_col_use = segment_col
+        df_work[seg_col_use] = df_work[seg_col_use].astype("object").fillna("missing")
+    else:
+        if make_thin_segment_if_missing and thin_flag_col in df_work.columns:
+            thin_series = df_work[thin_flag_col]
+            if thin_series.dtype == bool:
+                thin_num = thin_series.astype(int)
+            else:
+                thin_num = pd.to_numeric(thin_series, errors="coerce")
+
+            thin_bin = np.where(pd.isna(thin_num), np.nan, (thin_num >= float(thin_threshold)).astype(int))
+            df_work["thin_segment"] = pd.Series(thin_bin, index=df_work.index).map({0: "non_thin", 1: "thin"}).fillna("missing_flag")
+            seg_col_use = "thin_segment"
+        else:
+            df_work["__segment__"] = "all"
+            seg_col_use = "__segment__"
+
+    # Segment summary
+    seg_vals = pd.Series(df_work[seg_col_use].unique()).dropna().tolist()
+    seg_rows = []
+    for seg_name in seg_vals:
+        seg_df = df_work[df_work[seg_col_use] == seg_name].copy()
+        if int(seg_df.shape[0]) == 0:
+            continue
+
+        y_vals = seg_df[target_col].values
+        p_vals = seg_df[score_col].values
+        mask = ~pd.isna(p_vals)
+
+        auc_val = np.nan
+        if int(np.sum(mask)) > 0 and int(np.unique(y_vals[mask]).shape[0]) >= 2:
+            try:
+                auc_val = roc_auc_score(y_vals[mask], p_vals[mask])
+            except Exception:
+                auc_val = np.nan
+
+        seg_rows.append({
+            "segment": seg_name,
+            "n": int(seg_df.shape[0]),
+            "bad_rate": float(np.mean(y_vals)) if int(seg_df.shape[0]) > 0 else np.nan,
+            "avg_score": float(np.nanmean(p_vals)) if int(seg_df.shape[0]) > 0 else np.nan,
+            "auc": auc_val,
+            "score_null_rate": float(np.mean(pd.isna(p_vals)))
+        })
+
+    seg_summary_df = pd.DataFrame(seg_rows)
+
+    # Stable ordering for thin segmentation
+    if seg_col_use == "thin_segment" and int(seg_summary_df.shape[0]) > 0:
+        seg_order = pd.Categorical(seg_summary_df["segment"], categories=["non_thin", "thin", "missing_flag"], ordered=True)
+        seg_summary_df = seg_summary_df.assign(segment=seg_order).sort_values(["segment"]).reset_index(drop=True)
+    else:
+        seg_summary_df = seg_summary_df.sort_values(["segment"]).reset_index(drop=True) if int(seg_summary_df.shape[0]) > 0 else seg_summary_df
+
+    # Decile helper
+    def _deciles_for(sub_df, label):
+        tmp_df = sub_df.copy()
+        tmp_df = tmp_df[pd.notna(tmp_df[score_col])]
+        if int(tmp_df.shape[0]) == 0:
+            return pd.DataFrame({"note": [label + ": no non-null scores to form deciles"], "n": [0]})
+
+        uniq_scores = int(tmp_df[score_col].nunique(dropna=True))
+        if uniq_scores < int(n_bins):
+            return pd.DataFrame({
+                "note": [label + ": not enough unique scores for deciles"],
+                "unique_scores": [uniq_scores],
+                "n": [int(tmp_df.shape[0])]
+            })
+
+        tmp_df["decile"] = pd.qcut(tmp_df[score_col], int(n_bins), labels=False, duplicates="drop").astype(int) + 1
+        dec_tbl = tmp_df.groupby("decile").agg(
+            n=(target_col, "size"),
+            bad_rate=(target_col, "mean"),
+            avg_score=(score_col, "mean"),
+            min_score=(score_col, "min"),
+            max_score=(score_col, "max")
+        ).reset_index().sort_values("decile")
+
+        overall_bad = float(tmp_df[target_col].mean())
+        dec_tbl["lift_vs_overall"] = dec_tbl["bad_rate"] / (overall_bad + 1e-12)
+        return dec_tbl       overall_deciles_df = _deciles_for(df_work, "overall")
+
+    deciles_by_segment = {}
+    for seg_name in seg_vals:
+        seg_df = df_work[df_work[seg_col_use] == seg_name].copy()
+        deciles_by_segment[str(seg_name)] = _deciles_for(seg_df, "segment=" + str(seg_name))
+
+    return {
+        "seg_col": seg_col_use,
+        "seg_summary": seg_summary_df,
+        "overall": overall_deciles_df,
+        "by_segment": deciles_by_segment
+    }
+
+
+def compare_models_deciles(
+    df_a,
+    df_b,
+    score_a="raw_score",
+    score_b="raw_score",
+    target_col="bad_state",
+    segment_col="thin_segment",
+    n_bins=10,
+    name_a="model_a",
+    name_b="model_b",
+    allow_auto_thin_segment=True
+):
+    # Build deciles for each model. If the requested segment_col isn't present,
+    # build_decile_tables will auto-create thin_segment from thin_file_flag.
+    res_a = build_decile_tables(
+        df_a,
+        score_col=score_a,
+        target_col=target_col,
+        segment_col=segment_col if (segment_col in df_a.columns) else None,
+        n_bins=n_bins,
+        make_thin_segment_if_missing=allow_auto_thin_segment
+    )
+    res_b = build_decile_tables(
+        df_b,
+        score_col=score_b,
+        target_col=target_col,
+        segment_col=segment_col if (segment_col in df_b.columns) else None,
+        n_bins=n_bins,
+        make_thin_segment_if_missing=allow_auto_thin_segment
+    )
+
+    # Overall AUC on all rows
+    def _auc_overall(df_in, score_col_use):
+        df_tmp = df_in.copy()
+        df_tmp[score_col_use] = pd.to_numeric(df_tmp[score_col_use], errors="coerce")
+        df_tmp[target_col] = pd.to_numeric(df_tmp[target_col], errors="coerce").fillna(0).astype(int)
+        mask = ~pd.isna(df_tmp[score_col_use])
+        if int(np.sum(mask)) == 0:
+            return np.nan
+        if int(np.unique(df_tmp.loc[mask, target_col].values).shape[0]) < 2:
+            return np.nan
+        return roc_auc_score(df_tmp.loc[mask, target_col].values, df_tmp.loc[mask, score_col_use].values)
+
+    auc_a = _auc_overall(df_a, score_a)
+    auc_b = _auc_overall(df_b, score_b)
+
+    # Top/bottom decile bad rates from overall decile table
+    def _top_decile_bad(dec_df):
+        if "decile" not in dec_df.columns:
+            return np.nan
+        top_dec = int(dec_df["decile"].max())
+        vals = dec_df.loc[dec_df["decile"] == top_dec, "bad_rate"].values
+        return float(vals[0]) if int(vals.shape[0]) > 0 else np.nan
+
+    def _bottom_decile_bad(dec_df):
+        if "decile" not in dec_df.columns:
+            return np.nan
+        bot_dec = int(dec_df["decile"].min())
+        vals = dec_df.loc[dec_df["decile"] == bot_dec, "bad_rate"].values
+        return float(vals[0]) if int(vals.shape[0]) > 0 else np.nan
+
+    top_a = _top_decile_bad(res_a["overall"])
+    top_b = _top_decile_bad(res_b["overall"])
+    bot_a = _bottom_decile_bad(res_a["overall"])
+    bot_b = _bottom_decile_bad(res_b["overall"])
+
+    summary = pd.DataFrame([
+        {"model": name_a, "auc": auc_a, "top_decile_bad_rate": top_a, "bottom_decile_bad_rate": bot_a, "seg_col_used": res_a.get("seg_col")},
+        {"model": name_b, "auc": auc_b, "top_decile_bad_rate": top_b, "bottom_decile_bad_rate": bot_b, "seg_col_used": res_b.get("seg_col")}
+    ])
+
+    return summary, res_a, res_b
+
+
+
+def show_decile_result(res, title):
+    print("\n" + title)
+    if not isinstance(res, dict):
+        print("No result dict found")
+        return
+
+    print("\nseg_col used")
+    print(res.get("seg_col"))
+
+    print("\nsegment summary")
+    print(res.get("seg_summary"))
+
+    print("\noverall deciles (top)")
+    overall_df = res.get("overall")
+    if isinstance(overall_df, pd.DataFrame):
+        print(overall_df.head(15))
+    else:
+        print(overall_df)
+
+    print("\nby_segment keys")
+    by_seg = res.get("by_segment")
+    if isinstance(by_seg, dict):
+        print(list(by_seg.keys()))
+        if len(by_seg) > 0:
+            first_key = list(by_seg.keys())[0]
+            print("\nby_segment sample: " + str(first_key))
+            print(by_seg[first_key].head(15))
+    else:
+        print(by_seg)
+
+# Phase 1
+show_decile_result(globals().get("res_lgb_dec"), "PHASE 1: build_decile_tables output (res_lgb_dec)")
+
+# Phase 2
+cmp_tbl = globals().get("cmp_tbl")
+if isinstance(cmp_tbl, pd.DataFrame):
+    print("\nPHASE 2: model comparison summary (cmp_tbl)")
+    print(cmp_tbl)
+
+show_decile_result(globals().get("lgb_res"), "PHASE 2: compare_models_deciles output (lgb_res)") 
+
