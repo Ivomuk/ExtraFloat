@@ -297,41 +297,52 @@ def run_pipeline(args: argparse.Namespace) -> None:
     logger.info("=== Step 13: Build ops_scored table ===")
     champion = getattr(args, "champion", "xgb")
 
-    # Build agent placement for thick-file agents
-    from pd_model.modeling.calibration import add_policy_flags, attach_cal_pd, make_policy_bucket
-
-    champ_scored = xgb_val_scored if champion == "xgb" else lgb_val_scored
-    champ_scored_work = champ_scored.copy()
-    champ_scored_work["raw_score"] = champ_scored_work["raw_score"]
-    champ_scored_work["bad_state"] = champ_scored_work["bad_state"]
+    from pd_model.modeling.calibration import add_policy_flags, make_policy_bucket
 
     try:
-        champ_with_pd = attach_cal_pd(
-            champ_scored_work,
-            locked_artifacts["pd_calibration_map_tbl"],
-            champion,
-            cfg=cfg,
-        )
-        thresh_key = f"{champion}_policy_threshold_tbl"
-        champ_with_pd = add_policy_flags(
-            champ_with_pd,
-            locked_artifacts[thresh_key],
-            prefix=champion,
-            cfg=cfg,
-        )
-        champ_with_pd[feature_config.POLICY_BUCKET_COL] = make_policy_bucket(
-            champ_with_pd, prefix=champion, cfg=cfg
-        )
-        champ_with_pd["final_approved"] = champ_with_pd.get(f"{champion}_approved_at_50", 0)
+        # run_locked_policy_pipeline already calibrated both models and returned
+        # sorted DataFrames with cal_pd attached; apply policy flags for both.
+        xgb_sorted = locked_artifacts["xgb_policy_df_sorted"].copy()
+        lgb_sorted = locked_artifacts["lgb_policy_df_sorted"].copy()
 
-        # thin-file scorecard rows (use full df_pd for scorecard cols)
+        xgb_sorted = add_policy_flags(
+            xgb_sorted, locked_artifacts["xgb_policy_threshold_tbl"], prefix="xgb", cfg=cfg
+        )
+        lgb_sorted = add_policy_flags(
+            lgb_sorted, locked_artifacts["lgb_policy_threshold_tbl"], prefix="lgb", cfg=cfg
+        )
+
+        # Rename model-specific cal_pd before merging
+        xgb_sorted = xgb_sorted.rename(columns={feature_config.CAL_PD_COL: "xgb_cal_pd"})
+        lgb_sorted = lgb_sorted.rename(columns={feature_config.CAL_PD_COL: "lgb_cal_pd"})
+
+        # Merge LGB columns onto XGB base (both cover the same thick-file val agents)
+        lgb_merge_cols = [feature_config.AGENT_KEY, "lgb_cal_pd"] + [
+            c for c in lgb_sorted.columns if c.startswith("lgb_approved")
+        ]
+        thick_df = xgb_sorted.merge(
+            lgb_sorted[lgb_merge_cols], on=feature_config.AGENT_KEY, how="left"
+        )
+
+        # Promote champion's cal_pd to shared cal_pd column
+        thick_df[feature_config.CAL_PD_COL] = thick_df[f"{champion}_cal_pd"]
+        thick_df[feature_config.POLICY_BUCKET_COL] = make_policy_bucket(
+            thick_df, prefix=champion, cfg=cfg
+        )
+        thick_df["final_approved"] = thick_df.get(f"{champion}_approved_at_50", 0)
+
+        # thin-file scorecard rows
         thin_mask_val = thin_val.astype(bool)
-        df_sc_thin = df_pd_raw.loc[X_val_raw.index[thin_mask_val]].copy() if thin_mask_val.sum() > 0 else pd.DataFrame()
+        df_sc_thin = (
+            df_pd_raw.loc[X_val_raw.index[thin_mask_val]].copy()
+            if thin_mask_val.sum() > 0
+            else pd.DataFrame()
+        )
 
         if df_sc_thin.shape[0] > 0:
-            ops_scored = build_ops_scored_table(champ_with_pd, df_sc_thin)
+            ops_scored = build_ops_scored_table(thick_df, df_sc_thin)
         else:
-            ops_scored = champ_with_pd.copy()
+            ops_scored = thick_df.copy()
             ops_scored[feature_config.DECISION_SOURCE_COL] = "PD_MODEL"
 
         exec_summary = build_exec_summary(ops_scored)

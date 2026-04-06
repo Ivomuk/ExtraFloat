@@ -156,7 +156,13 @@ def score_new_agents(
     champion: str = "xgb",
 ) -> pd.DataFrame:
     """
-    Score a transformed feature DataFrame with trained models.
+    Score a transformed feature DataFrame with both trained models.
+
+    Both XGBoost and LightGBM are scored and calibrated independently,
+    producing ``xgb_cal_pd`` and ``lgb_cal_pd`` columns alongside their
+    respective approval flags.  The champion model's calibrated PD is
+    also promoted to the shared ``cal_pd`` column for downstream ops-table
+    compatibility.
 
     This function expects that the caller has already run the full feature
     engineering pipeline (Phase 2.1, Phase 2.2, scorecard, transformations)
@@ -173,15 +179,19 @@ def score_new_agents(
                      never_loan_pd_like etc. (indexed like df_transformed).
                      If None, meta columns are extracted from df_transformed.
     cfg            : ModelConfig
-    champion       : "xgb" or "lgb" — which model's cal_pd drives policy flags
+    champion       : "xgb" or "lgb" — whose cal_pd is promoted to ``cal_pd``
+                     and used to determine ``final_policy_bucket``
 
     Returns
     -------
     DataFrame with one row per agent:
         agent_msisdn, thin_file_flag,
         xgb_raw_score, lgb_raw_score,
-        cal_pd, final_policy_bucket,
-        xgb_approved_at_10/20/50/80
+        xgb_cal_pd, lgb_cal_pd,
+        cal_pd               (= champion's cal_pd),
+        xgb_approved_at_10/20/50/80,
+        lgb_approved_at_10/20/50/80,
+        final_policy_bucket  (= champion's bucket)
     """
     if champion not in ("xgb", "lgb"):
         raise ValueError(f"champion must be 'xgb' or 'lgb', got '{champion}'")
@@ -197,9 +207,8 @@ def score_new_agents(
     # Align feature matrix
     X = align_features(df_transformed.copy(), artifacts.feature_order)
 
-    # Score with XGBoost
+    # Score with both models
     xgb_raw = artifacts.xgb_model.predict_proba(X)[:, 1]
-    # Score with LightGBM
     lgb_raw = artifacts.lgb_model.predict_proba(X)[:, 1]
 
     logger.info(
@@ -218,43 +227,52 @@ def score_new_agents(
     else:
         thin_mask = pd.Series(False, index=out.index)
 
-    # Calibrate and apply policy for thick-file agents using champion model
     thick_mask = ~thin_mask
+
+    # Calibrate and apply policy for thick-file agents — both models independently
     if thick_mask.sum() > 0:
-        champ_score_col = "xgb_raw_score" if champion == "xgb" else "lgb_raw_score"
-        thick_df = out.loc[thick_mask].copy()
-        thick_df = thick_df.rename(columns={champ_score_col: feature_config.RAW_SCORE_COL})
-        thick_df["bad_state"] = 0  # placeholder — not available at inference time
+        for model_key, score_col, thresh in [
+            ("xgb", "xgb_raw_score", artifacts.xgb_policy_thresholds),
+            ("lgb", "lgb_raw_score", artifacts.lgb_policy_thresholds),
+        ]:
+            cal_pd_col = f"{model_key}_cal_pd"
+            thick_df = out.loc[thick_mask].copy()
+            thick_df = thick_df.rename(columns={score_col: feature_config.RAW_SCORE_COL})
+            thick_df["bad_state"] = 0  # placeholder — not available at inference time
 
-        try:
-            thick_cal = attach_cal_pd(thick_df, artifacts.cal_map, champion, cfg=cfg)
-            out.loc[thick_mask, feature_config.CAL_PD_COL] = thick_cal[feature_config.CAL_PD_COL].values
+            try:
+                thick_cal = attach_cal_pd(thick_df, artifacts.cal_map, model_key, cfg=cfg)
+                out.loc[thick_mask, cal_pd_col] = thick_cal[feature_config.CAL_PD_COL].values
 
-            thresh = (
-                artifacts.xgb_policy_thresholds
-                if champion == "xgb"
-                else artifacts.lgb_policy_thresholds
-            )
-            out_thick = add_policy_flags(
-                out.loc[thick_mask].copy(), thresh, prefix=champion, cfg=cfg
-            )
-            for col in out_thick.columns:
-                if col not in out.columns:
-                    out[col] = np.nan
-                out.loc[thick_mask, col] = out_thick[col].values
-        except Exception as exc:
-            logger.warning("attach_cal_pd failed for thick-file agents: %s", exc)
+                out_thick = add_policy_flags(
+                    out.loc[thick_mask].copy(), thresh, prefix=model_key, cfg=cfg
+                )
+                for col in out_thick.columns:
+                    if col not in out.columns:
+                        out[col] = np.nan
+                    out.loc[thick_mask, col] = out_thick[col].values
 
-    # Thin-file agents: use never_loan_pd_like as their PD estimate
+            except Exception as exc:
+                logger.warning(
+                    "Calibration failed for model=%s thick-file agents: %s", model_key, exc
+                )
+
+    # Thin-file agents: use never_loan_pd_like as PD for both models
     if thin_mask.sum() > 0 and "never_loan_pd_like" in out.columns:
         thin_pd = pd.to_numeric(out.loc[thin_mask, "never_loan_pd_like"], errors="coerce")
-        out.loc[thin_mask, feature_config.CAL_PD_COL] = thin_pd.values
+        out.loc[thin_mask, "xgb_cal_pd"] = thin_pd.values
+        out.loc[thin_mask, "lgb_cal_pd"] = thin_pd.values
         logger.info(
             "score_new_agents: %d thin-file agents use never_loan_pd_like as cal_pd",
             thin_mask.sum(),
         )
 
-    # Build policy bucket
+    # Promote champion's cal_pd to the shared cal_pd column (ops-table compatibility)
+    champ_cal_col = f"{champion}_cal_pd"
+    if champ_cal_col in out.columns:
+        out[feature_config.CAL_PD_COL] = out[champ_cal_col]
+
+    # Build policy bucket using champion's approval flags
     champ_col = f"{champion}_approved_at_50"
     if champ_col in out.columns:
         bucket = make_policy_bucket(out, prefix=champion, cfg=cfg)

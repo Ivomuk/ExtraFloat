@@ -33,9 +33,16 @@ def _make_artifacts(tmp_dir: Path, n_features: int = 5) -> ModelArtifacts:
     xgb_model, _, xgb_val = train_xgb(Xtr, ytr, Xva, yva, cfg=cfg)
     lgb_model, _, lgb_val = train_lgbm(Xtr, ytr, Xva, yva, cfg=cfg)
 
-    cal_map = build_pd_calibration_map(xgb_val, "xgb", cfg=cfg)
+    # Build combined calibration map for both models (same format as run_pipeline step 12)
+    import pandas as _pd
+    xgb_cal_map = build_pd_calibration_map(xgb_val, "xgb", cfg=cfg)
+    lgb_cal_map = build_pd_calibration_map(lgb_val, "lgb", cfg=cfg)
+    cal_map = _pd.concat([xgb_cal_map, lgb_cal_map], ignore_index=True)
+
     xgb_cal = attach_cal_pd(xgb_val, cal_map, "xgb", cfg=cfg)
-    thresh, _, _ = build_policy_tables(xgb_cal, cfg=cfg)
+    lgb_cal = attach_cal_pd(lgb_val, cal_map, "lgb", cfg=cfg)
+    xgb_thresh, _, _ = build_policy_tables(xgb_cal, cfg=cfg)
+    lgb_thresh, _, _ = build_policy_tables(lgb_cal, cfg=cfg)
 
     # Write all artifacts
     joblib.dump(xgb_model, tmp_dir / "xgb_model.joblib")
@@ -44,8 +51,8 @@ def _make_artifacts(tmp_dir: Path, n_features: int = 5) -> ModelArtifacts:
         json.dumps({"selected_features": feat_names})
     )
     cal_map.to_csv(tmp_dir / "pd_calibration_map.csv", index=False)
-    thresh.to_csv(tmp_dir / "xgb_policy_thresholds.csv", index=False)
-    thresh.to_csv(tmp_dir / "lgb_policy_thresholds.csv", index=False)
+    xgb_thresh.to_csv(tmp_dir / "xgb_policy_thresholds.csv", index=False)
+    lgb_thresh.to_csv(tmp_dir / "lgb_policy_thresholds.csv", index=False)
     pd.DataFrame({"feature": feat_names, "transform": "cap"}).to_csv(
         tmp_dir / "transform_report.csv", index=False
     )
@@ -114,6 +121,11 @@ class TestScoreNewAgents:
         result = score_new_agents(df, artifacts)
         assert "xgb_raw_score" in result.columns
         assert "lgb_raw_score" in result.columns
+        # Both models should have independent calibrated PD columns
+        assert "xgb_cal_pd" in result.columns
+        assert "lgb_cal_pd" in result.columns
+        # Champion's cal_pd is promoted to the shared cal_pd column
+        assert feature_config.CAL_PD_COL in result.columns
 
     def test_thin_agents_get_pd_from_scorecard(self, tmp_path):
         artifacts = _make_artifacts(tmp_path)
@@ -126,9 +138,12 @@ class TestScoreNewAgents:
         df[feature_config.THIN_FILE_COL] = 1
         df["never_loan_pd_like"] = rng.uniform(0, 1, n)
         result = score_new_agents(df, artifacts)
-        thin_cal = result.loc[result[feature_config.THIN_FILE_COL] == 1, feature_config.CAL_PD_COL]
-        # At least some thin agents should have cal_pd from never_loan_pd_like
-        assert thin_cal.notna().sum() > 0
+        thin_mask = result[feature_config.THIN_FILE_COL] == 1
+        # Both model cal_pd columns should be populated from never_loan_pd_like
+        assert result.loc[thin_mask, "xgb_cal_pd"].notna().sum() > 0
+        assert result.loc[thin_mask, "lgb_cal_pd"].notna().sum() > 0
+        # Shared cal_pd column is the champion's (xgb by default)
+        assert result.loc[thin_mask, feature_config.CAL_PD_COL].notna().sum() > 0
 
     def test_missing_features_warned_but_not_raised(self, tmp_path):
         artifacts = _make_artifacts(tmp_path)
