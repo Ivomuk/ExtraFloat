@@ -267,28 +267,55 @@ def run_pipeline(args: argparse.Namespace) -> None:
         scored_df[feature_config.THIN_FILE_COL] = thin_flags.values
 
     # ------------------------------------------------------------------ #
-    # 11) Bootstrap AUC comparison
+    # 10b) Split val 50/50: selection half (AUC/bootstrap) vs calibration half
+    #
+    # Using the same val set for both model selection and isotonic calibration
+    # introduces a subtle bias.  Splitting here ensures the calibration map
+    # is never fit on data that influenced model selection.
+    # ------------------------------------------------------------------ #
+    from sklearn.model_selection import train_test_split as _tts
+
+    _val_idx = np.arange(len(xgb_val_scored))
+    _bad_states = xgb_val_scored["bad_state"].fillna(0).astype(int).values
+    _idx_sel, _idx_cal = _tts(
+        _val_idx, test_size=0.5, stratify=_bad_states, random_state=cfg.random_state
+    )
+
+    xgb_val_select = xgb_val_scored.iloc[_idx_sel].reset_index(drop=True)
+    lgb_val_select = lgb_val_scored.iloc[_idx_sel].reset_index(drop=True)
+    xgb_val_cal    = xgb_val_scored.iloc[_idx_cal].reset_index(drop=True)
+    lgb_val_cal    = lgb_val_scored.iloc[_idx_cal].reset_index(drop=True)
+
+    logger.info(
+        "Val split: selection=%d rows | calibration=%d rows | bad_rate_sel=%.4f | bad_rate_cal=%.4f",
+        len(xgb_val_select), len(xgb_val_cal),
+        float(xgb_val_select["bad_state"].mean()),
+        float(xgb_val_cal["bad_state"].mean()),
+    )
+
+    # ------------------------------------------------------------------ #
+    # 11) Bootstrap AUC comparison  (selection half only)
     # ------------------------------------------------------------------ #
     if not getattr(args, "skip_bootstrap", False):
         logger.info("=== Step 11: Bootstrap AUC comparison ===")
-        bootstrap_tbl = run_bootstrap_comparison(xgb_val_scored, lgb_val_scored, cfg=cfg)
+        bootstrap_tbl = run_bootstrap_comparison(xgb_val_select, lgb_val_select, cfg=cfg)
         logger.info("Bootstrap results:\n%s", bootstrap_tbl.to_string(index=False))
     else:
         logger.info("=== Step 11: Bootstrap skipped (--skip-bootstrap) ===")
         bootstrap_tbl = pd.DataFrame()
 
-    # Model comparison deciles
+    # Model comparison deciles  (selection half only)
     cmp_summary, _xgb_dec, _lgb_dec = compare_models_deciles(
-        xgb_val_scored, lgb_val_scored, name_a="xgb", name_b="lgb"
+        xgb_val_select, lgb_val_select, name_a="xgb", name_b="lgb"
     )
     logger.info("Model comparison:\n%s", cmp_summary.to_string(index=False))
 
     # ------------------------------------------------------------------ #
-    # 12) Calibration + policy pipeline
+    # 12) Calibration + policy pipeline  (calibration half only)
     # ------------------------------------------------------------------ #
     logger.info("=== Step 12: Calibration + policy pipeline ===")
     locked_artifacts = run_locked_policy_pipeline(
-        xgb_val_scored, lgb_val_scored, cfg=cfg, output_dir=output_dir
+        xgb_val_cal, lgb_val_cal, cfg=cfg, output_dir=output_dir
     )
 
     # ------------------------------------------------------------------ #
@@ -384,6 +411,8 @@ def run_pipeline(args: argparse.Namespace) -> None:
     metadata = {
         "train_rows": len(X_train_raw),
         "val_rows": len(X_val_raw),
+        "val_select_rows": len(xgb_val_select),
+        "val_cal_rows": len(xgb_val_cal),
         "candidate_features": len(candidate_features),
         "selected_features": len(selected_features),
         "bad_rate_train": float(y_train.mean()),

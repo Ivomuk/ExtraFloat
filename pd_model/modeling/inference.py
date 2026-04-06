@@ -29,6 +29,7 @@ from pd_model.config import feature_config
 from pd_model.config.model_config import DEFAULT_CONFIG, ModelConfig
 from pd_model.logging_config import get_logger
 from pd_model.modeling.calibration import add_policy_flags, attach_cal_pd, make_policy_bucket
+from pd_model.modeling.explainability import build_adverse_action_df, compute_shap_values
 
 logger = get_logger(__name__)
 
@@ -154,6 +155,8 @@ def score_new_agents(
     agent_meta: pd.DataFrame | None = None,
     cfg: ModelConfig = DEFAULT_CONFIG,
     champion: str = "xgb",
+    compute_shap: bool = False,
+    n_adverse_reasons: int = 3,
 ) -> pd.DataFrame:
     """
     Score a transformed feature DataFrame with both trained models.
@@ -173,14 +176,18 @@ def score_new_agents(
 
     Parameters
     ----------
-    df_transformed : output of ``build_transformed_dataframe()`` for new agents
-    artifacts      : loaded ModelArtifacts from ``load_artifacts()``
-    agent_meta     : optional DataFrame with agent_msisdn, thin_file_flag,
-                     never_loan_pd_like etc. (indexed like df_transformed).
-                     If None, meta columns are extracted from df_transformed.
-    cfg            : ModelConfig
-    champion       : "xgb" or "lgb" — whose cal_pd is promoted to ``cal_pd``
-                     and used to determine ``final_policy_bucket``
+    df_transformed    : output of ``build_transformed_dataframe()`` for new agents
+    artifacts         : loaded ModelArtifacts from ``load_artifacts()``
+    agent_meta        : optional DataFrame with agent_msisdn, thin_file_flag,
+                        never_loan_pd_like etc. (indexed like df_transformed).
+                        If None, meta columns are extracted from df_transformed.
+    cfg               : ModelConfig
+    champion          : "xgb" or "lgb" — whose cal_pd is promoted to ``cal_pd``
+                        and used to determine ``final_policy_bucket``
+    compute_shap      : if True, compute SHAP values for the champion model and
+                        append adverse_reason_1/2/3 columns (default False —
+                        adds ~1–3s per 10k agents; requires shap package)
+    n_adverse_reasons : number of top adverse action reasons to include (default 3)
 
     Returns
     -------
@@ -188,10 +195,12 @@ def score_new_agents(
         agent_msisdn, thin_file_flag,
         xgb_raw_score, lgb_raw_score,
         xgb_cal_pd, lgb_cal_pd,
-        cal_pd               (= champion's cal_pd),
+        cal_pd                    (= champion's cal_pd),
         xgb_approved_at_10/20/50/80,
         lgb_approved_at_10/20/50/80,
-        final_policy_bucket  (= champion's bucket)
+        final_policy_bucket       (= champion's bucket),
+        adverse_reason_1/2/3      (only if compute_shap=True)
+        adverse_reason_1/2/3_shap (only if compute_shap=True)
     """
     if champion not in ("xgb", "lgb"):
         raise ValueError(f"champion must be 'xgb' or 'lgb', got '{champion}'")
@@ -277,6 +286,24 @@ def score_new_agents(
     if champ_col in out.columns:
         bucket = make_policy_bucket(out, prefix=champion, cfg=cfg)
         out[feature_config.POLICY_BUCKET_COL] = bucket
+
+    # Optional: SHAP-based adverse action reasons for the champion model
+    if compute_shap:
+        try:
+            champ_model = artifacts.xgb_model if champion == "xgb" else artifacts.lgb_model
+            shap_vals = compute_shap_values(champ_model, X, model_key=champion)
+            reasons_df = build_adverse_action_df(
+                shap_vals, feature_names=artifacts.feature_order,
+                n_reasons=n_adverse_reasons,
+            )
+            reasons_df.index = out.index
+            out = pd.concat([out, reasons_df], axis=1)
+            logger.info(
+                "score_new_agents: SHAP adverse reasons added (champion=%s, n_reasons=%d)",
+                champion, n_adverse_reasons,
+            )
+        except Exception as exc:
+            logger.warning("SHAP computation failed — skipping adverse reasons: %s", exc)
 
     return out
 
