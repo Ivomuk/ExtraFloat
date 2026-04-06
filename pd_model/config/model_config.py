@@ -107,6 +107,37 @@ class ModelConfig:
     iv_n_bins: int = 10                     # number of bins for IV computation
 
     # ------------------------------------------------------------------ #
+    # XGBoost hyperparameters
+    # ------------------------------------------------------------------ #
+    xgb_n_estimators: int = 800
+    xgb_learning_rate: float = 0.03
+    xgb_max_depth: int = 4
+    xgb_subsample: float = 0.8
+    xgb_colsample_bytree: float = 0.8
+    xgb_reg_lambda: float = 1.0
+
+    # ------------------------------------------------------------------ #
+    # LightGBM hyperparameters
+    # ------------------------------------------------------------------ #
+    lgb_n_estimators: int = 800
+    lgb_learning_rate: float = 0.03
+    lgb_num_leaves: int = 31
+    lgb_subsample: float = 0.85
+    lgb_colsample_bytree: float = 0.85
+    lgb_min_child_samples: int = 40
+    lgb_reg_lambda: float = 1.0
+
+    # ------------------------------------------------------------------ #
+    # Calibration / bootstrap / policy
+    # ------------------------------------------------------------------ #
+    cal_n_bins: int = 50                      # isotonic calibration bins
+    cal_min_n: int = 5000                     # fail-closed minimum rows for calibration
+    cal_min_bads: int = 50                    # fail-closed minimum bads for calibration
+    cal_min_coverage: float = 0.98            # minimum fraction of rows that receive cal_pd
+    bootstrap_n: int = 2000                   # number of bootstrap samples for AUC CI
+    policy_operating_points: tuple = (0.10, 0.20, 0.50, 0.80)  # approval rate thresholds
+
+    # ------------------------------------------------------------------ #
     # Scorecard weights (embedded for single-config access)
     # ------------------------------------------------------------------ #
     scorecard: ScorecardWeights = field(default_factory=ScorecardWeights)

@@ -297,3 +297,22 @@ REPAYMENT_FORBIDDEN_SUBSTRINGS: Tuple[str, ...] = (
     "collection",
     "dpd_target",
 )
+
+# ======================================================================== #
+# Scoring / postprocessing column constants
+# ======================================================================== #
+
+RAW_SCORE_COL: str = "raw_score"
+CAL_PD_COL: str = "cal_pd"
+DECISION_SOURCE_COL: str = "decision_source"
+POLICY_BUCKET_COL: str = "final_policy_bucket"
+
+# Whitelist / blacklist evaluation
+WL_BL_COL: str = "xtrafloat_list_type"
+WL_BL_KEY: str = "agent_msisdn_key"
+WL_CATEGORY_COL: str = "agent_category"
+WL_REASON_COL: str = "reason"
+NON_PERF_BLACKLIST_REASONS: Tuple[str, ...] = (
+    "As requested by Director",
+    "Agent active less than 3 months",
+)

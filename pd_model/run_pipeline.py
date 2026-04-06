@@ -1,5 +1,5 @@
 """
-PD Model Feature Pipeline — CLI entry point.
+PD Model Feature + Training Pipeline — CLI entry point.
 
 Usage
 -----
@@ -13,6 +13,7 @@ Usage
         --val-snapshot-date   20251115 \\
         --train-cutoff        2025-09-30 \\
         --output-dir          artifacts/ \\
+        --champion            xgb \\
         --log-level           INFO
 
 The pipeline:
@@ -23,7 +24,13 @@ The pipeline:
 5.  Feature classification + transformation.
 6.  IV-based feature selection (train-only).
 7.  Train / validation split + final data prep.
-8.  Write ``feature_order.json`` and ``model_metadata.json`` to *output-dir*.
+8.  Write ``feature_order.json`` and ``model_metadata.json``.
+9.  Train XGBoost model.
+10. Train LightGBM model.
+11. Bootstrap AUC comparison (skippable with --skip-bootstrap).
+12. Calibration + policy pipeline.
+13. Build unified ops_scored table.
+14. Serialize all artifacts for inference.
 """
 
 from __future__ import annotations
@@ -34,13 +41,19 @@ import logging
 import sys
 from pathlib import Path
 
+import joblib
 import pandas as pd
 
 from pd_model.config import feature_config
 from pd_model.config.model_config import DEFAULT_CONFIG
 from pd_model.data_prep.pipeline_data import prepare_pd_training_and_validation_data
 from pd_model.logging_config import configure_root_level, get_logger
+from pd_model.modeling.calibration import run_bootstrap_comparison, run_locked_policy_pipeline
+from pd_model.modeling.evaluation import compare_models_deciles
+from pd_model.modeling.lgbm_model import train_lgbm
 from pd_model.modeling.scorecard import add_never_loan_scorecard_from_phase_2_1
+from pd_model.modeling.xgb_model import train_xgb
+from pd_model.postprocessing.ops_scored import build_exec_summary, build_ops_scored_table
 from pd_model.preprocessing.loan_features import (
     add_thin_file_flags,
     classify_agent_loan_status,
@@ -216,16 +229,147 @@ def run_pipeline(args: argparse.Namespace) -> None:
     )
 
     # ------------------------------------------------------------------ #
-    # 9) Write artifacts
+    # 9) Train XGBoost
     # ------------------------------------------------------------------ #
-    logger.info("=== Step 9: Write artifacts ===")
+    logger.info("=== Step 9: Train XGBoost ===")
+    # Build pure feature matrices (no meta cols)
+    meta_drop = [c for c in [
+        feature_config.AGENT_KEY, feature_config.THIN_FILE_COL,
+        feature_config.TARGET_COL,
+    ] if c in X_train_trans.columns]
+    Xtr = X_train_trans[selected_features].copy()
+    Xva = X_val_trans[selected_features].copy()
 
+    # Attach meta cols to scored frames after training
+    xgb_model, xgb_train_scored, xgb_val_scored = train_xgb(
+        Xtr, y_train, Xva, y_val, cfg=cfg
+    )
+    # Attach agent meta
+    for scored_df, agent_ids, thin_flags in [
+        (xgb_train_scored, agent_train, thin_train),
+        (xgb_val_scored, agent_val, thin_val),
+    ]:
+        scored_df.insert(0, feature_config.AGENT_KEY, agent_ids.values)
+        scored_df[feature_config.THIN_FILE_COL] = thin_flags.values
+
+    # ------------------------------------------------------------------ #
+    # 10) Train LightGBM
+    # ------------------------------------------------------------------ #
+    logger.info("=== Step 10: Train LightGBM ===")
+    lgb_model, lgb_train_scored, lgb_val_scored = train_lgbm(
+        Xtr, y_train, Xva, y_val, cfg=cfg
+    )
+    for scored_df, agent_ids, thin_flags in [
+        (lgb_train_scored, agent_train, thin_train),
+        (lgb_val_scored, agent_val, thin_val),
+    ]:
+        scored_df.insert(0, feature_config.AGENT_KEY, agent_ids.values)
+        scored_df[feature_config.THIN_FILE_COL] = thin_flags.values
+
+    # ------------------------------------------------------------------ #
+    # 11) Bootstrap AUC comparison
+    # ------------------------------------------------------------------ #
+    if not getattr(args, "skip_bootstrap", False):
+        logger.info("=== Step 11: Bootstrap AUC comparison ===")
+        bootstrap_tbl = run_bootstrap_comparison(xgb_val_scored, lgb_val_scored, cfg=cfg)
+        logger.info("Bootstrap results:\n%s", bootstrap_tbl.to_string(index=False))
+    else:
+        logger.info("=== Step 11: Bootstrap skipped (--skip-bootstrap) ===")
+        bootstrap_tbl = pd.DataFrame()
+
+    # Model comparison deciles
+    cmp_summary, _xgb_dec, _lgb_dec = compare_models_deciles(
+        xgb_val_scored, lgb_val_scored, name_a="xgb", name_b="lgb"
+    )
+    logger.info("Model comparison:\n%s", cmp_summary.to_string(index=False))
+
+    # ------------------------------------------------------------------ #
+    # 12) Calibration + policy pipeline
+    # ------------------------------------------------------------------ #
+    logger.info("=== Step 12: Calibration + policy pipeline ===")
+    locked_artifacts = run_locked_policy_pipeline(
+        xgb_val_scored, lgb_val_scored, cfg=cfg, output_dir=output_dir
+    )
+
+    # ------------------------------------------------------------------ #
+    # 13) Build unified ops_scored table
+    # ------------------------------------------------------------------ #
+    logger.info("=== Step 13: Build ops_scored table ===")
+    champion = getattr(args, "champion", "xgb")
+
+    # Build agent placement for thick-file agents
+    from pd_model.modeling.calibration import add_policy_flags, attach_cal_pd, make_policy_bucket
+
+    champ_scored = xgb_val_scored if champion == "xgb" else lgb_val_scored
+    champ_scored_work = champ_scored.copy()
+    champ_scored_work["raw_score"] = champ_scored_work["raw_score"]
+    champ_scored_work["bad_state"] = champ_scored_work["bad_state"]
+
+    try:
+        champ_with_pd = attach_cal_pd(
+            champ_scored_work,
+            locked_artifacts["pd_calibration_map_tbl"],
+            champion,
+            cfg=cfg,
+        )
+        thresh_key = f"{champion}_policy_threshold_tbl"
+        champ_with_pd = add_policy_flags(
+            champ_with_pd,
+            locked_artifacts[thresh_key],
+            prefix=champion,
+            cfg=cfg,
+        )
+        champ_with_pd[feature_config.POLICY_BUCKET_COL] = make_policy_bucket(
+            champ_with_pd, prefix=champion, cfg=cfg
+        )
+        champ_with_pd["final_approved"] = champ_with_pd.get(f"{champion}_approved_at_50", 0)
+
+        # thin-file scorecard rows (use full df_pd for scorecard cols)
+        thin_mask_val = thin_val.astype(bool)
+        df_sc_thin = df_pd_raw.loc[X_val_raw.index[thin_mask_val]].copy() if thin_mask_val.sum() > 0 else pd.DataFrame()
+
+        if df_sc_thin.shape[0] > 0:
+            ops_scored = build_ops_scored_table(champ_with_pd, df_sc_thin)
+        else:
+            ops_scored = champ_with_pd.copy()
+            ops_scored[feature_config.DECISION_SOURCE_COL] = "PD_MODEL"
+
+        exec_summary = build_exec_summary(ops_scored)
+        logger.info("Exec summary:\n%s", exec_summary.to_string(index=False))
+
+        ops_path = output_dir / "ops_scored.csv"
+        ops_scored.to_csv(ops_path, index=False)
+        logger.info("Wrote %s (%d rows)", ops_path, len(ops_scored))
+
+    except Exception as exc:
+        logger.warning("ops_scored build failed (calibration may need more data): %s", exc)
+        ops_scored = pd.DataFrame()
+
+    # ------------------------------------------------------------------ #
+    # 14) Serialize artifacts
+    # ------------------------------------------------------------------ #
+    logger.info("=== Step 14: Serialize artifacts ===")
+
+    xgb_path = output_dir / "xgb_model.joblib"
+    lgb_path = output_dir / "lgbm_model.joblib"
+    joblib.dump(xgb_model, xgb_path)
+    joblib.dump(lgb_model, lgb_path)
+    logger.info("Saved XGBoost model → %s", xgb_path)
+    logger.info("Saved LightGBM model → %s", lgb_path)
+
+    # transform_report for inference
+    tr_path = output_dir / "transform_report.csv"
+    transform_report.to_csv(tr_path, index=False)
+    logger.info("Saved transform_report → %s", tr_path)
+
+    # feature_order.json
     feature_order_path = output_dir / "feature_order.json"
     feature_order_path.write_text(
         json.dumps({"selected_features": selected_features}, indent=2)
     )
     logger.info("Wrote %s (%d features)", feature_order_path, len(selected_features))
 
+    # Full metadata
     metadata = {
         "train_rows": len(X_train_raw),
         "val_rows": len(X_val_raw),
@@ -236,8 +380,14 @@ def run_pipeline(args: argparse.Namespace) -> None:
         "train_cutoff": str(train_cutoff.date()),
         "thin_file_train": int(thin_train.sum()),
         "thin_file_val": int(thin_val.sum()),
+        "champion": champion,
+        "xgb_val_auc": float(cmp_summary.loc[cmp_summary["model"] == "xgb", "auc"].iloc[0])
+            if "xgb" in cmp_summary["model"].values else None,
+        "lgb_val_auc": float(cmp_summary.loc[cmp_summary["model"] == "lgb", "auc"].iloc[0])
+            if "lgb" in cmp_summary["model"].values else None,
         "iv_table": iv_table.to_dict(orient="records"),
         "transform_report": transform_report.to_dict(orient="records"),
+        "bootstrap": bootstrap_tbl.to_dict(orient="records") if not bootstrap_tbl.empty else [],
     }
 
     metadata_path = output_dir / "model_metadata.json"
@@ -286,6 +436,28 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         default=True,
         help="Raise an error on HIGH leakage findings (default: True)",
+    )
+    parser.add_argument(
+        "--champion",
+        default="xgb",
+        choices=["xgb", "lgb"],
+        help="Champion model for policy placement and inference (default: xgb)",
+    )
+    parser.add_argument(
+        "--skip-bootstrap",
+        action="store_true",
+        default=False,
+        help="Skip the 2000-sample bootstrap AUC comparison (faster dev runs)",
+    )
+    parser.add_argument(
+        "--whitelist-file",
+        default=None,
+        help="Optional path to whitelist CSV for thin-file scorecard evaluation",
+    )
+    parser.add_argument(
+        "--blacklist-file",
+        default=None,
+        help="Optional path to blacklist CSV for thin-file scorecard evaluation",
     )
     parser.add_argument(
         "--log-level",
