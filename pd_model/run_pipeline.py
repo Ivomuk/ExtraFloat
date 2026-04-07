@@ -158,6 +158,7 @@ def run_pipeline(args: argparse.Namespace) -> None:
         hard_fail=args.hard_fail_leakage,
         cfg=cfg,
         verbose=True,
+        pd_feature_blacklist=feature_config.PD_FEATURE_BLACKLIST,
     )
 
     # ------------------------------------------------------------------ #

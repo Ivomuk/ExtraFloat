@@ -11,7 +11,7 @@ Provides:
 
 from __future__ import annotations
 
-from typing import Optional, Tuple
+from typing import FrozenSet, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -168,6 +168,7 @@ def leakage_audit_phase_2_2(
     hard_fail: bool = True,
     cfg: ModelConfig = DEFAULT_CONFIG,
     verbose: bool = True,
+    pd_feature_blacklist: Optional[FrozenSet[str]] = None,
 ) -> pd.DataFrame:
     """
     Run four leakage checks on the modelling DataFrame:
@@ -178,20 +179,22 @@ def leakage_audit_phase_2_2(
     4. **BINARY_DOMINANCE** – binary columns where bad-rate jump exceeds threshold.
 
     Args:
-        df_pd:        Modelling DataFrame.
-        snapshot_col: Column holding the snapshot date.
-        txn_max_col:  Column holding the maximum transaction date (may be absent).
-        label_cols:   Columns considered target-adjacent.
-        hard_fail:    If ``True``, raise ``RuntimeError`` on any HIGH finding.
-        cfg:          Model config for correlation and dominance thresholds.
-        verbose:      If ``True``, log the audit report.
+        df_pd:               Modelling DataFrame.
+        snapshot_col:        Column holding the snapshot date.
+        txn_max_col:         Column holding the maximum transaction date (may be absent).
+        label_cols:          Columns considered target-adjacent.
+        hard_fail:           If ``True``, raise ``RuntimeError`` on any HIGH finding.
+        cfg:                 Model config for correlation and dominance thresholds.
+        verbose:             If ``True``, log the audit report.
+        pd_feature_blacklist: If provided, columns already in the blacklist are downgraded
+                             from HIGH to INFO (they are intentionally excluded from the model).
 
     Returns:
         Audit report as a DataFrame with columns
         ``[check, column, severity, message]``.
 
     Raises:
-        RuntimeError: On HIGH findings when ``hard_fail=True``.
+        RuntimeError: On HIGH findings (excluding blacklisted columns) when ``hard_fail=True``.
     """
     if not isinstance(df_pd, pd.DataFrame):
         raise TypeError("df_pd must be a pandas DataFrame")
@@ -319,13 +322,25 @@ def leakage_audit_phase_2_2(
                     )
 
     # ------------------------------------------------------------------ #
-    # Report
+    # Report — downgrade blacklisted columns from HIGH to INFO
     # ------------------------------------------------------------------ #
     audit_report = pd.DataFrame(audit_rows)
 
+    if not audit_report.empty and pd_feature_blacklist is not None:
+        blacklist_low = {str(c).lower() for c in pd_feature_blacklist}
+        blacklisted_mask = audit_report["column"].str.lower().isin(blacklist_low)
+        n_downgraded = int((blacklisted_mask & (audit_report["severity"] == "HIGH")).sum())
+        if n_downgraded > 0:
+            logger.info(
+                "leakage_audit: %d HIGH finding(s) downgraded to INFO "
+                "(columns already in PD_FEATURE_BLACKLIST — intentionally excluded from model)",
+                n_downgraded,
+            )
+        audit_report.loc[blacklisted_mask & (audit_report["severity"] == "HIGH"), "severity"] = "INFO"
+
     if verbose:
         if not audit_report.empty:
-            sev_order = {"HIGH": 0, "MEDIUM": 1, "LOW": 2}
+            sev_order = {"HIGH": 0, "MEDIUM": 1, "LOW": 2, "INFO": 3}
             tmp = audit_report.copy()
             tmp["_ord"] = tmp["severity"].map(sev_order).fillna(9).astype(int)
             tmp = tmp.sort_values(["_ord", "check", "column"]).drop(columns=["_ord"])
