@@ -764,6 +764,24 @@ def run_phase_2_2_repayment_pd_features(
         "[run_phase_2_2] PD duplicated after merge — merge keys not unique"
     )
 
+    # Derive has_ever_loan: agent has loan history if any disbursement volume
+    # column is non-zero. Falls back to 0 (thin-file) if no disbursement cols exist.
+    disb_vol_cols = [
+        c for c in repayment_numeric_features
+        if "disbursement_vol" in c.lower() or "disbursement_val" in c.lower()
+    ]
+    if disb_vol_cols:
+        disb_arr = df_pd_out[disb_vol_cols].apply(pd.to_numeric, errors="coerce").fillna(0)
+        df_pd_out["has_ever_loan"] = (disb_arr.max(axis=1) > 0).astype(int)
+    else:
+        # No disbursement columns — treat all as thin-file
+        df_pd_out["has_ever_loan"] = 0
+    logger.info(
+        "run_phase_2_2: has_ever_loan — thick-file=%d | thin-file=%d",
+        int(df_pd_out["has_ever_loan"].sum()),
+        int((df_pd_out["has_ever_loan"] == 0).sum()),
+    )
+
     # ------------------------------------------------------------------ #
     # Recompute labels now that penalty columns exist
     # ------------------------------------------------------------------ #
