@@ -435,8 +435,20 @@ def run_phase_2_2_repayment_pd_features(
         raw = df_repayments[snapshot_col]
         total = len(raw)
 
-        snap_dt = pd.to_datetime(raw, errors="coerce")
-        parsed_fmt = "generic ISO"
+        # Try YYYYMMDD integer format first (e.g. 20251115 stored as int64 or
+        # "20251115" as string) — generic pd.to_datetime treats integers as
+        # nanoseconds since epoch producing 1970-era dates, so check this first.
+        looks_yyyymmdd = (
+            pd.to_numeric(raw, errors="coerce")
+            .between(20000101, 21001231, inclusive="both")
+            .fillna(False)
+        )
+        if looks_yyyymmdd.any():
+            snap_dt = pd.to_datetime(raw.astype(str), format="%Y%m%d", errors="coerce")
+            parsed_fmt = "YYYYMMDD"
+        else:
+            snap_dt = pd.to_datetime(raw, errors="coerce")
+            parsed_fmt = "generic ISO"
 
         if snap_dt.notna().sum() == 0:
             snap_dt = pd.to_datetime(raw, errors="coerce", dayfirst=True)
