@@ -61,6 +61,7 @@ PD_FEATURE_BLACKLIST: FrozenSet[str] = frozenset(
         "penalties_3M",
         "penalties_6M",
         "penalty_frequency_6M",
+        "penalty_roll_forward",
         "ever_penalized",
         "ever_delinquent_flag",
         "cured_after_penalty",
