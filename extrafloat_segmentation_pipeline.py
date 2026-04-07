@@ -365,44 +365,81 @@ def _run_gmm(
     cov_type = cfg["gmm_covariance_type"]
     reg_covar = float(cfg.get("gmm_reg_covar", 1e-4))
 
+    # Cap max_k: need at least 10 samples per component to avoid degenerate
+    # clusters during EM initialisation.  With fewer samples, components
+    # collapse to singletons and the covariance becomes singular no matter
+    # how large reg_covar is.
+    n_active = len(X_pca_active)
+    safe_max_k = max(int(min_k), min(int(max_k), n_active // 10))
+    if safe_max_k < max_k:
+        logger.warning(
+            "_run_gmm: capping gmm_max_k from %d to %d "
+            "(need >= 10 agents per component, n_active=%d).",
+            max_k, safe_max_k, n_active,
+        )
+    max_k = safe_max_k
+
+    # Covariance type fallback chain: full → diag → spherical.
+    # "full" can fail when components receive too few samples even after capping k.
+    # "diag" is numerically stable and appropriate for high-dimensional PCA spaces.
+    _COV_FALLBACK = ["full", "diag", "spherical"]
+    cov_candidates = [cov_type] + [c for c in _COV_FALLBACK if c != cov_type]
+
+    def _bic_search(cov: str) -> tuple[list[float], list[int]]:
+        scores, valid_ks = [], []
+        for k in range(min_k, max_k + 1):
+            g = GaussianMixture(
+                n_components=k,
+                covariance_type=cov,
+                reg_covar=reg_covar,
+                random_state=rs,
+                max_iter=200,
+            )
+            try:
+                g.fit(X_pca_active)
+                scores.append(g.bic(X_pca_active))
+                valid_ks.append(k)
+            except ValueError:
+                logger.warning(
+                    "_run_gmm: k=%d cov=%s failed (singular covariance) — skipping.", k, cov
+                )
+        return scores, valid_ks
+
     logger.info(
-        "_run_gmm: BIC search k=%d..%d on %d active agents (reg_covar=%.2e)",
-        min_k,
-        max_k,
-        len(X_pca_active),
-        reg_covar,
+        "_run_gmm: BIC search k=%d..%d on %d active agents "
+        "(cov=%s, reg_covar=%.2e)",
+        min_k, max_k, n_active, cov_type, reg_covar,
     )
 
-    bic_scores: list[float] = []
-    ks = list(range(min_k, max_k + 1))
-    for k in ks:
-        g = GaussianMixture(
-            n_components=k,
-            covariance_type=cov_type,
-            reg_covar=reg_covar,
-            random_state=rs,
-            max_iter=200,
-        )
-        try:
-            g.fit(X_pca_active)
-            bic_scores.append(g.bic(X_pca_active))
-        except ValueError:
-            # Singular covariance even with reg_covar — skip this k
-            logger.warning("_run_gmm: k=%d failed (singular covariance) — skipping.", k)
-            bic_scores.append(float("inf"))
+    chosen_cov = cov_type
+    bic_scores, valid_ks = _bic_search(cov_type)
 
-    if all(s == float("inf") for s in bic_scores):
+    if not valid_ks:
+        for fallback_cov in cov_candidates[1:]:
+            logger.warning(
+                "_run_gmm: all fits failed with cov='%s' — retrying with cov='%s'.",
+                chosen_cov, fallback_cov,
+            )
+            bic_scores, valid_ks = _bic_search(fallback_cov)
+            if valid_ks:
+                chosen_cov = fallback_cov
+                break
+
+    if not valid_ks:
         raise ValueError(
-            "_run_gmm: all GMM fits failed. Try increasing gmm_reg_covar "
-            "(current: %.2e) or reducing gmm_max_k." % reg_covar
+            "_run_gmm: GMM fitting failed for all covariance types and k values. "
+            "Check your data for duplicate rows or near-zero-variance features. "
+            "You can also try config={'clustering': {'gmm_min_k': 2, 'gmm_max_k': 4}}."
         )
 
-    best_k = ks[int(np.argmin(bic_scores))]
-    logger.info("_run_gmm: best_k=%d (min BIC=%.1f)", best_k, min(s for s in bic_scores if s < float("inf")))
+    best_k = valid_ks[int(np.argmin(bic_scores))]
+    logger.info(
+        "_run_gmm: best_k=%d cov='%s' (BIC=%.1f)", best_k, chosen_cov, min(bic_scores)
+    )
 
     gmm = GaussianMixture(
         n_components=best_k,
-        covariance_type=cov_type,
+        covariance_type=chosen_cov,
         reg_covar=reg_covar,
         random_state=rs,
         max_iter=300,
