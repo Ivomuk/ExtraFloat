@@ -395,6 +395,11 @@ def run_phase_2_2_repayment_pd_features(
     require_columns(df_pd, ["agent_msisdn"], context="run_phase_2_2")
     require_columns(df_repayments, ["agent_msisdn"], context="run_phase_2_2")
 
+    # Coerce agent_msisdn to string on both sides so int64 vs str doesn't
+    # silently produce zero merge matches (e.g. 256787530736 vs '256787530736')
+    df_pd["agent_msisdn"] = df_pd["agent_msisdn"].astype(str).str.strip()
+    df_repayments["agent_msisdn"] = df_repayments["agent_msisdn"].astype(str).str.strip()
+
     eps = cfg.eps
 
     # ------------------------------------------------------------------ #
