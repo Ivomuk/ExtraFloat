@@ -102,6 +102,10 @@ DEFAULT_CLUSTERING_CONFIG: dict[str, Any] = {
     "gmm_min_k": 2,
     "gmm_max_k": 12,
     "gmm_covariance_type": "full",
+    # Regularisation added to the GMM covariance diagonal to prevent singular
+    # matrices when clusters collapse (ill-conditioned data / too many components).
+    # Increase to 1e-3 or 1e-2 if you still see LinAlgError on your dataset.
+    "gmm_reg_covar": 1e-4,
     # ── HDBSCAN ───────────────────────────────────────────────────────────────
     "hdbscan_min_cluster_size": 1000,
     "hdbscan_min_samples": 150,
@@ -359,12 +363,14 @@ def _run_gmm(
     min_k = cfg["gmm_min_k"]
     max_k = cfg["gmm_max_k"]
     cov_type = cfg["gmm_covariance_type"]
+    reg_covar = float(cfg.get("gmm_reg_covar", 1e-4))
 
     logger.info(
-        "_run_gmm: BIC search k=%d..%d on %d active agents",
+        "_run_gmm: BIC search k=%d..%d on %d active agents (reg_covar=%.2e)",
         min_k,
         max_k,
         len(X_pca_active),
+        reg_covar,
     )
 
     bic_scores: list[float] = []
@@ -373,18 +379,31 @@ def _run_gmm(
         g = GaussianMixture(
             n_components=k,
             covariance_type=cov_type,
+            reg_covar=reg_covar,
             random_state=rs,
             max_iter=200,
         )
-        g.fit(X_pca_active)
-        bic_scores.append(g.bic(X_pca_active))
+        try:
+            g.fit(X_pca_active)
+            bic_scores.append(g.bic(X_pca_active))
+        except ValueError:
+            # Singular covariance even with reg_covar — skip this k
+            logger.warning("_run_gmm: k=%d failed (singular covariance) — skipping.", k)
+            bic_scores.append(float("inf"))
+
+    if all(s == float("inf") for s in bic_scores):
+        raise ValueError(
+            "_run_gmm: all GMM fits failed. Try increasing gmm_reg_covar "
+            "(current: %.2e) or reducing gmm_max_k." % reg_covar
+        )
 
     best_k = ks[int(np.argmin(bic_scores))]
-    logger.info("_run_gmm: best_k=%d (min BIC=%.1f)", best_k, min(bic_scores))
+    logger.info("_run_gmm: best_k=%d (min BIC=%.1f)", best_k, min(s for s in bic_scores if s < float("inf")))
 
     gmm = GaussianMixture(
         n_components=best_k,
         covariance_type=cov_type,
+        reg_covar=reg_covar,
         random_state=rs,
         max_iter=300,
     )
