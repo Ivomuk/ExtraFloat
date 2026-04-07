@@ -38,6 +38,12 @@ from extrafloat_segmentation_profiling import (
     DEFAULT_PROFILING_CONFIG,
 )
 from extrafloat_segmentation_pipeline import DEFAULT_CLUSTERING_CONFIG
+from extrafloat_segmentation_drift import (
+    build_drift_report,
+    load_drift_baseline,
+    save_drift_baseline,
+    DEFAULT_DRIFT_CONFIG,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -106,6 +112,9 @@ DEFAULT_SEGMENTATION_CONFIG: dict[str, Any] = {
         # When False only the SEGMENT_OUTPUT_COLUMNS are returned.
         "keep_intermediate_cols": False,
         "final_segment_col": "segment",
+    },
+    "drift": {
+        **DEFAULT_DRIFT_CONFIG,
     },
 }
 
@@ -318,6 +327,48 @@ def run_extrafloat_segmentation(
         X_pca.shape[1],
     )
 
+    # ── Step 1b: Feature Drift Detection (optional) ──────────────────────────
+    drift_cfg = cfg.get("drift", {})
+    baseline_path: str = drift_cfg.get("baseline_path", "")
+    if baseline_path and os.path.isfile(baseline_path):
+        logger.info(
+            "run_extrafloat_segmentation: step 1b — drift detection against '%s'.",
+            baseline_path,
+        )
+        try:
+            baseline_df = load_drift_baseline(baseline_path)
+            drift_report = build_drift_report(
+                baseline_df=baseline_df,
+                current_df=features_df,
+                features=drift_cfg.get("drift_features"),
+                config=drift_cfg,
+            )
+            features_df.attrs["drift_report"] = drift_report
+            if drift_report.get("drift_detected"):
+                logger.warning(
+                    "run_extrafloat_segmentation: DRIFT DETECTED — %d feature(s) "
+                    "show critical PSI shift. Segment assignments may be unreliable. "
+                    "Critical: %s",
+                    drift_report["n_critical"],
+                    [
+                        f for f, r in drift_report["features"].items()
+                        if r["status"] == "critical"
+                    ],
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.error(
+                "run_extrafloat_segmentation: drift detection failed — %s. "
+                "Continuing without drift report.",
+                exc,
+            )
+    else:
+        if baseline_path:
+            logger.info(
+                "run_extrafloat_segmentation: step 1b — baseline '%s' not found, "
+                "skipping drift detection. Run with save_baseline=True to create one.",
+                baseline_path,
+            )
+
     # ── Step 2: Clustering ────────────────────────────────────────────────────
     logger.info("run_extrafloat_segmentation: step 2 — clustering pipeline.")
     features_df = run_clustering_pipeline(
@@ -416,6 +467,19 @@ def run_extrafloat_segmentation(
         keep_intermediate=keep_intermediate,
         original_cols=original_cols,
     )
+
+    # ── Optional: save current distributions as new baseline ─────────────────
+    if drift_cfg.get("save_baseline") and drift_cfg.get("baseline_save_path"):
+        try:
+            save_drift_baseline(
+                df=features_df,
+                features=drift_cfg.get("drift_features", []),
+                config=drift_cfg,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.error(
+                "run_extrafloat_segmentation: failed to save drift baseline — %s.", exc
+            )
 
     _maybe_save_output(result, cfg)
 

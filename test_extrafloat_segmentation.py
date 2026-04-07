@@ -740,14 +740,14 @@ class TestDefaultConfig:
     def test_all_sections_present(self):
         from run_extrafloat_segmentation import DEFAULT_SEGMENTATION_CONFIG
 
-        for section in ("data", "features", "clustering", "profiling", "output"):
+        for section in ("data", "features", "clustering", "profiling", "output", "drift"):
             assert section in DEFAULT_SEGMENTATION_CONFIG, f"Missing section: {section}"
 
     def test_config_round_trip(self):
         from run_extrafloat_segmentation import _get_config
 
         cfg = _get_config(None)
-        for section in ("data", "features", "clustering", "profiling", "output"):
+        for section in ("data", "features", "clustering", "profiling", "output", "drift"):
             assert section in cfg
 
     def test_partial_override_preserved(self):
@@ -782,3 +782,164 @@ class TestPipelineConstants:
 
         assert isinstance(DORMANT_FILL_LABEL, str)
         assert len(DORMANT_FILL_LABEL) > 0
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DRIFT MODULE TESTS
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestDriftModule:
+    """Tests for extrafloat_segmentation_drift."""
+
+    def _make_dist(self, n: int, seed: int, scale: float = 1.0) -> np.ndarray:
+        return np.random.RandomState(seed).exponential(scale=scale, size=n)
+
+    # ── compute_psi ──────────────────────────────────────────────────────────
+
+    def test_psi_zero_for_identical(self):
+        from extrafloat_segmentation_drift import compute_psi
+
+        vals = self._make_dist(500, seed=0)
+        psi = compute_psi(vals, vals.copy())
+        assert psi < 0.01, f"PSI should be near 0 for identical distributions, got {psi:.4f}"
+
+    def test_psi_high_for_very_different(self):
+        from extrafloat_segmentation_drift import compute_psi
+
+        expected = self._make_dist(1000, seed=0, scale=1.0)
+        actual = self._make_dist(1000, seed=1, scale=100.0)  # 100× larger scale
+        psi = compute_psi(expected, actual)
+        assert psi > 0.25, f"PSI should be critical (>0.25) for very different distributions, got {psi:.4f}"
+
+    def test_psi_non_negative(self):
+        from extrafloat_segmentation_drift import compute_psi
+
+        rng = np.random.RandomState(42)
+        for _ in range(10):
+            a = rng.randn(200)
+            b = rng.randn(200) + rng.uniform(0, 3)
+            assert compute_psi(a, b) >= 0.0
+
+    def test_psi_empty_array_returns_nan(self):
+        from extrafloat_segmentation_drift import compute_psi
+
+        assert np.isnan(compute_psi(np.array([]), np.array([1.0, 2.0])))
+        assert np.isnan(compute_psi(np.array([1.0, 2.0]), np.array([])))
+
+    def test_psi_constant_feature_returns_zero(self):
+        from extrafloat_segmentation_drift import compute_psi
+
+        psi = compute_psi(np.full(100, 5.0), np.full(100, 5.0))
+        assert psi == 0.0
+
+    # ── compute_kl_divergence ────────────────────────────────────────────────
+
+    def test_kl_zero_for_identical(self):
+        from extrafloat_segmentation_drift import compute_kl_divergence
+
+        vals = self._make_dist(500, seed=0)
+        kl = compute_kl_divergence(vals, vals.copy())
+        assert kl < 0.01, f"KL should be near 0 for identical distributions, got {kl:.4f}"
+
+    def test_kl_non_negative(self):
+        from extrafloat_segmentation_drift import compute_kl_divergence
+
+        expected = self._make_dist(200, seed=0)
+        actual = self._make_dist(200, seed=1, scale=2.0)
+        assert compute_kl_divergence(expected, actual) >= 0.0
+
+    # ── build_drift_report ───────────────────────────────────────────────────
+
+    def test_drift_report_structure(self):
+        from extrafloat_segmentation_drift import build_drift_report
+
+        rng = np.random.RandomState(7)
+        baseline_df = pd.DataFrame({
+            "commission": rng.exponential(100, 300),
+            "cash_out_value_1m": rng.exponential(5000, 300),
+        })
+        current_df = pd.DataFrame({
+            "commission": rng.exponential(100, 280),
+            "cash_out_value_1m": rng.exponential(5000, 280),
+        })
+        report = build_drift_report(
+            baseline_df, current_df,
+            features=["commission", "cash_out_value_1m"],
+            config={"n_bins": 5, "psi_warn_threshold": 0.10, "psi_critical_threshold": 0.25},
+        )
+        for key in ("features", "overall_psi", "n_features_checked", "n_critical", "n_warning", "drift_detected", "baseline_n", "current_n"):
+            assert key in report, f"drift report missing key '{key}'"
+
+    def test_drift_report_stable_for_same_data(self):
+        from extrafloat_segmentation_drift import build_drift_report
+
+        rng = np.random.RandomState(9)
+        df = pd.DataFrame({"commission": rng.exponential(100, 400)})
+        report = build_drift_report(df, df.copy(), features=["commission"])
+        assert report["features"]["commission"]["psi"] < 0.10
+        assert report["drift_detected"] is False
+
+    def test_drift_report_critical_for_shifted_data(self):
+        from extrafloat_segmentation_drift import build_drift_report
+
+        rng = np.random.RandomState(3)
+        baseline = pd.DataFrame({"commission": rng.exponential(100, 500)})
+        current = pd.DataFrame({"commission": rng.exponential(5000, 500)})
+        report = build_drift_report(
+            baseline, current, features=["commission"],
+            config={"psi_warn_threshold": 0.10, "psi_critical_threshold": 0.25},
+        )
+        assert report["n_critical"] >= 1
+        assert report["drift_detected"] is True
+
+    def test_drift_report_skips_missing_features(self):
+        from extrafloat_segmentation_drift import build_drift_report
+
+        rng = np.random.RandomState(5)
+        df = pd.DataFrame({"commission": rng.exponential(100, 100)})
+        # Request a feature not in either df
+        report = build_drift_report(df, df.copy(), features=["commission", "nonexistent_col"])
+        assert report["n_features_checked"] == 1
+        assert "nonexistent_col" not in report["features"]
+
+    def test_drift_report_baseline_current_n(self):
+        from extrafloat_segmentation_drift import build_drift_report
+
+        rng = np.random.RandomState(11)
+        b = pd.DataFrame({"commission": rng.randn(150)})
+        c = pd.DataFrame({"commission": rng.randn(120)})
+        report = build_drift_report(b, c, features=["commission"])
+        assert report["baseline_n"] == 150
+        assert report["current_n"] == 120
+
+    # ── save/load baseline ───────────────────────────────────────────────────
+
+    def test_save_load_baseline_roundtrip(self, tmp_path):
+        from extrafloat_segmentation_drift import load_drift_baseline, save_drift_baseline
+
+        rng = np.random.RandomState(0)
+        df = pd.DataFrame({
+            "commission": rng.exponential(100, 200),
+            "cash_out_value_1m": rng.exponential(5000, 200),
+        })
+        save_path = str(tmp_path / "baseline.csv")
+        cfg = {"baseline_save_path": save_path}
+        save_drift_baseline(df, ["commission", "cash_out_value_1m"], config=cfg)
+
+        loaded = load_drift_baseline(save_path)
+        assert list(loaded.columns) == ["commission", "cash_out_value_1m"]
+        assert len(loaded) == 200
+
+    def test_save_baseline_raises_without_path(self):
+        from extrafloat_segmentation_drift import save_drift_baseline
+
+        df = pd.DataFrame({"commission": [1.0, 2.0]})
+        with pytest.raises(ValueError, match="baseline_save_path"):
+            save_drift_baseline(df, ["commission"], config={})
+
+    def test_load_baseline_raises_for_missing_file(self):
+        from extrafloat_segmentation_drift import load_drift_baseline
+
+        with pytest.raises(FileNotFoundError):
+            load_drift_baseline("/nonexistent/path/baseline.csv")
