@@ -20,8 +20,11 @@ Usage
 
 from __future__ import annotations
 
+import argparse
+import json
 import logging
 import os
+import sys
 from copy import deepcopy
 from typing import Any
 
@@ -543,3 +546,208 @@ def run_extrafloat_segmentation_from_config(config: dict[str, Any]) -> pd.DataFr
         whitelist_df=wl,
         blacklist_df=bl,
     )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CLI ENTRY POINT
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="python -m run_extrafloat_segmentation",
+        description=(
+            "MTN MoMo Uganda agent segmentation pipeline.\n\n"
+            "Runs feature engineering → two-stage clustering → pack profiling\n"
+            "→ tier assignment → optional whitelist/blacklist enrichment."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+examples:
+  # minimal — input CSV, output CSV
+  python run_extrafloat_segmentation.py --agents agents.csv --output out/
+
+  # with reference lists
+  python run_extrafloat_segmentation.py \\
+      --agents agents.csv --whitelist wl.csv --blacklist bl.csv --output out/
+
+  # override clustering settings inline
+  python run_extrafloat_segmentation.py --agents agents.csv \\
+      --clustering '{"kmeans_round1_k": 8, "stability_n_seeds": 5}'
+
+  # load full config from JSON file
+  python run_extrafloat_segmentation.py --config config.json
+
+  # save drift baseline on first run, check on subsequent runs
+  python run_extrafloat_segmentation.py --agents agents.csv \\
+      --drift '{"save_baseline": true, "baseline_save_path": "baseline.csv"}'
+
+  python run_extrafloat_segmentation.py --agents agents.csv \\
+      --drift '{"baseline_path": "baseline.csv"}'
+""",
+    )
+
+    # ── Input ─────────────────────────────────────────────────────────────────
+    p.add_argument(
+        "--agents", metavar="PATH",
+        help="Path to the agent KPI mart CSV (required unless --config provides agents_path).",
+    )
+    p.add_argument(
+        "--whitelist", metavar="PATH", default="",
+        help="Optional whitelist CSV path.",
+    )
+    p.add_argument(
+        "--blacklist", metavar="PATH", default="",
+        help="Optional blacklist CSV path.",
+    )
+
+    # ── Output ────────────────────────────────────────────────────────────────
+    p.add_argument(
+        "--output", metavar="DIR", default="segmentation_outputs",
+        help="Directory to write agent_segments.csv (default: segmentation_outputs/).",
+    )
+    p.add_argument(
+        "--keep-intermediate", action="store_true",
+        help="Include intermediate cluster columns in the output CSV.",
+    )
+
+    # ── Config overrides ──────────────────────────────────────────────────────
+    p.add_argument(
+        "--config", metavar="PATH",
+        help="Path to a JSON config file.  All keys merge into DEFAULT_SEGMENTATION_CONFIG.",
+    )
+    p.add_argument(
+        "--features", metavar="JSON",
+        help='Feature-engineering config overrides as a JSON string, e.g. \'{"corr_threshold": 0.95}\'.',
+    )
+    p.add_argument(
+        "--clustering", metavar="JSON",
+        help='Clustering config overrides as a JSON string, e.g. \'{"kmeans_round1_k": 8}\'.',
+    )
+    p.add_argument(
+        "--drift", metavar="JSON",
+        help='Drift-detection config as a JSON string, e.g. \'{"baseline_path": "baseline.csv"}\'.',
+    )
+
+    # ── Logging ───────────────────────────────────────────────────────────────
+    p.add_argument(
+        "--log-level", metavar="LEVEL", default="INFO",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+        help="Logging verbosity (default: INFO).",
+    )
+
+    return p
+
+
+def _parse_json_arg(raw: str | None, flag: str) -> dict:
+    """Parse a JSON string CLI argument; raise SystemExit on bad JSON."""
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        print(f"error: --{flag} is not valid JSON — {exc}", file=sys.stderr)
+        sys.exit(1)
+    if not isinstance(parsed, dict):
+        print(f"error: --{flag} must be a JSON object (got {type(parsed).__name__})", file=sys.stderr)
+        sys.exit(1)
+    return parsed
+
+
+def main(argv: list[str] | None = None) -> None:
+    """CLI entry point for the segmentation pipeline."""
+    parser = _build_parser()
+    args = parser.parse_args(argv)
+
+    logging.basicConfig(
+        level=getattr(logging, args.log_level),
+        format="%(asctime)s  %(levelname)-8s  %(name)s — %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+
+    # ── Build config ──────────────────────────────────────────────────────────
+    config: dict[str, Any] = {}
+
+    # Load from JSON file first (lowest priority)
+    if args.config:
+        if not os.path.isfile(args.config):
+            print(f"error: --config file '{args.config}' not found.", file=sys.stderr)
+            sys.exit(1)
+        with open(args.config) as fh:
+            file_cfg = json.load(fh)
+        if not isinstance(file_cfg, dict):
+            print("error: --config JSON must be a top-level object.", file=sys.stderr)
+            sys.exit(1)
+        config.update(file_cfg)
+
+    # CLI flags override file config (higher priority)
+    agents_path = args.agents or config.get("data", {}).get("agents_path", "")
+    if not agents_path:
+        print(
+            "error: supply an input file via --agents PATH or "
+            "config['data']['agents_path'].",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    config.setdefault("data", {})
+    config["data"]["agents_path"] = agents_path
+    if args.whitelist:
+        config["data"]["whitelist_path"] = args.whitelist
+    if args.blacklist:
+        config["data"]["blacklist_path"] = args.blacklist
+
+    config.setdefault("output", {})
+    config["output"]["output_dir"] = args.output
+    config["output"]["keep_intermediate_cols"] = args.keep_intermediate
+
+    # Inline JSON overrides
+    features_override = _parse_json_arg(args.features, "features")
+    if features_override:
+        config.setdefault("features", {}).update(features_override)
+
+    clustering_override = _parse_json_arg(args.clustering, "clustering")
+    if clustering_override:
+        config.setdefault("clustering", {}).update(clustering_override)
+
+    drift_override = _parse_json_arg(args.drift, "drift")
+    if drift_override:
+        config.setdefault("drift", {}).update(drift_override)
+
+    # ── Run ───────────────────────────────────────────────────────────────────
+    try:
+        result = run_extrafloat_segmentation_from_config(config)
+    except Exception as exc:
+        logging.getLogger(__name__).exception("Pipeline failed: %s", exc)
+        sys.exit(1)
+
+    # ── Print summary ─────────────────────────────────────────────────────────
+    seg_col = config.get("output", {}).get("final_segment_col", "segment")
+    if seg_col in result.columns:
+        print("\nSegment distribution:")
+        print(result[seg_col].value_counts().to_string())
+
+    stability = result.attrs.get("stability_report", {})
+    if stability.get("n_seeds", 0) > 0:
+        print(
+            f"\nCluster stability  silhouette={stability['silhouette_score']:.3f}  "
+            f"ARI={stability['ari_mean']:.3f} ± {stability['ari_std']:.3f}"
+            f"  ({stability['n_seeds']} seeds)"
+        )
+
+    drift = result.attrs.get("drift_report", {})
+    if drift:
+        status = "DRIFT DETECTED" if drift.get("drift_detected") else "stable"
+        print(
+            f"\nDrift check  overall_psi={drift.get('overall_psi', float('nan')):.4f}"
+            f"  critical={drift.get('n_critical', 0)}"
+            f"  warning={drift.get('n_warning', 0)}"
+            f"  [{status}]"
+        )
+
+    out_path = os.path.join(args.output, "agent_segments.csv")
+    print(f"\nOutput written to: {out_path}  ({len(result):,} agents)")
+
+
+if __name__ == "__main__":
+    main()
