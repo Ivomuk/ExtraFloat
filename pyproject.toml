@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "pd-model"
+version = "0.1.0"
+description = "Mobile money agent PD model — XGBoost + LightGBM with calibration, inference, and monitoring"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy",
+    "pandas",
+    "scikit-learn",
+    "xgboost",
+    "lightgbm",
+    "joblib",
+]
+
+[project.optional-dependencies]
+shap = ["shap"]
+dev  = ["pytest", "pytest-cov"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["pd_model*"]
