@@ -1,0 +1,132 @@
+LinAlgError                               Traceback (most recent call last)
+File ~\AppData\Local\anaconda3\Lib\site-packages\sklearn\mixture\_gaussian_mixture.py:334, in _compute_precision_cholesky(covariances, covariance_type)
+    333 try:
+--> 334     cov_chol = linalg.cholesky(covariance, lower=True)
+    335 except linalg.LinAlgError:
+
+File ~\AppData\Local\anaconda3\Lib\site-packages\scipy\linalg\_decomp_cholesky.py:88, in cholesky(a, lower, overwrite_a, check_finite)
+     45 """
+     46 Compute the Cholesky decomposition of a matrix.
+     47 
+   (...)
+     86 
+     87 """
+---> 88 c, lower = _cholesky(a, lower=lower, overwrite_a=overwrite_a, clean=True,
+     89                      check_finite=check_finite)
+     90 return c
+
+File ~\AppData\Local\anaconda3\Lib\site-packages\scipy\linalg\_decomp_cholesky.py:36, in _cholesky(a, lower, overwrite_a, clean, check_finite)
+     35 if info > 0:
+---> 36     raise LinAlgError("%d-th leading minor of the array is not positive "
+     37                       "definite" % info)
+     38 if info < 0:
+
+LinAlgError: 2-th leading minor of the array is not positive definite
+
+During handling of the above exception, another exception occurred:
+
+ValueError                                Traceback (most recent call last)
+Cell In[5], line 6
+      2 from run_extrafloat_segmentation import run_extrafloat_segmentation
+      4 agents_df = pd.read_csv("C:\\Users\\mikiiv.UG\\Documents\\Data\\kpi_mfs_daily_agent_mart as at 20251116.csv")
+----> 6 result = run_extrafloat_segmentation(agents_df)
+      8 print(result[["agent_msisdn", "segment", "hdb_tier", "ensemble_cluster"]].head())
+
+File ~\run_extrafloat_segmentation.py:377, in run_extrafloat_segmentation(agents_df, config, whitelist_df, blacklist_df, validate_inputs)
+    375 # ── Step 2: Clustering ────────────────────────────────────────────────────
+    376 logger.info("run_extrafloat_segmentation: step 2 — clustering pipeline.")
+--> 377 features_df = run_clustering_pipeline(
+    378     features_df=features_df,
+    379     X_pca=X_pca,
+    380     selected_cols=selected_cols,
+    381     config=cfg.get("clustering"),
+    382 )
+    384 stability = features_df.attrs.get("stability_report", {})
+    385 if stability and stability.get("n_seeds", 0) > 0:
+
+File ~\extrafloat_segmentation_pipeline.py:988, in run_clustering_pipeline(features_df, X_pca, selected_cols, config)
+    986 out["cluster_id_gmm"] = pd.array([-1] * len(out), dtype="Int64")
+    987 if X_pca_active is not None:
+--> 988     gmm_labels, _ = _run_gmm(X_pca_active, cfg, rng)
+    989     active_indices = out.index[active_mask]
+    990     out.loc[active_indices, "cluster_id_gmm"] = gmm_labels
+
+File ~\extrafloat_segmentation_pipeline.py:379, in _run_gmm(X_pca_active, cfg, rng)
+    372 for k in ks:
+    373     g = GaussianMixture(
+    374         n_components=k,
+    375         covariance_type=cov_type,
+    376         random_state=rs,
+    377         max_iter=200,
+    378     )
+--> 379     g.fit(X_pca_active)
+    380     bic_scores.append(g.bic(X_pca_active))
+    382 best_k = ks[int(np.argmin(bic_scores))]
+
+File ~\AppData\Local\anaconda3\Lib\site-packages\sklearn\mixture\_base.py:182, in BaseMixture.fit(self, X, y)
+    156 """Estimate model parameters with the EM algorithm.
+    157 
+    158 The method fits the model ``n_init`` times and sets the parameters with
+   (...)
+    179     The fitted mixture.
+    180 """
+    181 # parameters are validated in fit_predict
+--> 182 self.fit_predict(X, y)
+    183 return self
+
+File ~\AppData\Local\anaconda3\Lib\site-packages\sklearn\base.py:1365, in _fit_context.<locals>.decorator.<locals>.wrapper(estimator, *args, **kwargs)
+   1358     estimator._validate_params()
+   1360 with config_context(
+   1361     skip_parameter_validation=(
+   1362         prefer_skip_nested_validation or global_skip_validation
+   1363     )
+   1364 ):
+-> 1365     return fit_method(estimator, *args, **kwargs)
+
+File ~\AppData\Local\anaconda3\Lib\site-packages\sklearn\mixture\_base.py:237, in BaseMixture.fit_predict(self, X, y)
+    234 self._print_verbose_msg_init_beg(init)
+    236 if do_init:
+--> 237     self._initialize_parameters(X, random_state)
+    239 lower_bound = -np.inf if do_init else self.lower_bound_
+    240 current_lower_bounds = []
+
+File ~\AppData\Local\anaconda3\Lib\site-packages\sklearn\mixture\_gaussian_mixture.py:784, in GaussianMixture._initialize_parameters(self, X, random_state)
+    778 compute_resp = (
+    779     self.weights_init is None
+    780     or self.means_init is None
+    781     or self.precisions_init is None
+    782 )
+    783 if compute_resp:
+--> 784     super()._initialize_parameters(X, random_state)      785 else:
+    786     self._initialize(X, None)
+
+File ~\AppData\Local\anaconda3\Lib\site-packages\sklearn\mixture\_base.py:141, in BaseMixture._initialize_parameters(self, X, random_state)
+    134     _, indices = kmeans_plusplus(
+    135         X,
+    136         self.n_components,
+    137         random_state=random_state,
+    138     )
+    139     resp[indices, np.arange(self.n_components)] = 1
+--> 141 self._initialize(X, resp)
+
+File ~\AppData\Local\anaconda3\Lib\site-packages\sklearn\mixture\_gaussian_mixture.py:811, in GaussianMixture._initialize(self, X, resp)
+    809 if self.precisions_init is None:
+    810     self.covariances_ = covariances
+--> 811     self.precisions_cholesky_ = _compute_precision_cholesky(
+    812         covariances, self.covariance_type
+    813     )
+    814 else:
+    815     self.precisions_cholesky_ = _compute_precision_cholesky_from_precisions(
+    816         self.precisions_init, self.covariance_type
+    817     )
+
+File ~\AppData\Local\anaconda3\Lib\site-packages\sklearn\mixture\_gaussian_mixture.py:336, in _compute_precision_cholesky(covariances, covariance_type)
+    334             cov_chol = linalg.cholesky(covariance, lower=True)
+    335         except linalg.LinAlgError:
+--> 336             raise ValueError(estimate_precision_error_message)
+    337         precisions_chol[k] = linalg.solve_triangular(
+    338             cov_chol, np.eye(n_features, dtype=dtype), lower=True
+    339         ).T
+    340 elif covariance_type == "tied":
+
+ValueError: Fitting the mixture model failed because some components have ill-defined empirical covariance (for instance caused by singleton or collapsed samples). Try to decrease the number of components, increase reg_covar, or scale the input data.
