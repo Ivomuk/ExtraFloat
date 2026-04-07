@@ -28,6 +28,12 @@ try:
 except ImportError:
     _HDBSCAN_AVAILABLE = False
 
+try:
+    import umap as _umap_module
+    _UMAP_AVAILABLE = True
+except ImportError:
+    _UMAP_AVAILABLE = False
+
 logger = logging.getLogger(__name__)
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -83,21 +89,44 @@ DEFAULT_CLUSTERING_CONFIG: dict[str, Any] = {
     "random_state": 42,
     "kmeans_round1_k": 6,
     "kmeans_round2_k": 6,
-    "dormant_col": "cash_out_vol_1m",
-    "dormant_threshold": 0.0,
+    # ── Dormant detection (multi-product composite inactivity score) ──────────
+    "dormant_inactivity_cols": [
+        "cash_out_vol_1m",
+        "cash_in_vol_1m",
+        "payment_vol_1m",
+        "voucher_volume_1m",
+    ],
+    "dormant_inactivity_weights": [0.5, 0.25, 0.15, 0.10],
+    "dormant_composite_threshold": 0.05,  # normalized score ≤ this → dormant
+    # ── GMM ───────────────────────────────────────────────────────────────────
     "gmm_min_k": 2,
     "gmm_max_k": 12,
     "gmm_covariance_type": "full",
+    # ── HDBSCAN ───────────────────────────────────────────────────────────────
     "hdbscan_min_cluster_size": 1000,
     "hdbscan_min_samples": 150,
     "hdbscan_metric": "euclidean",
-    "sample_cap_silhouette": 20000,
+    # ── UMAP (used as input to HDBSCAN when umap-learn is installed) ──────────
+    "use_umap_for_hdbscan": True,
+    "umap_n_neighbors": 15,
+    "umap_min_dist": 0.1,
+    "umap_n_components": 2,
+    # ── HDB tier ranking: use first available col as business KPI centroid ────
+    "hdb_tier_ranking_cols": ["total_value_1m", "cash_out_value_1m", "commission"],
+    # ── PCA variance target ───────────────────────────────────────────────────
     "target_pca_variance": 0.90,
+    # ── Composite score weights ───────────────────────────────────────────────
     "composite_weights": {
         "value": 0.5,
         "activity": 0.3,
         "efficiency": 0.2,
     },
+    # ── ARI-based weight optimisation (opt-in; requires agent_category col) ──
+    "optimize_composite_weights": False,
+    "weight_grid_step": 0.1,
+    # ── Cluster stability reporting ───────────────────────────────────────────
+    "stability_n_seeds": 3,
+    "sample_cap_silhouette": 20000,
 }
 
 
@@ -151,7 +180,12 @@ def _run_kmeans_round1(
 def _identify_dormant_mask(
     features_df: pd.DataFrame, cfg: dict[str, Any]
 ) -> pd.Series:
-    """Identify dormant agents using a configurable activity column threshold.
+    """Identify dormant agents via a multi-product composite inactivity score.
+
+    For each configured inactivity column the column is normalised by its 95th
+    percentile (clipped to [0, 1]) and then the weighted sum is computed.
+    Agents whose composite score is at or below *dormant_composite_threshold*
+    are classified as dormant.
 
     Parameters
     ----------
@@ -162,22 +196,45 @@ def _identify_dormant_mask(
     -------
     Boolean Series (True = dormant).
     """
-    col = cfg["dormant_col"]
-    threshold = cfg["dormant_threshold"]
+    inactivity_cols: list[str] = cfg.get(
+        "dormant_inactivity_cols",
+        ["cash_out_vol_1m", "cash_in_vol_1m", "payment_vol_1m", "voucher_volume_1m"],
+    )
+    raw_weights: list[float] = cfg.get(
+        "dormant_inactivity_weights", [0.5, 0.25, 0.15, 0.10]
+    )
+    threshold: float = float(cfg.get("dormant_composite_threshold", 0.05))
 
-    if col not in features_df.columns:
+    # Filter to columns that actually exist in the DataFrame
+    present = [(col, w) for col, w in zip(inactivity_cols, raw_weights) if col in features_df.columns]
+
+    if not present:
         logger.warning(
-            "_identify_dormant_mask: dormant_col '%s' not found — treating all agents as active.",
-            col,
+            "_identify_dormant_mask: none of %s found in features_df — "
+            "treating all agents as active.",
+            inactivity_cols,
         )
         return pd.Series(False, index=features_df.index)
 
-    mask = features_df[col].fillna(0.0) <= threshold
+    present_cols, present_weights = zip(*present)
+    weight_sum = sum(present_weights)
+    norm_weights = [w / weight_sum for w in present_weights]
+
+    # Build composite score: weighted sum of per-column normalised activity
+    composite = pd.Series(0.0, index=features_df.index)
+    for col, w in zip(present_cols, norm_weights):
+        series = features_df[col].fillna(0.0).clip(lower=0.0)
+        p95 = series.quantile(0.95)
+        normalised = (series / p95).clip(upper=1.0) if p95 > 0 else pd.Series(0.0, index=series.index)
+        composite += w * normalised
+
+    mask = composite <= threshold
     logger.info(
-        "_identify_dormant_mask: %d dormant agents (%.1f%%) identified via %s <= %s",
+        "_identify_dormant_mask: %d dormant agents (%.1f%%) via composite inactivity "
+        "score (cols=%s, threshold=%.3f)",
         int(mask.sum()),
         mask.mean() * 100,
-        col,
+        list(present_cols),
         threshold,
     )
     return mask
@@ -239,8 +296,8 @@ def _get_active_pca(
     selected_cols: list[str],
     cfg: dict[str, Any],
     rng: np.random.RandomState,
-) -> np.ndarray:
-    """Produce shared PCA-reduced feature array for GMM and HDBSCAN stages.
+) -> tuple[np.ndarray, np.ndarray]:
+    """Produce shared scaled + PCA-reduced feature arrays for GMM/HDBSCAN stages.
 
     Parameters
     ----------
@@ -252,7 +309,8 @@ def _get_active_pca(
 
     Returns
     -------
-    PCA-reduced array of shape (n_active, n_components).
+    (X_pca_active, X_scaled_active) — both of shape (n_active, n_components/n_features).
+    X_scaled_active is returned so UMAP can receive the full scaled space.
     """
     target_var = cfg["target_pca_variance"]
     rs = rng.randint(0, 2**31)
@@ -277,7 +335,7 @@ def _get_active_pca(
         n_comp,
         target_var * 100,
     )
-    return X_pca_active
+    return X_pca_active, X_scaled
 
 
 def _run_gmm(
@@ -380,22 +438,75 @@ def _run_hdbscan(
     return labels
 
 
+def _get_active_umap(
+    X_scaled_active: np.ndarray,
+    cfg: dict[str, Any],
+    rng: np.random.RandomState,
+) -> np.ndarray:
+    """Reduce scaled active-agent features to a UMAP embedding for HDBSCAN.
+
+    UMAP preserves local density structure (unlike PCA) so HDBSCAN produces
+    more meaningful clusters.  If *umap-learn* is not installed the function
+    falls back to using the first *umap_n_components* columns of
+    *X_scaled_active* (a PCA-like linear slice) and emits a warning.
+
+    Parameters
+    ----------
+    X_scaled_active : RobustScaler-scaled active-agent array (n_active × n_features).
+    cfg             : Clustering config.
+    rng             : Random state.
+
+    Returns
+    -------
+    Embedding of shape (n_active, umap_n_components).
+    """
+    n_components: int = int(cfg.get("umap_n_components", 2))
+
+    if not _UMAP_AVAILABLE:
+        logger.warning(
+            "_get_active_umap: umap-learn is not installed — falling back to "
+            "first %d scaled columns for HDBSCAN input. "
+            "Install with: pip install umap-learn",
+            n_components,
+        )
+        return X_scaled_active[:, :n_components]
+
+    reducer = _umap_module.UMAP(
+        n_neighbors=int(cfg.get("umap_n_neighbors", 15)),
+        min_dist=float(cfg.get("umap_min_dist", 0.1)),
+        n_components=n_components,
+        random_state=int(rng.randint(0, 2**31)),
+        metric="euclidean",
+    )
+    embedding = reducer.fit_transform(X_scaled_active)
+    logger.info(
+        "_get_active_umap: UMAP embedding shape=%s (n_neighbors=%d, min_dist=%.2f)",
+        embedding.shape,
+        cfg.get("umap_n_neighbors", 15),
+        cfg.get("umap_min_dist", 0.1),
+    )
+    return embedding
+
+
 def _map_hdb_to_tier(
     hdb_labels_active: np.ndarray,
-    X_pca_active: np.ndarray,
-    cfg: dict[str, Any],  # noqa: ARG001
+    features_df_active: pd.DataFrame,
+    cfg: dict[str, Any],
 ) -> pd.Series:
     """Assign data-driven tier names to HDBSCAN cluster IDs.
 
-    Ranks non-noise clusters by their mean PC1 score (ascending) and assigns
-    tier names evenly from _HDB_TIER_NAMES (lowest -> highest activity).
+    Ranks non-noise clusters by their mean value of the first available
+    business KPI column from *hdb_tier_ranking_cols* (default: total_value_1m
+    → cash_out_value_1m → commission).  Using a business KPI centroid rather
+    than PC1 ensures tier order reflects commercial value, not variance.
     Noise label (-1) -> "Noise / Irregular".
 
     Parameters
     ----------
-    hdb_labels_active : HDBSCAN label array for active agents.
-    X_pca_active      : Corresponding PCA array (used for mean PC1 ranking).
-    cfg               : Clustering config (reserved for future tuning).
+    hdb_labels_active  : HDBSCAN label array for active agents.
+    features_df_active : Raw feature DataFrame for active agents, aligned with
+                         hdb_labels_active (used for KPI centroid ranking).
+    cfg                : Clustering config.
 
     Returns
     -------
@@ -413,12 +524,34 @@ def _map_hdb_to_tier(
             ["Noise / Irregular"] * len(hdb_labels_active), dtype="object"
         )
 
-    # Sort clusters by mean PC1 ascending (low activity -> high activity)
-    pc1 = X_pca_active[:, 0]
-    cluster_means = {
-        cid: float(pc1[hdb_labels_active == cid].mean())
-        for cid in unique_clusters
-    }
+    # Rank clusters by mean business KPI centroid (ascending = low → high value)
+    ranking_cols: list[str] = cfg.get(
+        "hdb_tier_ranking_cols",
+        ["total_value_1m", "cash_out_value_1m", "commission"],
+    )
+    available_ranking_cols = [c for c in ranking_cols if c in features_df_active.columns]
+
+    if available_ranking_cols:
+        rank_col = available_ranking_cols[0]
+        rank_values = features_df_active[rank_col].fillna(0.0).values
+        cluster_means = {
+            cid: float(rank_values[hdb_labels_active == cid].mean())
+            for cid in unique_clusters
+        }
+        logger.info(
+            "_map_hdb_to_tier: ranking %d clusters by '%s' centroid",
+            len(unique_clusters),
+            rank_col,
+        )
+    else:
+        # Last-resort: warn and skip ranking (assign tiers in discovery order)
+        logger.warning(
+            "_map_hdb_to_tier: none of %s found in features_df_active — "
+            "assigning tiers in cluster-ID order (no business-KPI ranking).",
+            ranking_cols,
+        )
+        cluster_means = {cid: float(cid) for cid in unique_clusters}
+
     sorted_clusters = sorted(unique_clusters, key=lambda c: cluster_means[c])
 
     # Evenly distribute tier names across clusters
@@ -436,7 +569,7 @@ def _map_hdb_to_tier(
     )
     for cid in sorted_clusters:
         logger.debug(
-            "_map_hdb_to_tier: cluster %d (mean_pc1=%.3f) -> %s",
+            "_map_hdb_to_tier: cluster %d (mean_kpi=%.3f) -> %s",
             cid,
             cluster_means[cid],
             cluster_to_tier[cid],
@@ -472,6 +605,97 @@ def _build_ensemble_labels(
         "GMM_" + gmm_labels.astype(str) + "__" + hdb_tier_col.astype(str),
     )
     return pd.Series(result, index=gmm_labels.index, dtype="object")
+
+
+def _find_optimal_composite_weights(
+    profile_means: pd.DataFrame,
+    features_df: pd.DataFrame,
+    ensemble_col: pd.Series,
+    cfg: dict[str, Any],
+) -> dict[str, float]:
+    """Grid-search composite weight combinations that maximise ARI vs agent_category.
+
+    Searches all (value, activity, efficiency) triples in steps of
+    *weight_grid_step* that sum to 1.0.  For each triple the resulting segment
+    assignment is compared to ``features_df["agent_category"]`` using ARI.
+    Returns the weight triple with the highest ARI; falls back to
+    ``cfg["composite_weights"]`` if no improvement is found or if the
+    ``agent_category`` column is absent.
+
+    Parameters
+    ----------
+    profile_means : DataFrame (index=ensemble_cluster, cols=KPI features).
+    features_df   : Agent-level feature DataFrame containing ``agent_category``.
+    ensemble_col  : Series of ensemble cluster labels aligned with features_df.
+    cfg           : Clustering config.
+
+    Returns
+    -------
+    dict with keys ``value``, ``activity``, ``efficiency``.
+    """
+    from sklearn.metrics import adjusted_rand_score  # noqa: PLC0415
+
+    default_weights: dict[str, float] = dict(cfg.get("composite_weights", {"value": 0.5, "activity": 0.3, "efficiency": 0.2}))
+
+    if "agent_category" not in features_df.columns:
+        logger.info(
+            "_find_optimal_composite_weights: agent_category column absent — "
+            "using default weights %s",
+            default_weights,
+        )
+        return default_weights
+
+    step: float = float(cfg.get("weight_grid_step", 0.1))
+    steps = [round(i * step, 10) for i in range(int(1.0 / step) + 1)]
+
+    true_labels = features_df["agent_category"].astype(str).values
+
+    best_ari: float = -2.0
+    best_weights = default_weights
+
+    for v in steps:
+        for a in steps:
+            e = round(1.0 - v - a, 10)
+            if e < 0 or e > 1.0 + 1e-9:
+                continue
+            trial_cfg = {**cfg, "composite_weights": {"value": v, "activity": a, "efficiency": e}}
+            composite = _compute_composite_score(profile_means, trial_cfg)
+            sorted_clusters = composite.sort_values(ascending=True).index.tolist()
+            n = len(sorted_clusters)
+            seg_map: dict[str, str] = {}
+            for rank, cl in enumerate(sorted_clusters):
+                seg_idx = min(int(rank / n * len(BUSINESS_SEGMENTS)), len(BUSINESS_SEGMENTS) - 1)
+                seg_map[cl] = BUSINESS_SEGMENTS[seg_idx]
+            seg_map[DORMANT_FILL_LABEL] = BUSINESS_SEGMENTS[0]
+            seg_map[ENSEMBLE_MISSING_LABEL] = BUSINESS_SEGMENTS[0]
+            pred_labels = ensemble_col.map(seg_map).fillna(BUSINESS_SEGMENTS[0]).values
+            try:
+                ari = adjusted_rand_score(true_labels, pred_labels)
+            except Exception:  # noqa: BLE001
+                continue
+            if ari > best_ari:
+                best_ari = ari
+                best_weights = {"value": v, "activity": a, "efficiency": round(e, 10)}
+
+    logger.info(
+        "_find_optimal_composite_weights: best weights=%s (ARI=%.4f vs default ARI=%.4f)",
+        best_weights,
+        best_ari,
+        adjusted_rand_score(
+            true_labels,
+            ensemble_col.map(
+                {
+                    **{
+                        cl: BUSINESS_SEGMENTS[min(int(i / len(profile_means) * len(BUSINESS_SEGMENTS)), len(BUSINESS_SEGMENTS) - 1)]
+                        for i, cl in enumerate(_compute_composite_score(profile_means, cfg).sort_values().index)
+                    },
+                    DORMANT_FILL_LABEL: BUSINESS_SEGMENTS[0],
+                    ENSEMBLE_MISSING_LABEL: BUSINESS_SEGMENTS[0],
+                }
+            ).fillna(BUSINESS_SEGMENTS[0]).values,
+        ),
+    )
+    return best_weights
 
 
 def _compute_composite_score(
@@ -559,6 +783,16 @@ def _map_ensemble_to_segment(
 
     profile_means = tmp.groupby("__ensemble__")[valid_profiling_cols].mean()
 
+    # Optionally optimise composite weights via ARI against known labels
+    if cfg.get("optimize_composite_weights") and "agent_category" in features_df.columns:
+        optimised_weights = _find_optimal_composite_weights(
+            profile_means, features_df, ensemble_col, cfg
+        )
+        cfg = {**cfg, "composite_weights": optimised_weights}
+        logger.info(
+            "_map_ensemble_to_segment: using ARI-optimised weights=%s", optimised_weights
+        )
+
     composite = _compute_composite_score(profile_means, cfg)
     sorted_clusters = composite.sort_values(ascending=True).index.tolist()
     n = len(sorted_clusters)
@@ -577,6 +811,95 @@ def _map_ensemble_to_segment(
         logger.info("  %-45s -> %s", cl, seg)
 
     return ensemble_col.map(segment_map).fillna(BUSINESS_SEGMENTS[0])
+
+
+DEFAULT_STABILITY_REPORT: dict[str, Any] = {
+    "silhouette_score": float("nan"),
+    "ari_mean": float("nan"),
+    "ari_std": float("nan"),
+    "n_seeds": 0,
+}
+
+
+def _compute_stability_metrics(
+    X_pca: np.ndarray,
+    cfg: dict[str, Any],
+) -> dict[str, Any]:
+    """Evaluate cluster reproducibility across multiple random seeds.
+
+    Runs KMeans (round-1 settings) ``stability_n_seeds`` times with different
+    random seeds, then computes:
+
+    - **silhouette_score**: averaged over seeds on a subsample of size
+      ``sample_cap_silhouette``.
+    - **ari_mean / ari_std**: mean and standard deviation of pairwise
+      Adjusted Rand Index between all seed-pair label assignments.
+
+    Parameters
+    ----------
+    X_pca : PCA-reduced feature array (all agents).
+    cfg   : Clustering config.
+
+    Returns
+    -------
+    dict with keys: ``silhouette_score``, ``ari_mean``, ``ari_std``, ``n_seeds``.
+    """
+    from itertools import combinations  # noqa: PLC0415
+    from sklearn.metrics import adjusted_rand_score, silhouette_score  # noqa: PLC0415
+
+    n_seeds: int = int(cfg.get("stability_n_seeds", 3))
+    k: int = int(cfg.get("kmeans_round1_k", 6))
+    cap: int = int(cfg.get("sample_cap_silhouette", 20000))
+    base_seed: int = int(cfg.get("random_state", 42))
+
+    if n_seeds < 2:
+        logger.warning(
+            "_compute_stability_metrics: stability_n_seeds=%d < 2 — "
+            "returning default report.",
+            n_seeds,
+        )
+        return deepcopy(DEFAULT_STABILITY_REPORT)
+
+    n = len(X_pca)
+    seed_labels: list[np.ndarray] = []
+    sil_scores: list[float] = []
+
+    for i in range(n_seeds):
+        seed = base_seed + i * 137  # deterministic but varied seeds
+        km = KMeans(n_clusters=k, random_state=seed, n_init=10, max_iter=200)
+        labels_i = km.fit_predict(X_pca)
+        seed_labels.append(labels_i)
+
+        # Silhouette on a subsample
+        cap_i = min(n, cap)
+        rng_i = np.random.RandomState(seed)
+        idx = rng_i.choice(n, size=cap_i, replace=False) if cap_i < n else np.arange(n)
+        try:
+            sil = silhouette_score(X_pca[idx], labels_i[idx])
+            sil_scores.append(sil)
+        except Exception:  # noqa: BLE001
+            pass
+
+    # Pairwise ARI
+    ari_values: list[float] = [
+        adjusted_rand_score(seed_labels[a], seed_labels[b])
+        for a, b in combinations(range(n_seeds), 2)
+    ]
+
+    report = {
+        "silhouette_score": float(np.mean(sil_scores)) if sil_scores else float("nan"),
+        "ari_mean": float(np.mean(ari_values)) if ari_values else float("nan"),
+        "ari_std": float(np.std(ari_values)) if ari_values else float("nan"),
+        "n_seeds": n_seeds,
+    }
+    logger.info(
+        "_compute_stability_metrics: silhouette=%.3f, ARI mean=%.3f ± %.3f (%d seeds)",
+        report["silhouette_score"],
+        report["ari_mean"],
+        report["ari_std"],
+        n_seeds,
+    )
+    return report
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -648,28 +971,40 @@ def run_clustering_pipeline(
         labels_r2 = _run_kmeans_round2(out, active_mask, selected_cols, cfg, rng)
         out.loc[active_mask, "cluster_round2"] = labels_r2
 
-    # ── Active PCA for GMM + HDBSCAN ─────────────────────────────────────────
+    # ── Active PCA (GMM) + scaled features (UMAP→HDBSCAN) ───────────────────
     X_pca_active: np.ndarray | None = None
+    X_scaled_active: np.ndarray | None = None
     if active_mask.sum() > 0:
-        X_pca_active = _get_active_pca(out, active_mask, selected_cols, cfg, rng)
+        X_pca_active, X_scaled_active = _get_active_pca(
+            out, active_mask, selected_cols, cfg, rng
+        )
 
-    # ── GMM on active agents ──────────────────────────────────────────────────
+    # ── Stability metrics (run before main clustering to use same X_pca) ─────
+    stability_report = _compute_stability_metrics(X_pca, cfg)
+
+    # ── GMM on active agents (PCA space) ─────────────────────────────────────
     out["cluster_id_gmm"] = pd.array([-1] * len(out), dtype="Int64")
     if X_pca_active is not None:
         gmm_labels, _ = _run_gmm(X_pca_active, cfg, rng)
         active_indices = out.index[active_mask]
         out.loc[active_indices, "cluster_id_gmm"] = gmm_labels
 
-    # ── HDBSCAN on active agents ──────────────────────────────────────────────
+    # ── HDBSCAN on active agents (UMAP space when available) ─────────────────
     out["cluster_hdb_raw"] = pd.array([pd.NA] * len(out), dtype="Int64")
     out["hdb_tier"] = pd.NA
 
-    if X_pca_active is not None:
+    if X_pca_active is not None and X_scaled_active is not None:
         try:
-            hdb_labels = _run_hdbscan(X_pca_active, cfg)
+            if cfg.get("use_umap_for_hdbscan", True):
+                X_hdbscan = _get_active_umap(X_scaled_active, cfg, rng)
+            else:
+                X_hdbscan = X_pca_active
+
+            hdb_labels = _run_hdbscan(X_hdbscan, cfg)
             active_indices = out.index[active_mask]
             out.loc[active_indices, "cluster_hdb_raw"] = hdb_labels
-            hdb_tier_active = _map_hdb_to_tier(hdb_labels, X_pca_active, cfg)
+            features_df_active = out.loc[active_mask].reset_index(drop=True)
+            hdb_tier_active = _map_hdb_to_tier(hdb_labels, features_df_active, cfg)
             out.loc[active_indices, "hdb_tier"] = hdb_tier_active.values
         except ImportError as exc:
             logger.error(
@@ -698,6 +1033,9 @@ def run_clustering_pipeline(
 
     # Dormant agents always -> "Below Threshold"
     out.loc[dormant_mask, "segment"] = BUSINESS_SEGMENTS[0]
+
+    # ── Attach stability report as DataFrame metadata ─────────────────────────
+    out.attrs["stability_report"] = stability_report
 
     # Log summary
     seg_counts = out["segment"].value_counts().to_dict()

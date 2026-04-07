@@ -279,9 +279,11 @@ class TestClusteringPipeline:
         )
 
         feat_df, X_pca, sel_cols = self._get_small_inputs(80)
-        # Set first 10 agents as dormant
+        # Zero out all multi-product inactivity cols so composite score = 0
         feat_df = feat_df.copy()
-        feat_df.loc[feat_df.index[:10], "cash_out_vol_1m"] = 0.0
+        for col in ("cash_out_vol_1m", "cash_in_vol_1m", "payment_vol_1m", "voucher_volume_1m"):
+            if col in feat_df.columns:
+                feat_df.loc[feat_df.index[:10], col] = 0.0
 
         result = run_clustering_pipeline(feat_df, X_pca, sel_cols)
         dormant_segs = result.iloc[:10]["segment"].unique()
@@ -310,6 +312,80 @@ class TestClusteringPipeline:
         from extrafloat_segmentation_pipeline import BUSINESS_SEGMENTS
 
         assert len(BUSINESS_SEGMENTS) == 8
+
+    def test_stability_report_in_attrs(self):
+        from extrafloat_segmentation_pipeline import DEFAULT_STABILITY_REPORT, run_clustering_pipeline
+
+        feat_df, X_pca, sel_cols = self._get_small_inputs()
+        result = run_clustering_pipeline(feat_df, X_pca, sel_cols, config={"stability_n_seeds": 2})
+        assert "stability_report" in result.attrs, "stability_report missing from attrs"
+
+    def test_stability_report_keys(self):
+        from extrafloat_segmentation_pipeline import run_clustering_pipeline
+
+        feat_df, X_pca, sel_cols = self._get_small_inputs()
+        result = run_clustering_pipeline(feat_df, X_pca, sel_cols, config={"stability_n_seeds": 2})
+        report = result.attrs.get("stability_report", {})
+        for key in ("silhouette_score", "ari_mean", "ari_std", "n_seeds"):
+            assert key in report, f"stability_report missing key '{key}'"
+
+    def test_stability_report_n_seeds(self):
+        from extrafloat_segmentation_pipeline import run_clustering_pipeline
+
+        feat_df, X_pca, sel_cols = self._get_small_inputs()
+        result = run_clustering_pipeline(feat_df, X_pca, sel_cols, config={"stability_n_seeds": 2})
+        assert result.attrs["stability_report"]["n_seeds"] == 2
+
+    def test_hdb_tier_ranking_uses_business_kpi(self):
+        """_map_hdb_to_tier should rank by total_value_1m not PC1 when available."""
+        import numpy as np
+        from extrafloat_segmentation_pipeline import _map_hdb_to_tier
+
+        n = 50
+        rng = np.random.RandomState(0)
+        # Two clusters: cluster 0 = low value, cluster 1 = high value
+        hdb_labels = np.array([0] * 25 + [1] * 25)
+        features_df_active = _make_agents_df(n)
+        features_df_active = features_df_active.reset_index(drop=True)
+        features_df_active["total_value_1m"] = (
+            [100.0] * 25 + [10000.0] * 25
+        )
+        cfg = {"hdb_tier_ranking_cols": ["total_value_1m", "cash_out_value_1m", "commission"]}
+        tiers = _map_hdb_to_tier(hdb_labels, features_df_active, cfg)
+        # cluster 0 (low value) should get a lower tier than cluster 1 (high value)
+        tier_0 = tiers.iloc[0]
+        tier_1 = tiers.iloc[25]
+        assert tier_0 != tier_1, "Both clusters got the same tier"
+
+    def test_umap_fallback_when_not_available(self):
+        """_get_active_umap returns array of correct shape even without umap."""
+        import numpy as np
+        from extrafloat_segmentation_pipeline import _get_active_umap, _UMAP_AVAILABLE
+
+        rng = np.random.RandomState(42)
+        X = rng.randn(40, 10)
+        cfg = {"umap_n_components": 2, "umap_n_neighbors": 5, "umap_min_dist": 0.1}
+        result = _get_active_umap(X, cfg, rng)
+        assert result.shape[0] == 40
+        assert result.shape[1] == 2
+
+    def test_optimize_weights_skipped_without_agent_category(self):
+        """optimize_composite_weights=True with no agent_category col → no crash, uses defaults."""
+        import pandas as pd
+        from extrafloat_segmentation_pipeline import _find_optimal_composite_weights
+
+        profile_means = pd.DataFrame(
+            {"commission": [1.0, 5.0, 10.0], "cash_out_value_1m": [2.0, 6.0, 12.0]},
+            index=["A", "B", "C"],
+        )
+        features_df = _make_agents_df(30)
+        # Ensure agent_category is absent
+        if "agent_category" in features_df.columns:
+            features_df = features_df.drop(columns=["agent_category"])
+        ensemble_col = pd.Series(["A"] * 10 + ["B"] * 10 + ["C"] * 10)
+        cfg = {"composite_weights": {"value": 0.5, "activity": 0.3, "efficiency": 0.2}, "weight_grid_step": 0.5}
+        weights = _find_optimal_composite_weights(profile_means, features_df, ensemble_col, cfg)
+        assert set(weights.keys()) == {"value", "activity", "efficiency"}
 
 
 # ─────────────────────────────────────────────────────────────────────────────

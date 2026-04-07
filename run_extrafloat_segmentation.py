@@ -327,6 +327,17 @@ def run_extrafloat_segmentation(
         config=cfg.get("clustering"),
     )
 
+    stability = features_df.attrs.get("stability_report", {})
+    if stability and stability.get("n_seeds", 0) > 0:
+        logger.info(
+            "run_extrafloat_segmentation: cluster stability — "
+            "silhouette=%.3f, ARI mean=%.3f ± %.3f (%d seeds)",
+            stability.get("silhouette_score", float("nan")),
+            stability.get("ari_mean", float("nan")),
+            stability.get("ari_std", float("nan")),
+            stability.get("n_seeds", 0),
+        )
+
     seg_col = cfg["output"].get("final_segment_col", "segment")
     if seg_col != "segment" and "segment" in features_df.columns:
         features_df = features_df.rename(columns={"segment": seg_col})
