@@ -132,10 +132,14 @@ DEFAULT_CAP_CONFIG = {
 
     # ── Policy adjustments ────────────────────────────────────────────────────
     "policy": {
-        # Risk-tier score cutoffs
-        "risk_tier_1_score_max": 0.15,
-        "risk_tier_2_score_max": 0.35,
-        "risk_tier_3_score_max": 0.60,
+        # Risk-tier score cutoffs (MIN thresholds — higher score = better borrower).
+        # tier_1 (best)  : score >= risk_tier_1_score_min  → multiplier 1.00
+        # tier_2         : score >= risk_tier_2_score_min  → multiplier 0.85
+        # tier_3         : score >= risk_tier_3_score_min  → multiplier 0.65
+        # tier_4 (worst) : score <  risk_tier_3_score_min  → multiplier 0.40
+        "risk_tier_1_score_min": 0.85,
+        "risk_tier_2_score_min": 0.60,
+        "risk_tier_3_score_min": 0.35,
 
         # Risk-tier limit multipliers
         "risk_tier_1_multiplier": 1.00,
@@ -215,14 +219,14 @@ def _round_to_nearest(series_obj, nearest):
 
 
 def _validate_tier_config(final_cfg):
-    """Validate that risk-tier score thresholds are strictly increasing."""
+    """Validate that risk-tier score min-thresholds are strictly decreasing."""
     policy_cfg = final_cfg["policy"]
-    t1 = policy_cfg["risk_tier_1_score_max"]
-    t2 = policy_cfg["risk_tier_2_score_max"]
-    t3 = policy_cfg["risk_tier_3_score_max"]
-    if not (t1 < t2 < t3):
+    t1 = policy_cfg["risk_tier_1_score_min"]
+    t2 = policy_cfg["risk_tier_2_score_min"]
+    t3 = policy_cfg["risk_tier_3_score_min"]
+    if not (t1 > t2 > t3):
         raise ValueError(
-            f"Risk tier thresholds must be strictly increasing: "
+            f"Risk tier min-thresholds must be strictly decreasing: "
             f"tier_1={t1}, tier_2={t2}, tier_3={t3}"
         )
 
@@ -1282,16 +1286,16 @@ def apply_policy_adjustments(features_df, config=None):
         cfg["global_ceiling_limit"],
     )
     
-    tier_1_mask = risk_score <= policy_cfg["risk_tier_1_score_max"]
+    tier_1_mask = risk_score >= policy_cfg["risk_tier_1_score_min"]
     tier_2_mask = (
-        (risk_score > policy_cfg["risk_tier_1_score_max"])
-        & (risk_score <= policy_cfg["risk_tier_2_score_max"])
+        (risk_score >= policy_cfg["risk_tier_2_score_min"])
+        & (risk_score < policy_cfg["risk_tier_1_score_min"])
     )
     tier_3_mask = (
-        (risk_score > policy_cfg["risk_tier_2_score_max"])
-        & (risk_score <= policy_cfg["risk_tier_3_score_max"])
+        (risk_score >= policy_cfg["risk_tier_3_score_min"])
+        & (risk_score < policy_cfg["risk_tier_2_score_min"])
     )
-    tier_4_mask = risk_score > policy_cfg["risk_tier_3_score_max"]
+    tier_4_mask = risk_score < policy_cfg["risk_tier_3_score_min"]
     
     tier_multiplier = pd.Series(
     policy_cfg["risk_tier_4_multiplier"],

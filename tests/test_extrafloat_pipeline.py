@@ -577,21 +577,21 @@ def test_apply_policy_adjustments_tier_and_proven_good():
     """
     combined = 10000.0
     df = pd.DataFrame([
-        # Tier 1
-        dict(risk_score=0.10, combined_cap=combined, risk_cap=30000.0,
+        # Tier 1: score >= 0.85 → multiplier 1.00 (best borrower, no penalty)
+        dict(risk_score=0.90, combined_cap=combined, risk_cap=30000.0,
              total_loans=5.0, on_time_repayment_rate=0.70,
              lifetime_default_rate=0.15,
              recent_disbursement_amount_1m=5000.0,
              recent_repayment_amount_1m=5000.0,
              agent_tier_ceiling_multiplier=1.0),
-        # Tier 4
-        dict(risk_score=0.75, combined_cap=combined, risk_cap=30000.0,
+        # Tier 4: score < 0.35 → multiplier 0.40 (worst borrower, 60% cut)
+        dict(risk_score=0.20, combined_cap=combined, risk_cap=30000.0,
              total_loans=5.0, on_time_repayment_rate=0.30,
              lifetime_default_rate=0.40,
              recent_disbursement_amount_1m=5000.0,
              recent_repayment_amount_1m=5000.0,
              agent_tier_ceiling_multiplier=1.0),
-        # Tier 3 but proven-good → floor override
+        # Tier 3 (0.35 <= score < 0.60) but proven-good → floor override
         # raw_cap = 10000 * 0.65 = 6500; proven_floor = 10000 * 0.85 = 8500
         dict(risk_score=0.50, combined_cap=combined, risk_cap=30000.0,
              total_loans=10.0, on_time_repayment_rate=0.95,
