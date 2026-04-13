@@ -26,16 +26,24 @@ PEAK_SEASON_MONTHS: frozenset[int] = frozenset({1, 8, 9, 12})
  
 # ─────────────────────────────────────────────────────────────────────────────
 # AGENT TIER CEILING MULTIPLIERS
-# Matched case-insensitively against agent_profile.
-# Applied to global_ceiling_limit in the caps engine.
+# Matched case-insensitively against agent_profile (str.lower()).
+# multiplier = tier_limit / global_ceiling_limit (1,000,000 UGX)
+# Order matters: "silver class" must precede "silver" so the substring
+# match catches "silver class" agents before the shorter key fires.
+# Applied to global_ceiling_limit in the caps engine to derive the
+# per-agent effective ceiling in compute_capacity_cap() and
+# apply_policy_adjustments().
 # ─────────────────────────────────────────────────────────────────────────────
 AGENT_TIER_CEILING_MULTIPLIERS: dict[str, float] = {
-    "platinum":     1.00,
-    "gold":         1.00,
-    "silver class": 0.85,
-    "silver":       0.85,
-    "bronze":       0.65,
-    "unknown":      0.65,
+    "diamond":      1.00,   # 1,000,000 / 1,000,000
+    "titanium":     0.75,   #   750,000 / 1,000,000
+    "platinum":     0.50,   #   500,000 / 1,000,000
+    "gold":         0.35,   #   350,000 / 1,000,000
+    "silver class": 0.25,   #   250,000 / 1,000,000  ← must precede "silver"
+    "silver":       0.25,   #   250,000 / 1,000,000
+    "new bronze":   0.05,   #    50,000 / 1,000,000  ← must precede "bronze"
+    "bronze":       0.10,   #   100,000 / 1,000,000
+    "unknown":      0.05,   # conservative fallback
 }
  
 # ─────────────────────────────────────────────────────────────────────────────

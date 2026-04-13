@@ -179,7 +179,7 @@ def _features(**overrides) -> pd.DataFrame:
         "operational_activity_flag": 1.0,
         "recent_credit_active_flag": 1.0,
         "is_peak_season_flag": 0.0,
-        "agent_tier_ceiling_multiplier": 0.85,
+        "agent_tier_ceiling_multiplier": 0.25,   # Silver Class: 250,000 / 1,000,000
         # ── recent usage cap inputs ──────────────────────────────────────────
         "recent_disbursement_amount_1m": 5000.0,
         "recent_disbursement_amount_3m": 10000.0,
@@ -251,8 +251,8 @@ def test_prepare_transaction_capacity_features_sample_data():
     assert result["operational_activity_flag"].isin([0, 1]).all()
     assert row["operational_activity_flag"] == 1  # vol_1m=14 > 0
 
-    # Silver Class → 0.85
-    assert row["agent_tier_ceiling_multiplier"] == pytest.approx(0.85)
+    # Silver Class → 0.25  (250,000 / 1,000,000)
+    assert row["agent_tier_ceiling_multiplier"] == pytest.approx(0.25)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -442,7 +442,7 @@ def test_compute_capacity_cap_primary_and_fallback():
         "operational_activity_flag": 1.0,
         "recent_credit_active_flag": 1.0,
         "is_peak_season_flag": 0.0,
-        "agent_tier_ceiling_multiplier": 0.85,
+        "agent_tier_ceiling_multiplier": 0.25,   # Silver Class: 250,000 / 1,000,000
     }])
     result_fallback = compute_capacity_cap(fallback_df)
     assert float(result_fallback["capacity_cap"].iloc[0]) > 0.0
