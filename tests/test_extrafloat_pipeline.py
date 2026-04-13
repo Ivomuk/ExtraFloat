@@ -375,8 +375,8 @@ def test_build_extrafloat_limit_engine_features_alias_columns():
 
 def test_compute_risk_cap_score_bounds():
     """
-    risk_score always in [0,1] and risk_cap always in [0,30000];
-    perfect borrower reaches risk_score ≈ 1.0 and risk_cap ≈ 30000.
+    risk_score always in [0,1] and risk_cap always in [0, 1_000_000];
+    perfect borrower reaches risk_score ≈ 1.0 and risk_cap ≈ 1_000_000.
     """
     cases = [
         dict(on_time_repayment_rate=0.0, lifetime_default_rate=1.0,
@@ -391,7 +391,7 @@ def test_compute_risk_cap_score_bounds():
         rs = float(result["risk_score"].iloc[0])
         rc = float(result["risk_cap"].iloc[0])
         assert 0.0 <= rs <= 1.0, f"risk_score={rs} out of [0,1] for {case}"
-        assert 0.0 <= rc <= 30000.0, f"risk_cap={rc} out of [0,30000] for {case}"
+        assert 0.0 <= rc <= 1_000_000.0, f"risk_cap={rc} out of [0, 1_000_000] for {case}"
 
     # Perfect borrower with enough loans for full experience factor
     perfect = _features(
@@ -406,7 +406,7 @@ def test_compute_risk_cap_score_bounds():
     )
     result_perfect = compute_risk_cap(perfect)
     assert float(result_perfect["risk_score"].iloc[0]) == pytest.approx(1.0, abs=0.01)
-    assert float(result_perfect["risk_cap"].iloc[0]) == pytest.approx(30000.0, abs=200.0)
+    assert float(result_perfect["risk_cap"].iloc[0]) == pytest.approx(1_000_000.0, abs=5000.0)
 
     # Worst borrower should score lower than mid borrower
     assert (
@@ -571,7 +571,7 @@ def test_combine_caps_thin_file_vs_standard():
 
 def test_apply_policy_adjustments_tier_and_proven_good():
     """
-    Tier 1 (score ≤ 0.15) → multiplier 1.00; tier_4 (score > 0.60) → multiplier 0.40.
+    Tier 1 (score >= 0.85) → multiplier 1.00; tier_4 (score < 0.35) → multiplier 0.40.
     Proven-good override (loans≥3, on_time≥0.90, lifetime_default≤0.05) floors
     policy_cap at 85% of combined_cap, overriding lower tier multipliers.
     """
@@ -624,7 +624,7 @@ def test_apply_policy_adjustments_tier_and_proven_good():
 
 def test_run_extrafloat_limit_engine_end_to_end():
     """
-    Full pipeline: assigned_limit is present, in [0,30000], a multiple of 100,
+    Full pipeline: assigned_limit is present, in [0, 1_000_000], a multiple of 100,
     and non-NaN.  A healthy borrower with realistic signals gets limit > 0.
     """
     # risk_score must be pre-supplied for validate_required_columns
@@ -638,7 +638,7 @@ def test_run_extrafloat_limit_engine_end_to_end():
     assigned = result["assigned_limit"]
     assert assigned.notna().all()
     assert (assigned >= 0.0).all()
-    assert (assigned <= 30000.0).all()
+    assert (assigned <= 1_000_000.0).all()
 
     # All non-zero limits must be multiples of 100
     non_zero = assigned[assigned > 0]

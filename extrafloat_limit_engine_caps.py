@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_CAP_CONFIG = {
     "global_floor_limit": 0.0,
-    "global_ceiling_limit": 30000.0,
+    "global_ceiling_limit": 1_000_000.0,
 
     "rounding": {
         "round_to_nearest": 100.0,
@@ -96,7 +96,7 @@ DEFAULT_CAP_CONFIG = {
 
     # ── Risk cap ──────────────────────────────────────────────────────────────
     "risk": {
-        "base_limit": 30000.0,
+        "base_limit": 1_000_000.0,
         "on_time_weight": 0.30,
         "lifetime_default_weight": 0.20,
         "recent_default_weight": 0.20,
@@ -163,12 +163,17 @@ DEFAULT_CAP_CONFIG = {
     # apply_policy_adjustments() via the agent_tier_ceiling_multiplier feature.
     "agent_tier": {
         "enabled": True,
-        "Platinum":     1.00,
-        "Gold":         1.00,
-        "Silver Class": 0.85,
-        "Silver":       0.85,
-        "Bronze":       0.65,
-        "unknown":      0.65,
+        # Multipliers = tier_limit / global_ceiling_limit (1,000,000)
+        # Maps each agent category to its business-assigned extra float ceiling.
+        "Diamond":      1.00,   # 1,000,000 / 1,000,000
+        "Titanium":     0.75,   # 750,000   / 1,000,000
+        "Platinum":     0.50,   # 500,000   / 1,000,000
+        "Gold":         0.35,   # 350,000   / 1,000,000
+        "Silver Class": 0.25,   # 250,000   / 1,000,000
+        "Silver":       0.25,   # 250,000   / 1,000,000
+        "Bronze":       0.10,   # 100,000   / 1,000,000
+        "New Bronze":   0.05,   # 50,000    / 1,000,000
+        "unknown":      0.05,   # 50,000    / 1,000,000 — conservative fallback
     },
 
     # ── Seasonality attenuation ───────────────────────────────────────────────
@@ -183,7 +188,7 @@ DEFAULT_CAP_CONFIG = {
     "regulatory": {
         "enabled": True,
         "market": "UG",
-        "regulatory_cap": 30000.0,   # Bank of Uganda extrafloat ceiling (UGX)
+        "regulatory_cap": 5_000_000.0,  # Bank of Uganda max transaction limit (UGX)
         "regulator": "Bank of Uganda",
     },
 }
