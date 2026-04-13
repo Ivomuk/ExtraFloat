@@ -12,10 +12,12 @@ Market: Uganda (UG) — Bank of Uganda supervised mobile money.
 from __future__ import annotations
  
 import logging
- 
+
 import numpy as np
 import pandas as pd
- 
+
+from extrafloat_limit_engine_caps import DEFAULT_CAP_CONFIG
+
 logger = logging.getLogger(__name__)
  
 # ─────────────────────────────────────────────────────────────────────────────
@@ -24,28 +26,9 @@ logger = logging.getLogger(__name__)
 # ─────────────────────────────────────────────────────────────────────────────
 PEAK_SEASON_MONTHS: frozenset[int] = frozenset({1, 8, 9, 12})
  
-# ─────────────────────────────────────────────────────────────────────────────
-# AGENT TIER CEILING MULTIPLIERS
-# Matched case-insensitively against agent_profile (str.lower()).
-# multiplier = tier_limit / global_ceiling_limit (1,000,000 UGX)
-# Order matters: "silver class" must precede "silver" so the substring
-# match catches "silver class" agents before the shorter key fires.
-# Applied to global_ceiling_limit in the caps engine to derive the
-# per-agent effective ceiling in compute_capacity_cap() and
-# apply_policy_adjustments().
-# ─────────────────────────────────────────────────────────────────────────────
-AGENT_TIER_CEILING_MULTIPLIERS: dict[str, float] = {
-    "diamond":      1.00,   # 1,000,000 / 1,000,000
-    "titanium":     0.75,   #   750,000 / 1,000,000
-    "platinum":     0.50,   #   500,000 / 1,000,000
-    "gold":         0.35,   #   350,000 / 1,000,000
-    "silver class": 0.25,   #   250,000 / 1,000,000  ← must precede "silver"
-    "silver":       0.25,   #   250,000 / 1,000,000
-    "new bronze":   0.05,   #    50,000 / 1,000,000  ← must precede "bronze"
-    "bronze":       0.10,   #   100,000 / 1,000,000
-    "unknown":      0.05,   # conservative fallback
-}
- 
+# Agent tier ceiling multipliers are defined in DEFAULT_CAP_CONFIG["agent_tier"]["tiers"]
+# in extrafloat_limit_engine_caps.py — single source of truth for business policy.
+
 # ─────────────────────────────────────────────────────────────────────────────
 # THIN-FILE THRESHOLD
 # Borrowers with total_loans below this value are flagged as thin-file,
@@ -532,11 +515,15 @@ def prepare_transaction_capacity_features(
     ).astype(int)
  
     # ── Agent tier ceiling multiplier ──
+    # Tier map and fallback come from DEFAULT_CAP_CONFIG (single source of truth).
+    _tier_cfg = DEFAULT_CAP_CONFIG.get("agent_tier", {})
+    _tier_map = _tier_cfg.get("tiers", {})
+    _tier_default = _tier_cfg.get("default_multiplier", 0.05)
     agent_lower = df["agent_profile"].str.lower().fillna("unknown")
     df["agent_tier_ceiling_multiplier"] = agent_lower.apply(
         lambda p: next(
-            (v for k, v in AGENT_TIER_CEILING_MULTIPLIERS.items() if k in p),
-            0.65,
+            (v for k, v in _tier_map.items() if k in p),
+            _tier_default,
         )
     )
  

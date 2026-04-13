@@ -159,21 +159,30 @@ DEFAULT_CAP_CONFIG = {
     },
 
     # ── Agent-tier effective ceiling ──────────────────────────────────────────
-    # Applied to global_ceiling_limit in compute_capacity_cap() and
-    # apply_policy_adjustments() via the agent_tier_ceiling_multiplier feature.
+    # Single source of truth for agent tier → ceiling multiplier mapping.
+    # multiplier = tier_limit / global_ceiling_limit (1,000,000 UGX).
+    # Consumed by prepare_transaction_capacity_features() to stamp the
+    # agent_tier_ceiling_multiplier column; then applied by compute_capacity_cap()
+    # and apply_policy_adjustments() via that column.
+    #
+    # Key ordering matters — tiers dict is matched with substring logic
+    # (k in agent_profile.lower()), so longer/more-specific keys must
+    # precede shorter ones: "silver class" before "silver",
+    # "new bronze" before "bronze".
     "agent_tier": {
         "enabled": True,
-        # Multipliers = tier_limit / global_ceiling_limit (1,000,000)
-        # Maps each agent category to its business-assigned extra float ceiling.
-        "Diamond":      1.00,   # 1,000,000 / 1,000,000
-        "Titanium":     0.75,   # 750,000   / 1,000,000
-        "Platinum":     0.50,   # 500,000   / 1,000,000
-        "Gold":         0.35,   # 350,000   / 1,000,000
-        "Silver Class": 0.25,   # 250,000   / 1,000,000
-        "Silver":       0.25,   # 250,000   / 1,000,000
-        "Bronze":       0.10,   # 100,000   / 1,000,000
-        "New Bronze":   0.05,   # 50,000    / 1,000,000
-        "unknown":      0.05,   # 50,000    / 1,000,000 — conservative fallback
+        "default_multiplier": 0.05,   # fallback for unrecognised profiles
+        "tiers": {
+            "diamond":      1.00,   # 1,000,000 / 1,000,000
+            "titanium":     0.75,   #   750,000 / 1,000,000
+            "platinum":     0.50,   #   500,000 / 1,000,000
+            "gold":         0.35,   #   350,000 / 1,000,000
+            "silver class": 0.25,   #   250,000 / 1,000,000  ← before "silver"
+            "silver":       0.25,   #   250,000 / 1,000,000
+            "new bronze":   0.05,   #    50,000 / 1,000,000  ← before "bronze"
+            "bronze":       0.10,   #   100,000 / 1,000,000
+            "unknown":      0.05,   #    50,000 / 1,000,000  — conservative fallback
+        },
     },
 
     # ── Seasonality attenuation ───────────────────────────────────────────────
