@@ -463,12 +463,15 @@ def test_psi_low_cardinality_column():
 # TEST 13 — Cramér's V: significant chi-sq with tiny effect size → MONITOR
 # ─────────────────────────────────────────────────────────────────────────────
 
-def test_composition_cramer_v_small_effect_is_monitor():
-    """Large n + statistically significant chi-sq but V ≈ 0.016 → MONITOR, not ALERT.
+def test_composition_cramer_v_small_effect_is_stable():
+    """Large n + statistically significant chi-sq but V ≈ 0.016 → STABLE, not ALERT.
 
     ref: tier_1=12000, tier_2=9000, tier_3=6000, tier_4=3000 (n=30000)
     cur: tier_1=11700, tier_2=9000, tier_3=6000, tier_4=3300 (n=30000)
-    chi2 ≈ 18.1, p << 0.05 (significant), V ≈ 0.016 (negligible).
+    chi2 ≈ 18.1, p << 0.05 (significant), V ≈ 0.016 (below monitor threshold of 0.10).
+
+    Validates the 3-tier Cramér's V logic: sig + V < monitor_threshold → STABLE,
+    preventing alert noise at large n where 1 pp shifts become detectable.
     """
     ref_df = pd.DataFrame({
         "risk_tier": (
@@ -494,11 +497,11 @@ def test_composition_cramer_v_small_effect_is_monitor():
         )
         assert tier_r.cramers_v is not None, "cramers_v should be populated when scipy available"
         assert tier_r.cramers_v < 0.10, (
-            f"Expected tiny Cramér's V (< 0.10), got {tier_r.cramers_v:.4f}"
+            f"Expected tiny Cramér's V (< cramers_v_monitor_threshold=0.10), got {tier_r.cramers_v:.4f}"
         )
-        # Small V means MONITOR, not ALERT
-        assert tier_r.severity == SEVERITY_MONITOR, (
-            f"Tiny effect size (V={tier_r.cramers_v:.4f}) should be MONITOR, got {tier_r.severity}"
+        # V < monitor_threshold → STABLE (operationally negligible despite statistical significance)
+        assert tier_r.severity == SEVERITY_STABLE, (
+            f"Tiny effect size (V={tier_r.cramers_v:.4f}) should be STABLE, got {tier_r.severity}"
         )
     else:
         # Without scipy: fallback to fraction-delta; ~1 pp shift → stable or monitor

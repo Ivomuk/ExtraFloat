@@ -666,8 +666,12 @@ def _monitor_categorical(
         # with negligible real impact — use V to distinguish alert from monitor.
         if cramers_v >= comp_cfg["cramers_v_alert_threshold"]:
             severity = SEVERITY_ALERT
-        else:
+        elif cramers_v >= comp_cfg["cramers_v_monitor_threshold"]:
             severity = SEVERITY_MONITOR
+        else:
+            # Statistically significant but operationally negligible effect
+            # (common at n > 10,000 where even 1 pp shifts become detectable)
+            severity = SEVERITY_STABLE
     elif sig is None:
         # scipy absent or expected-freq too sparse — fall back to fraction-delta
         severity = SEVERITY_ALERT if max_abs_shift >= comp_cfg["alert_fraction_delta"] * 2 else (
