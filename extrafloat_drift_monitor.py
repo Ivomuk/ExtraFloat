@@ -68,9 +68,13 @@ DEFAULT_DRIFT_CONFIG: Dict[str, Any] = {
 
     # ── Composition / chi-squared ─────────────────────────────────────────────
     "composition": {
-        "chi2_alpha":           0.05,
-        "min_expected_freq":    5,
-        "alert_fraction_delta": 0.05,  # fallback when scipy absent
+        "chi2_alpha":               0.05,
+        "min_expected_freq":        5,
+        "alert_fraction_delta":     0.05,   # fallback when scipy absent
+        # Cramér's V thresholds — applied when chi-sq is significant to prevent
+        # large-n datasets from inflating everything to alert.
+        "cramers_v_alert_threshold":   0.30,  # V >= 0.30 → alert
+        "cramers_v_monitor_threshold": 0.10,  # 0.10 <= V < 0.30 → monitor
     },
 
     # ── Policy calibration health ─────────────────────────────────────────────
@@ -179,6 +183,7 @@ class CompositionDriftResult:
     chi2_statistic:     Optional[float]
     chi2_pvalue:        Optional[float]
     chi2_significant:   Optional[bool]
+    cramers_v:          Optional[float]    # bias-corrected; None when scipy absent
     max_absolute_shift: float              # largest single-category pp change
     severity:           str
 
@@ -414,6 +419,17 @@ def _compute_chi2(
     return float(chi2), float(pval), pval < alpha
 
 
+def _compute_cramers_v(chi2_stat: float, n_total: int, n_categories: int) -> float:
+    """Bias-corrected Cramér's V for a 2×k contingency table.
+
+    Subtracts the expected chi-square under the null so that V stays near 0
+    for large-n datasets with negligible real effects.
+    """
+    if n_total <= 1 or n_categories <= 1:
+        return 0.0
+    return float(np.sqrt(max(0.0, chi2_stat / n_total - (n_categories - 1) / (n_total - 1))))
+
+
 def _aggregate_severity(results_lists: List) -> str:
     max_rank = 0
     for item in results_lists:
@@ -613,6 +629,7 @@ def _monitor_categorical(
     ref_df: pd.DataFrame,
     cur_df: pd.DataFrame,
     comp_cfg: Dict[str, Any],
+    skipped: Optional[List[str]] = None,
 ) -> Optional[CompositionDriftResult]:
     if feature == "agent_tier_ceiling_multiplier":
         ref_col = _discretize_agent_tier_multiplier(ref_df[feature]) if feature in ref_df.columns else None
@@ -622,6 +639,8 @@ def _monitor_categorical(
         cur_col = cur_df[feature] if feature in cur_df.columns else None
 
     if ref_col is None or cur_col is None:
+        if skipped is not None:
+            skipped.append(feature)
         return None
 
     ref_counts = ref_col.value_counts().to_dict()
@@ -639,10 +658,18 @@ def _monitor_categorical(
     chi2, pval, sig = _compute_chi2(ref_counts, cur_counts, comp_cfg["chi2_alpha"],
                                      comp_cfg["min_expected_freq"])
 
+    cramers_v: Optional[float] = None
     if sig:
-        severity = SEVERITY_ALERT
+        n_total = ref_total + cur_total
+        cramers_v = _compute_cramers_v(chi2, n_total, len(all_cats))
+        # Effect-size tiering: large-n datasets can be statistically significant
+        # with negligible real impact — use V to distinguish alert from monitor.
+        if cramers_v >= comp_cfg["cramers_v_alert_threshold"]:
+            severity = SEVERITY_ALERT
+        else:
+            severity = SEVERITY_MONITOR
     elif sig is None:
-        # scipy absent or sparse — fall back to fraction-delta rule
+        # scipy absent or expected-freq too sparse — fall back to fraction-delta
         severity = SEVERITY_ALERT if max_abs_shift >= comp_cfg["alert_fraction_delta"] * 2 else (
             SEVERITY_MONITOR if max_abs_shift >= comp_cfg["alert_fraction_delta"] else SEVERITY_STABLE
         )
@@ -656,6 +683,7 @@ def _monitor_categorical(
         chi2_statistic=chi2,
         chi2_pvalue=pval,
         chi2_significant=sig,
+        cramers_v=cramers_v,
         max_absolute_shift=max_abs_shift,
         severity=severity,
     )
@@ -665,22 +693,26 @@ def monitor_composition_drift(
     ref_df: pd.DataFrame,
     cur_df: pd.DataFrame,
     config: Optional[Dict[str, Any]] = None,
-) -> List[CompositionDriftResult]:
+) -> Tuple[List[CompositionDriftResult], List[str]]:
+    """Returns (results, skipped_feature_names)."""
     cfg      = _get_drift_config(config)
     comp_cfg = cfg["composition"]
+    skipped: List[str] = []
     results: List[CompositionDriftResult] = []
 
     for feat in cfg["composition_features"]:
-        r = _monitor_categorical(feat, ref_df, cur_df, comp_cfg)
+        r = _monitor_categorical(feat, ref_df, cur_df, comp_cfg, skipped)
         if r is not None:
             results.append(r)
 
     n_alert = sum(1 for r in results if r.severity == SEVERITY_ALERT)
     logger.info(
-        "monitor_composition_drift: features=%d alert=%d",
-        len(results), n_alert,
+        "monitor_composition_drift: features=%d alert=%d skipped=%d",
+        len(results), n_alert, len(skipped),
     )
-    return results
+    if skipped:
+        logger.warning("monitor_composition_drift: skipped absent features: %s", skipped)
+    return results, skipped
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -877,18 +909,22 @@ def monitor_cap_driver_drift(
     ref_df: pd.DataFrame,
     cur_df: pd.DataFrame,
     config: Optional[Dict[str, Any]] = None,
-) -> List[CompositionDriftResult]:
+) -> Tuple[List[CompositionDriftResult], List[str]]:
+    """Returns (results, skipped_feature_names)."""
     cfg     = _get_drift_config(config)
     cd_cfg  = cfg["cap_driver"]
     comp_cfg = {
-        "chi2_alpha":           cd_cfg["chi2_alpha"],
-        "min_expected_freq":    5,
-        "alert_fraction_delta": 0.05,
+        "chi2_alpha":               cd_cfg["chi2_alpha"],
+        "min_expected_freq":        5,
+        "alert_fraction_delta":     0.05,
+        "cramers_v_alert_threshold":   cfg["composition"]["cramers_v_alert_threshold"],
+        "cramers_v_monitor_threshold": cfg["composition"]["cramers_v_monitor_threshold"],
     }
+    skipped: List[str] = []
     results: List[CompositionDriftResult] = []
 
     for feat in ["combined_top_driver", "policy_reason", "capacity_top_driver"]:
-        r = _monitor_categorical(feat, ref_df, cur_df, comp_cfg)
+        r = _monitor_categorical(feat, ref_df, cur_df, comp_cfg, skipped)
         if r is not None:
             results.append(r)
             if feat == "combined_top_driver":
@@ -896,7 +932,9 @@ def monitor_cap_driver_drift(
                 if msg:
                     logger.warning(msg)
 
-    return results
+    if skipped:
+        logger.warning("monitor_cap_driver_drift: skipped absent features: %s", skipped)
+    return results, skipped
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -927,11 +965,11 @@ def run_drift_monitor(
     else:
         output_drift, output_skipped = [], []
 
-    skipped = input_skipped + output_skipped
+    composition_drift, comp_skipped = monitor_composition_drift(ref_df, cur_df, cfg)
+    policy_health                   = monitor_policy_health(ref_df, cur_df, cfg)
+    cap_driver_drift,  cap_skipped  = monitor_cap_driver_drift(ref_df, cur_df, cfg)
 
-    composition_drift = monitor_composition_drift(ref_df, cur_df, cfg)
-    policy_health     = monitor_policy_health(ref_df, cur_df, cfg)
-    cap_driver_drift  = monitor_cap_driver_drift(ref_df, cur_df, cfg)
+    skipped = input_skipped + output_skipped + comp_skipped + cap_skipped
 
     overall = _aggregate_severity([
         input_drift, output_drift, composition_drift,

@@ -1,7 +1,7 @@
 """
 tests/test_extrafloat_drift_monitor.py
 =======================================
-10 tests for the ExtraFloat drift monitoring module.
+13 tests for the ExtraFloat drift monitoring module.
 """
 
 import os
@@ -179,7 +179,7 @@ def test_population_composition_no_drift():
     ref_df = pd.DataFrame({"risk_tier": rng.permutation(tier_mix)})
     cur_df = pd.DataFrame({"risk_tier": rng.permutation(tier_mix)})
 
-    results = monitor_composition_drift(ref_df, cur_df)
+    results, skipped = monitor_composition_drift(ref_df, cur_df)
     tier_r = next((r for r in results if r.feature == "risk_tier"), None)
     assert tier_r is not None, "risk_tier result missing"
     assert tier_r.severity == SEVERITY_STABLE, (
@@ -206,7 +206,7 @@ def test_population_composition_drift():
         )
     })
 
-    results = monitor_composition_drift(ref_df, cur_df)
+    results, skipped = monitor_composition_drift(ref_df, cur_df)
     tier_r = next((r for r in results if r.feature == "risk_tier"), None)
     assert tier_r is not None, "risk_tier result missing"
     assert tier_r.severity in (SEVERITY_MONITOR, SEVERITY_ALERT), (
@@ -263,7 +263,7 @@ def test_cap_driver_composition_shift():
         )
     })
 
-    results = monitor_cap_driver_drift(ref_df, cur_df)
+    results, skipped = monitor_cap_driver_drift(ref_df, cur_df)
     r = next((x for x in results if x.feature == "combined_top_driver"), None)
     assert r is not None, "combined_top_driver result missing"
     assert r.severity in (SEVERITY_MONITOR, SEVERITY_ALERT), (
@@ -457,3 +457,51 @@ def test_psi_low_cardinality_column():
         f"got {penalty_r.psi:.4f}"
     )
     assert penalty_r.severity == SEVERITY_ALERT
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TEST 13 — Cramér's V: significant chi-sq with tiny effect size → MONITOR
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_composition_cramer_v_small_effect_is_monitor():
+    """Large n + statistically significant chi-sq but V ≈ 0.016 → MONITOR, not ALERT.
+
+    ref: tier_1=12000, tier_2=9000, tier_3=6000, tier_4=3000 (n=30000)
+    cur: tier_1=11700, tier_2=9000, tier_3=6000, tier_4=3300 (n=30000)
+    chi2 ≈ 18.1, p << 0.05 (significant), V ≈ 0.016 (negligible).
+    """
+    ref_df = pd.DataFrame({
+        "risk_tier": (
+            ["tier_1"] * 12000 + ["tier_2"] * 9000 +
+            ["tier_3"] * 6000  + ["tier_4"] * 3000
+        )
+    })
+    cur_df = pd.DataFrame({
+        "risk_tier": (
+            ["tier_1"] * 11700 + ["tier_2"] * 9000 +
+            ["tier_3"] * 6000  + ["tier_4"] * 3300
+        )
+    })
+
+    results, _ = monitor_composition_drift(ref_df, cur_df)
+    tier_r = next((r for r in results if r.feature == "risk_tier"), None)
+    assert tier_r is not None, "risk_tier result missing"
+
+    if _SCIPY_AVAILABLE:
+        # chi-sq should be significant at large n
+        assert tier_r.chi2_significant is True, (
+            "Expected chi-sq significant for this dataset"
+        )
+        assert tier_r.cramers_v is not None, "cramers_v should be populated when scipy available"
+        assert tier_r.cramers_v < 0.10, (
+            f"Expected tiny Cramér's V (< 0.10), got {tier_r.cramers_v:.4f}"
+        )
+        # Small V means MONITOR, not ALERT
+        assert tier_r.severity == SEVERITY_MONITOR, (
+            f"Tiny effect size (V={tier_r.cramers_v:.4f}) should be MONITOR, got {tier_r.severity}"
+        )
+    else:
+        # Without scipy: fallback to fraction-delta; ~1 pp shift → stable or monitor
+        assert tier_r.severity in (SEVERITY_STABLE, SEVERITY_MONITOR), (
+            f"Without scipy, tiny shift should not alert, got {tier_r.severity}"
+        )
