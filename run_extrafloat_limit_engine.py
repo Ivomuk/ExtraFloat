@@ -189,3 +189,54 @@ def summarize_engine_input_coverage(features_df):
         "missing_expected_columns": missing_expected_cols,
         "missing_expected_count": int(len(missing_expected_cols)),
     }
+
+
+def extract_drift_snapshot(result_df):
+    """
+    Lightweight audit snapshot from an engine output DataFrame.
+
+    Returns a flat dict suitable for persisting (log, file, DB) as a
+    reference window to pass to extrafloat_drift_monitor.run_drift_monitor().
+    Does NOT import from extrafloat_drift_monitor — no circular dependency.
+    """
+    def _rate(col):
+        if col not in result_df.columns:
+            return None
+        s = pd.to_numeric(result_df[col], errors="coerce").fillna(0)
+        return float((s > 0).mean())
+
+    def _pct_stats(col):
+        if col not in result_df.columns:
+            return None
+        s = pd.to_numeric(result_df[col], errors="coerce").dropna()
+        if len(s) == 0:
+            return None
+        return {
+            "mean": float(s.mean()),
+            "p25":  float(s.quantile(0.25)),
+            "p50":  float(s.quantile(0.50)),
+            "p75":  float(s.quantile(0.75)),
+            "p95":  float(s.quantile(0.95)),
+        }
+
+    def _cat_dist(col):
+        if col not in result_df.columns:
+            return None
+        return result_df[col].value_counts(normalize=True).to_dict()
+
+    return {
+        "row_count":                          len(result_df),
+        "run_timestamp":                      pd.Timestamp.utcnow().isoformat(),
+        "assigned_limit":                     _pct_stats("assigned_limit"),
+        "risk_score":                         _pct_stats("risk_score"),
+        "risk_tier_distribution":             _cat_dist("risk_tier"),
+        "combined_top_driver_distribution":   _cat_dist("combined_top_driver"),
+        "capacity_top_driver_distribution":   _cat_dist("capacity_top_driver"),
+        "policy_reason_distribution":         _cat_dist("policy_reason"),
+        "regulatory_cap_rate":                _rate("regulatory_cap_applied"),
+        "thin_file_rate":                     _rate("is_thin_file"),
+        "proven_good_rate":                   _rate("is_proven_good_borrower"),
+        "active_floor_applied_rate":          _rate("active_floor_applied"),
+        "fallback_inputs_rate":               _rate("capacity_fallback_inputs"),
+        "missing_inputs_rate":                _rate("capacity_missing_inputs"),
+    }
