@@ -15,9 +15,11 @@ from extrafloat_limit_engine_caps import (
 import numpy as np
 import pandas as pd
 
-REQUIRED_COLUMNS = [
-    "risk_score",
-]
+# compute_risk_cap() derives risk_score internally from component features
+# (on_time_repayment_rate, lifetime_default_rate, etc.), so no columns are
+# strictly required at engine entry. Validation is kept for structural checks
+# if required inputs are added in future.
+REQUIRED_COLUMNS: list = []
 
 OPTIONAL_BUT_EXPECTED_COLUMNS = [
     "avg_balance_30d",

@@ -34,8 +34,6 @@ PEAK_SEASON_MONTHS: frozenset[int] = frozenset({1, 8, 9, 12})
 # Borrowers with total_loans below this value are flagged as thin-file,
 # which shifts the caps engine toward higher risk weighting.
 # ─────────────────────────────────────────────────────────────────────────────
-THIN_FILE_LOAN_THRESHOLD: int = 3
- 
 # ─────────────────────────────────────────────────────────────────────────────
 # STABILITY NORMALISATION
 # stability_proxy (on_time_streak - default_streak) is unbounded.
@@ -786,9 +784,10 @@ def build_extrafloat_limit_engine_features(
     merged["current_loan_size"]             = _col(merged, "latest_disbursed_amount")
     merged["recent_repayment_performance"]  = _col(merged, "recent_repayment_strength")
  
-    # Thin-file flag: fewer than THIN_FILE_LOAN_THRESHOLD lifetime loans
+    # Thin-file flag: read threshold from caps config (single source of truth).
+    _thin_file_threshold = DEFAULT_CAP_CONFIG.get("combination", {}).get("thin_file_threshold", 3)
     merged["is_thin_file"] = (
-        _col(merged, "total_loans") < THIN_FILE_LOAN_THRESHOLD
+        _col(merged, "total_loans") < _thin_file_threshold
     ).astype(int)
  
     merged["is_active_borrower"] = _col(merged, "recent_credit_active_flag").astype(int)
