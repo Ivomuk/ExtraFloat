@@ -31,11 +31,6 @@ PEAK_SEASON_MONTHS: frozenset[int] = frozenset({1, 8, 9, 12})
 # in extrafloat_limit_engine_caps.py — single source of truth for business policy.
 
 # ─────────────────────────────────────────────────────────────────────────────
-# THIN-FILE THRESHOLD
-# Borrowers with total_loans below this value are flagged as thin-file,
-# which shifts the caps engine toward higher risk weighting.
-# ─────────────────────────────────────────────────────────────────────────────
-# ─────────────────────────────────────────────────────────────────────────────
 # STABILITY NORMALISATION
 # stability_proxy (on_time_streak - default_streak) is unbounded.
 # Clip to [0, STABILITY_NORM_UPPER] then divide to produce a [0, 1] score.
@@ -686,6 +681,10 @@ def build_extrafloat_limit_engine_features(
     logger.info("After borrower × transaction merge: %d rows", len(merged))
  
     # ── Merge: result × loan summary on [msisdn, snapshot_dt] ──
+    # Strict exact-date join is intentional: a nearest-date tolerance merge
+    # would silently pull stale loan features without surfacing which snapshot
+    # was used. Misaligned snapshots should be fixed upstream; the warning
+    # below makes unmatched rows visible so operators can act on the root cause.
     merged = merged.merge(loan_df, on=["msisdn", "snapshot_dt"], how="left")
     logger.info("After loan summary merge: %d rows", len(merged))
 
