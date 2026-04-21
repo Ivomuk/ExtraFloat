@@ -10,8 +10,9 @@ Market: Uganda (UG) — Bank of Uganda supervised mobile money.
 """
  
 from __future__ import annotations
- 
+
 import logging
+from typing import Optional
 
 import numpy as np
 import pandas as pd
@@ -208,6 +209,7 @@ def _col(df: pd.DataFrame, name: str, default: float = 0.0) -> pd.Series:
  
 def prepare_borrower_limit_features(
     borrower_limit_df: pd.DataFrame,
+    as_of_date: Optional[pd.Timestamp] = None,
 ) -> pd.DataFrame:
     """
     Clean, validate, and engineer features from borrower credit history.
@@ -332,11 +334,13 @@ def prepare_borrower_limit_features(
     df["borrower_tenure_days"] = (
         (df["latest_loan_ts"] - df["first_loan_ts"]).dt.days.clip(lower=0)
     )
+    _as_of = (
+        pd.Timestamp(as_of_date).normalize()
+        if as_of_date is not None
+        else pd.Timestamp.today().normalize()
+    )
     df["days_since_latest_loan"] = (
-        (
-            pd.Timestamp.today().normalize()
-            - df["latest_loan_ts"].dt.normalize()
-        ).dt.days.clip(lower=0)
+        (_as_of - df["latest_loan_ts"].dt.normalize()).dt.days.clip(lower=0)
     )
  
     # ── Composite features ──
@@ -657,17 +661,20 @@ def build_extrafloat_limit_engine_features(
     borrower_limit_df: pd.DataFrame,
     transaction_capacity_df: pd.DataFrame,
     loan_summary_df: pd.DataFrame,
+    as_of_date: Optional[pd.Timestamp] = None,
 ) -> pd.DataFrame:
     """
     Main feature pipeline.  Prepares, merges, and engineers all features
     required by ``run_extrafloat_limit_engine()``.
  
     Returns one row per unique msisdn with all computed features.
+ 
+    Pass ``as_of_date`` for reproducible backfills; defaults to today.
     """
     logger.info("build_extrafloat_limit_engine_features: starting")
  
     # ── Prepare each source ──
-    borrower_df     = prepare_borrower_limit_features(borrower_limit_df)
+    borrower_df     = prepare_borrower_limit_features(borrower_limit_df, as_of_date=as_of_date)
     transaction_df  = prepare_transaction_capacity_features(transaction_capacity_df)
     loan_df         = prepare_loan_summary_recent_features(loan_summary_df)
  
@@ -681,6 +688,19 @@ def build_extrafloat_limit_engine_features(
     # ── Merge: result × loan summary on [msisdn, snapshot_dt] ──
     merged = merged.merge(loan_df, on=["msisdn", "snapshot_dt"], how="left")
     logger.info("After loan summary merge: %d rows", len(merged))
+
+    # Diagnose unmatched loan rows — exact snapshot_dt match required, so
+    # snapshots off by even one day will silently zero-fill all loan features.
+    _loan_cols = [c for c in loan_df.columns if c not in ("msisdn", "snapshot_dt")]
+    if _loan_cols:
+        _unmatched = int(merged[_loan_cols].isna().all(axis=1).sum())
+        if _unmatched > 0:
+            logger.warning(
+                "build_extrafloat_limit_engine_features: %d/%d rows have no loan "
+                "summary match (all loan features will default to 0). "
+                "Check snapshot_dt alignment — merge requires exact date equality.",
+                _unmatched, len(merged),
+            )
  
     # ── Post-merge deduplication (keeps most recent snapshot per borrower) ──
     n_before = len(merged)
