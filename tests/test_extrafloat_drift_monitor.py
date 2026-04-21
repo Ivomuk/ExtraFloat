@@ -342,7 +342,7 @@ def test_graceful_degradation_without_scipy():
     original = edm._SCIPY_AVAILABLE
     try:
         edm._SCIPY_AVAILABLE = False
-        results = monitor_input_drift(ref_df, cur_df)
+        results, skipped = monitor_input_drift(ref_df, cur_df)
 
         for r in results:
             assert r.psi is not None, f"{r.feature}: PSI must be computed even without scipy"
@@ -397,3 +397,63 @@ def test_full_drift_run_with_engine_output():
     assert same_report.overall_severity == SEVERITY_STABLE, (
         "Identical ref and cur should produce stable overall severity"
     )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TEST 11 — Policy health near-zero baseline: no spurious monitor alert
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_policy_health_near_zero_baseline():
+    """ref_rate = 0.1% and cur_rate = 0.3% is a 200% relative change but
+    both rates are below min_relative_baseline (2%), so the relative check
+    must be suppressed and the result must be stable."""
+    n = 1000
+    # 1 out of 1000 KYC-blocked in ref (0.1%), 3 out of 1000 in cur (0.3%)
+    ref_df = pd.DataFrame({"is_kyc_blocked": [1] * 1  + [0] * 999})
+    cur_df = pd.DataFrame({"is_kyc_blocked": [1] * 3  + [0] * 997})
+
+    results = monitor_policy_health(ref_df, cur_df)
+    kyc_r = next((r for r in results if r.metric == "kyc_block_rate"), None)
+    assert kyc_r is not None, "kyc_block_rate metric missing"
+    assert kyc_r.ref_rate == pytest.approx(0.001, abs=0.001)
+    assert kyc_r.cur_rate == pytest.approx(0.003, abs=0.001)
+    assert kyc_r.severity == SEVERITY_STABLE, (
+        f"Near-zero baseline (ref={kyc_r.ref_rate:.4f}) should suppress "
+        f"relative monitor, got {kyc_r.severity}"
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TEST 12 — PSI on low-cardinality column uses categorical path
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_psi_low_cardinality_column():
+    """A binary flag column with a 40 pp distribution shift should produce
+    a meaningful PSI via the categorical path (not collapse to ~0)."""
+    rng = np.random.default_rng(42)
+    # ref: 90% zeros (rare penalty events); cur: 50% zeros (penalty surge)
+    ref_df = pd.DataFrame({
+        "recent_penalty_events_1m": rng.choice(
+            [0, 1], p=[0.90, 0.10], size=500
+        ).astype(float)
+    })
+    cur_df = pd.DataFrame({
+        "recent_penalty_events_1m": rng.choice(
+            [0, 1], p=[0.50, 0.50], size=500
+        ).astype(float)
+    })
+
+    results, skipped = monitor_input_drift(ref_df, cur_df)
+    penalty_r = next(
+        (r for r in results if r.feature == "recent_penalty_events_1m"), None
+    )
+    assert penalty_r is not None, "recent_penalty_events_1m should be monitored"
+    assert "recent_penalty_events_1m" not in skipped
+
+    # A 40 pp shift on a binary column must produce PSI >> 0.25 (alert)
+    assert penalty_r.psi is not None
+    assert penalty_r.psi > 0.25, (
+        f"40 pp binary shift should give PSI > 0.25 via categorical PSI, "
+        f"got {penalty_r.psi:.4f}"
+    )
+    assert penalty_r.severity == SEVERITY_ALERT

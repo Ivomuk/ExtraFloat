@@ -29,6 +29,11 @@ SEVERITY_STABLE  = "stable"
 SEVERITY_MONITOR = "monitor"
 SEVERITY_ALERT   = "alert"
 
+# Features with fewer unique values than this are routed through categorical
+# PSI (each distinct value = one bin) to prevent quantile-bin collapse from
+# muting real drift on integer counts and binary flags.
+_LOW_CARDINALITY_THRESHOLD = 15
+
 _SEVERITY_RANK: Dict[str, int] = {
     SEVERITY_STABLE: 0,
     SEVERITY_MONITOR: 1,
@@ -78,6 +83,10 @@ DEFAULT_DRIFT_CONFIG: Dict[str, Any] = {
         "active_floor_relative_monitor":      0.20,
         "kyc_block_relative_monitor":         0.20,
         "usage_inactive_relative_monitor":    0.20,
+        # Relative-change checks are suppressed when ref_rate < this floor
+        # to prevent spurious alerts from tiny baselines (e.g. 0.1% → 0.3%
+        # is a 200% relative change but both are operationally negligible).
+        "min_relative_baseline":              0.02,
     },
 
     # ── Cap driver composition ─────────────────────────────────────────────────
@@ -283,6 +292,37 @@ def _compute_psi(
     return float(np.sum((cur_pct - ref_pct) * np.log(cur_pct / ref_pct)))
 
 
+def _compute_psi_categorical(
+    ref: np.ndarray,
+    cur: np.ndarray,
+    epsilon: float = 1e-6,
+) -> float:
+    """PSI for low-cardinality columns: each unique value is its own bin.
+
+    Avoids the quantile-edge collapse that makes standard PSI return ~0
+    for binary flags or small integer counts even when the distribution
+    has clearly shifted.
+    """
+    ref_clean = ref[~np.isnan(ref)]
+    cur_clean = cur[~np.isnan(cur)]
+
+    if len(ref_clean) == 0 or len(cur_clean) == 0:
+        return 0.0
+
+    all_vals = np.unique(np.concatenate([ref_clean, cur_clean]))
+
+    ref_counts = np.array([np.sum(ref_clean == v) for v in all_vals], dtype=float)
+    cur_counts = np.array([np.sum(cur_clean == v) for v in all_vals], dtype=float)
+
+    ref_pct = ref_counts / max(ref_counts.sum(), 1)
+    cur_pct = cur_counts / max(cur_counts.sum(), 1)
+
+    ref_pct = np.clip(ref_pct, epsilon, 1.0)
+    cur_pct = np.clip(cur_pct, epsilon, 1.0)
+
+    return float(np.sum((cur_pct - ref_pct) * np.log(cur_pct / ref_pct)))
+
+
 def _compute_ks(
     ref: np.ndarray,
     cur: np.ndarray,
@@ -407,7 +447,16 @@ def _monitor_single_feature(
     ks_cfg   = cfg["ks"]
     pct_cfg  = cfg["percentile_shift"]
 
-    psi      = _compute_psi(ref_arr, cur_arr, psi_cfg["n_bins"], psi_cfg["epsilon"])
+    ref_clean  = ref_arr[~np.isnan(ref_arr)]
+    n_unique   = len(np.unique(ref_clean)) if len(ref_clean) > 0 else 0
+    if n_unique < _LOW_CARDINALITY_THRESHOLD:
+        logger.debug(
+            "_monitor_single_feature: %s has %d unique values — using categorical PSI",
+            feature, n_unique,
+        )
+        psi = _compute_psi_categorical(ref_arr, cur_arr, psi_cfg["epsilon"])
+    else:
+        psi = _compute_psi(ref_arr, cur_arr, psi_cfg["n_bins"], psi_cfg["epsilon"])
     psi_sev  = _psi_severity(psi, cfg)
 
     ks_stat, ks_pval, ks_sig = _compute_ks(ref_arr, cur_arr, ks_cfg["alpha"])
@@ -446,7 +495,8 @@ def monitor_input_drift(
     ref_df: pd.DataFrame,
     cur_df: pd.DataFrame,
     config: Optional[Dict[str, Any]] = None,
-) -> List[FeatureDriftResult]:
+) -> Tuple[List[FeatureDriftResult], List[str]]:
+    """Returns (results, skipped_feature_names)."""
     cfg      = _get_drift_config(config)
     skipped: List[str] = []
     results: List[FeatureDriftResult] = []
@@ -469,7 +519,7 @@ def monitor_input_drift(
     if skipped:
         logger.warning("monitor_input_drift: skipped absent features: %s", skipped)
 
-    return results
+    return results, skipped
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -508,7 +558,8 @@ def monitor_output_drift(
     ref_df: pd.DataFrame,
     cur_df: pd.DataFrame,
     config: Optional[Dict[str, Any]] = None,
-) -> List[FeatureDriftResult]:
+) -> Tuple[List[FeatureDriftResult], List[str]]:
+    """Returns (results, skipped_feature_names)."""
     cfg      = _get_drift_config(config)
     skipped: List[str] = []
     results: List[FeatureDriftResult] = []
@@ -532,7 +583,7 @@ def monitor_output_drift(
         "monitor_output_drift: features=%d alert=%d monitor=%d skipped=%d",
         len(results), n_alert, n_monitor, len(skipped),
     )
-    return results
+    return results, skipped
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -651,6 +702,7 @@ def _health_result(
     absolute_alert: Optional[float] = None,
     cur_rate_ceiling: Optional[float] = None,
     relative_monitor: Optional[float] = None,
+    min_relative_baseline: float = 0.02,
     threshold_label: float = 0.0,
 ) -> PolicyHealthResult:
     eps = 1e-9
@@ -663,7 +715,13 @@ def _health_result(
         severity = SEVERITY_ALERT
     elif absolute_alert is not None and abs(abs_change) >= absolute_alert:
         severity = SEVERITY_ALERT
-    elif relative_monitor is not None and abs(rel_change) >= relative_monitor:
+    elif (
+        relative_monitor is not None
+        and ref_rate >= min_relative_baseline
+        and abs(rel_change) >= relative_monitor
+    ):
+        # Relative comparison is only meaningful when the baseline is large
+        # enough that a proportional shift is operationally significant.
         severity = SEVERITY_MONITOR
 
     return PolicyHealthResult(
@@ -682,8 +740,9 @@ def monitor_policy_health(
     cur_df: pd.DataFrame,
     config: Optional[Dict[str, Any]] = None,
 ) -> List[PolicyHealthResult]:
-    cfg = _get_drift_config(config)
-    ph  = cfg["policy_health"]
+    cfg      = _get_drift_config(config)
+    ph       = cfg["policy_health"]
+    min_base = ph.get("min_relative_baseline", 0.02)
     results: List[PolicyHealthResult] = []
 
     # 1. Regulatory cap utilisation (absolute ceiling regardless of ref)
@@ -728,6 +787,7 @@ def monitor_policy_health(
         _flag_rate(ref_df, "is_proven_good_borrower"),
         _flag_rate(cur_df, "is_proven_good_borrower"),
         relative_monitor=ph["proven_good_relative_monitor"],
+        min_relative_baseline=min_base,
         threshold_label=ph["proven_good_relative_monitor"],
     ))
 
@@ -737,6 +797,7 @@ def monitor_policy_health(
         _flag_rate(ref_df, "active_floor_applied"),
         _flag_rate(cur_df, "active_floor_applied"),
         relative_monitor=ph["active_floor_relative_monitor"],
+        min_relative_baseline=min_base,
         threshold_label=ph["active_floor_relative_monitor"],
     ))
 
@@ -746,6 +807,7 @@ def monitor_policy_health(
         _flag_rate(ref_df, "is_kyc_blocked"),
         _flag_rate(cur_df, "is_kyc_blocked"),
         relative_monitor=ph["kyc_block_relative_monitor"],
+        min_relative_baseline=min_base,
         threshold_label=ph["kyc_block_relative_monitor"],
     ))
 
@@ -761,6 +823,7 @@ def monitor_policy_health(
         _inactive_rate(ref_df),
         _inactive_rate(cur_df),
         relative_monitor=ph["usage_inactive_relative_monitor"],
+        min_relative_baseline=min_base,
         threshold_label=ph["usage_inactive_relative_monitor"],
     ))
 
@@ -854,31 +917,17 @@ def run_drift_monitor(
         len(ref_df), len(cur_df), _SCIPY_AVAILABLE,
     )
 
-    skipped: List[str] = []
-
-    input_drift: List[FeatureDriftResult] = []
     if monitor_inputs:
-        all_input_feats: List[str] = []
-        for group in cfg["input_features"].values():
-            all_input_feats.extend(group)
-        for feat in all_input_feats:
-            r = _monitor_single_feature(feat, ref_df, cur_df, cfg, skipped)
-            if r is not None:
-                input_drift.append(r)
+        input_drift, input_skipped = monitor_input_drift(ref_df, cur_df, cfg)
+    else:
+        input_drift, input_skipped = [], []
 
-    output_drift: List[FeatureDriftResult] = []
     if monitor_outputs:
-        all_output_feats: List[str] = []
-        for group in cfg["output_features"].values():
-            all_output_feats.extend(group)
-        for feat in all_output_feats:
-            r = _monitor_single_feature(feat, ref_df, cur_df, cfg, skipped)
-            if r is not None:
-                output_drift.append(r)
+        output_drift, output_skipped = monitor_output_drift(ref_df, cur_df, cfg)
+    else:
+        output_drift, output_skipped = [], []
 
-        tier_stats = _mean_limit_by_tier(ref_df, cur_df)
-        if tier_stats:
-            logger.info("run_drift_monitor: mean assigned_limit by tier: %s", tier_stats)
+    skipped = input_skipped + output_skipped
 
     composition_drift = monitor_composition_drift(ref_df, cur_df, cfg)
     policy_health     = monitor_policy_health(ref_df, cur_df, cfg)
