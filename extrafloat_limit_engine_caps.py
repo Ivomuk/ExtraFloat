@@ -250,7 +250,7 @@ def _validate_config(cfg):
     Validate the full cap configuration.
 
     Checks:
-    - Risk-tier score thresholds are strictly increasing.
+    - Risk-tier score thresholds are strictly decreasing (tier_1 > tier_2 > tier_3).
     - Standard combination weights sum to approximately 1.0.
 
     Raises ValueError on any validation failure.
@@ -1516,7 +1516,6 @@ def apply_policy_adjustments(features_df, config=None):
     df["active_floor_applied"] = active_floor_applied.astype(int)
     df["policy_reason"] = policy_reason
     df["policy_cap"] = policy_cap
-    df["final_limit"] = final_cap
 
     return df
 # ─────────────────────────────────────────────────────────────────────────────

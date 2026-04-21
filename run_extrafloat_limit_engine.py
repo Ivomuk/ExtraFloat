@@ -74,13 +74,10 @@ def validate_expected_columns(features_df):
 
 def _final_limit_source_series(df):
     # Check column names in order of preference:
-    # policy_cap  — written by apply_policy_adjustments() (primary)
-    # final_limit — also written by apply_policy_adjustments() (already rounded)
-    # combined_cap — pre-policy fallback
+    # policy_cap   — written by apply_policy_adjustments() (primary path)
+    # combined_cap — pre-policy fallback (e.g. if policy step was skipped)
     if "policy_cap" in df.columns:
         return _safe_series(df, "policy_cap", 0.0)
-    if "final_limit" in df.columns:
-        return _safe_series(df, "final_limit", 0.0)
     if "combined_cap" in df.columns:
         return _safe_series(df, "combined_cap", 0.0)
     return pd.Series(0.0, index=df.index, dtype="float64")

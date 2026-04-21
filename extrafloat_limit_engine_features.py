@@ -723,8 +723,9 @@ def build_extrafloat_limit_engine_features(
     if "agent_profile" in merged.columns:
         merged["agent_profile"] = merged["agent_profile"].fillna("unknown")
     if "agent_tier_ceiling_multiplier" in merged.columns:
+        _tier_default = DEFAULT_CAP_CONFIG.get("agent_tier", {}).get("default_multiplier", 0.05)
         merged["agent_tier_ceiling_multiplier"] = (
-            merged["agent_tier_ceiling_multiplier"].fillna(0.65)
+            merged["agent_tier_ceiling_multiplier"].fillna(_tier_default)
         )
  
     # ── Cross-source composite features ──
