@@ -27,12 +27,12 @@ import pandas as pd
 import pytest
 
 from extrafloat_limit_engine_features import (
-    THIN_FILE_LOAN_THRESHOLD,
     build_extrafloat_limit_engine_features,
     prepare_borrower_limit_features,
     prepare_transaction_capacity_features,
 )
 from extrafloat_limit_engine_caps import (
+    DEFAULT_CAP_CONFIG,
     apply_policy_adjustments,
     combine_caps,
     compute_capacity_cap,
@@ -41,6 +41,8 @@ from extrafloat_limit_engine_caps import (
     compute_risk_cap,
 )
 from run_extrafloat_limit_engine import run_extrafloat_limit_engine
+
+_THIN_FILE_THRESHOLD = DEFAULT_CAP_CONFIG.get("combination", {}).get("thin_file_threshold", 3)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -296,7 +298,7 @@ def test_prepare_borrower_limit_features_all_null_optional():
 def test_prepare_borrower_limit_features_new_to_credit():
     """
     First-time borrower (0 prior loans, all history = 0) processes without error;
-    total_loans < THIN_FILE_LOAN_THRESHOLD, stability_proxy = 0.
+    total_loans < _THIN_FILE_THRESHOLD, stability_proxy = 0.
     """
     row = _borrower_row(
         total_loans=1,
@@ -323,7 +325,7 @@ def test_prepare_borrower_limit_features_new_to_credit():
     r = result.iloc[0]
 
     # Thin-file condition
-    assert r["total_loans"] < THIN_FILE_LOAN_THRESHOLD
+    assert r["total_loans"] < _THIN_FILE_THRESHOLD
 
     # stability_proxy = on_time_streak - default_streak = 0 - 0 = 0
     assert r["stability_proxy"] == pytest.approx(0.0)

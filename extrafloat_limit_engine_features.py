@@ -10,8 +10,9 @@ Market: Uganda (UG) — Bank of Uganda supervised mobile money.
 """
  
 from __future__ import annotations
- 
+
 import logging
+from typing import Optional
 
 import numpy as np
 import pandas as pd
@@ -29,13 +30,6 @@ PEAK_SEASON_MONTHS: frozenset[int] = frozenset({1, 8, 9, 12})
 # Agent tier ceiling multipliers are defined in DEFAULT_CAP_CONFIG["agent_tier"]["tiers"]
 # in extrafloat_limit_engine_caps.py — single source of truth for business policy.
 
-# ─────────────────────────────────────────────────────────────────────────────
-# THIN-FILE THRESHOLD
-# Borrowers with total_loans below this value are flagged as thin-file,
-# which shifts the caps engine toward higher risk weighting.
-# ─────────────────────────────────────────────────────────────────────────────
-THIN_FILE_LOAN_THRESHOLD: int = 3
- 
 # ─────────────────────────────────────────────────────────────────────────────
 # STABILITY NORMALISATION
 # stability_proxy (on_time_streak - default_streak) is unbounded.
@@ -210,6 +204,7 @@ def _col(df: pd.DataFrame, name: str, default: float = 0.0) -> pd.Series:
  
 def prepare_borrower_limit_features(
     borrower_limit_df: pd.DataFrame,
+    as_of_date: Optional[pd.Timestamp] = None,
 ) -> pd.DataFrame:
     """
     Clean, validate, and engineer features from borrower credit history.
@@ -334,11 +329,13 @@ def prepare_borrower_limit_features(
     df["borrower_tenure_days"] = (
         (df["latest_loan_ts"] - df["first_loan_ts"]).dt.days.clip(lower=0)
     )
+    _as_of = (
+        pd.Timestamp(as_of_date).normalize()
+        if as_of_date is not None
+        else pd.Timestamp.today().normalize()
+    )
     df["days_since_latest_loan"] = (
-        (
-            pd.Timestamp.today().normalize()
-            - df["latest_loan_ts"].dt.normalize()
-        ).dt.days.clip(lower=0)
+        (_as_of - df["latest_loan_ts"].dt.normalize()).dt.days.clip(lower=0)
     )
  
     # ── Composite features ──
@@ -659,17 +656,20 @@ def build_extrafloat_limit_engine_features(
     borrower_limit_df: pd.DataFrame,
     transaction_capacity_df: pd.DataFrame,
     loan_summary_df: pd.DataFrame,
+    as_of_date: Optional[pd.Timestamp] = None,
 ) -> pd.DataFrame:
     """
     Main feature pipeline.  Prepares, merges, and engineers all features
     required by ``run_extrafloat_limit_engine()``.
  
     Returns one row per unique msisdn with all computed features.
+ 
+    Pass ``as_of_date`` for reproducible backfills; defaults to today.
     """
     logger.info("build_extrafloat_limit_engine_features: starting")
  
     # ── Prepare each source ──
-    borrower_df     = prepare_borrower_limit_features(borrower_limit_df)
+    borrower_df     = prepare_borrower_limit_features(borrower_limit_df, as_of_date=as_of_date)
     transaction_df  = prepare_transaction_capacity_features(transaction_capacity_df)
     loan_df         = prepare_loan_summary_recent_features(loan_summary_df)
  
@@ -681,8 +681,25 @@ def build_extrafloat_limit_engine_features(
     logger.info("After borrower × transaction merge: %d rows", len(merged))
  
     # ── Merge: result × loan summary on [msisdn, snapshot_dt] ──
+    # Strict exact-date join is intentional: a nearest-date tolerance merge
+    # would silently pull stale loan features without surfacing which snapshot
+    # was used. Misaligned snapshots should be fixed upstream; the warning
+    # below makes unmatched rows visible so operators can act on the root cause.
     merged = merged.merge(loan_df, on=["msisdn", "snapshot_dt"], how="left")
     logger.info("After loan summary merge: %d rows", len(merged))
+
+    # Diagnose unmatched loan rows — exact snapshot_dt match required, so
+    # snapshots off by even one day will silently zero-fill all loan features.
+    _loan_cols = [c for c in loan_df.columns if c not in ("msisdn", "snapshot_dt")]
+    if _loan_cols:
+        _unmatched = int(merged[_loan_cols].isna().all(axis=1).sum())
+        if _unmatched > 0:
+            logger.warning(
+                "build_extrafloat_limit_engine_features: %d/%d rows have no loan "
+                "summary match (all loan features will default to 0). "
+                "Check snapshot_dt alignment — merge requires exact date equality.",
+                _unmatched, len(merged),
+            )
  
     # ── Post-merge deduplication (keeps most recent snapshot per borrower) ──
     n_before = len(merged)
@@ -723,8 +740,9 @@ def build_extrafloat_limit_engine_features(
     if "agent_profile" in merged.columns:
         merged["agent_profile"] = merged["agent_profile"].fillna("unknown")
     if "agent_tier_ceiling_multiplier" in merged.columns:
+        _tier_default = DEFAULT_CAP_CONFIG.get("agent_tier", {}).get("default_multiplier", 0.05)
         merged["agent_tier_ceiling_multiplier"] = (
-            merged["agent_tier_ceiling_multiplier"].fillna(0.65)
+            merged["agent_tier_ceiling_multiplier"].fillna(_tier_default)
         )
  
     # ── Cross-source composite features ──
@@ -785,9 +803,10 @@ def build_extrafloat_limit_engine_features(
     merged["current_loan_size"]             = _col(merged, "latest_disbursed_amount")
     merged["recent_repayment_performance"]  = _col(merged, "recent_repayment_strength")
  
-    # Thin-file flag: fewer than THIN_FILE_LOAN_THRESHOLD lifetime loans
+    # Thin-file flag: read threshold from caps config (single source of truth).
+    _thin_file_threshold = DEFAULT_CAP_CONFIG.get("combination", {}).get("thin_file_threshold", 3)
     merged["is_thin_file"] = (
-        _col(merged, "total_loans") < THIN_FILE_LOAN_THRESHOLD
+        _col(merged, "total_loans") < _thin_file_threshold
     ).astype(int)
  
     merged["is_active_borrower"] = _col(merged, "recent_credit_active_flag").astype(int)
