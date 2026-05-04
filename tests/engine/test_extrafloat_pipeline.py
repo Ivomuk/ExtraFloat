@@ -17,21 +17,16 @@ Covers all 10 requested test scenarios:
   10. End-to-end: features → caps → assigned_limit sensible values
 """
 
-import os
-import sys
-
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-
 import numpy as np
 import pandas as pd
 import pytest
 
-from extrafloat_limit_engine_features import (
+from extrafloat.engine.extrafloat_limit_engine_features import (
     build_extrafloat_limit_engine_features,
     prepare_borrower_limit_features,
     prepare_transaction_capacity_features,
 )
-from extrafloat_limit_engine_caps import (
+from extrafloat.engine.extrafloat_limit_engine_caps import (
     DEFAULT_CAP_CONFIG,
     apply_policy_adjustments,
     combine_caps,
@@ -40,7 +35,7 @@ from extrafloat_limit_engine_caps import (
     compute_recent_usage_cap,
     compute_risk_cap,
 )
-from run_extrafloat_limit_engine import run_extrafloat_limit_engine
+from extrafloat.engine.run_extrafloat_limit_engine import run_extrafloat_limit_engine
 
 _THIN_FILE_THRESHOLD = DEFAULT_CAP_CONFIG.get("combination", {}).get("thin_file_threshold", 3)
 

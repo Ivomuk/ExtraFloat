@@ -17,7 +17,7 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
-from extrafloat_limit_engine_caps import DEFAULT_CAP_CONFIG
+from extrafloat.engine.extrafloat_limit_engine_caps import DEFAULT_CAP_CONFIG
 
 logger = logging.getLogger(__name__)
  

@@ -4,17 +4,12 @@ tests/test_extrafloat_drift_monitor.py
 13 tests for the ExtraFloat drift monitoring module.
 """
 
-import os
-import sys
-
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-
 import numpy as np
 import pandas as pd
 import pytest
 
-import extrafloat_drift_monitor as edm
-from extrafloat_drift_monitor import (
+import extrafloat.monitoring.extrafloat_drift_monitor as edm
+from extrafloat.monitoring.extrafloat_drift_monitor import (
     DEFAULT_DRIFT_CONFIG,
     CompositionDriftResult,
     DriftReport,

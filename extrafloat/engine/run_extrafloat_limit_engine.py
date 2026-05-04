@@ -1,4 +1,4 @@
-from extrafloat_limit_engine_caps import (
+from extrafloat.engine.extrafloat_limit_engine_caps import (
     _get_config,
     _safe_series,
     _clip_series,
