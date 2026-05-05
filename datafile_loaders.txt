@@ -1,0 +1,177 @@
+1. transaction_capacity_features 
+
+
+DATA_PATH = "C:\\Users\\mikiiv.UG\\Documents\\Data\\Agents_PD\\mfs_daily_agent_mart_20251115.csv" # TODO: change this
+DATE_FORMAT = "%Y%m%d" # tbl_dt and activation_dt format 20251116
+OUTPUT_DIR = "Agents_PD"
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+# 3. Load data
+traxn_features= pd.read_csv(DATA_PATH)
+
+
+
+# Fix activation_dt if it has ".0" etc
+if "activation_dt" in traxn_features.columns:
+traxn_features["activation_dt"] = (
+traxn_features["activation_dt"].astype(str).str.split(".").str[0].replace("", pd.NA)
+)
+# Parse dates
+if "tbl_dt" in traxn_features.columns:
+traxn_features["tbl_dt"] = pd.to_datetime(traxn_features["tbl_dt"].astype(str), errors="coerce")
+if "snapshot_dt" in traxn_features.columns:
+traxn_features["snapshot_dt"] = pd.to_datetime(traxn_features["snapshot_dt"].astype(str), errors="coerce")
+if "activation_dt" in traxn_features.columns:
+traxn_features["activation_dt"] = pd.to_datetime(
+traxn_features["activation_dt"].astype(str),
+format=DATE_FORMAT,
+errors="coerce",
+)
+# parse a few potential date columns robustly
+DATE_COLUMNS = ["date_of_birth", "payment_last", "cash_in_last", "cash_out_last"]
+for c in DATE_COLUMNS:
+if c in traxn_features.columns:
+traxn_features[c] = pd.to_datetime(traxn_features[c].astype(str), errors="coerce")
+
+
+transaction_capacity_features = traxn_features.assign(
+msisdn=traxn_features["agent_msisdn"].astype("string"),
+tbl_dt=pd.to_datetime(
+traxn_features["tbl_dt"].astype("string").str.strip(),
+errors="coerce",
+).dt.date,
+average_balance=pd.to_numeric(traxn_features["average_balance"], errors="coerce"),
+revenue_1m=pd.to_numeric(traxn_features["revenue_1m"], errors="coerce"),
+cash_in_value_1m=pd.to_numeric(traxn_features["cash_in_value_1m"], errors="coerce"),
+cash_out_value_1m=pd.to_numeric(traxn_features["cash_out_value_1m"], errors="coerce"),
+payment_value_1m=pd.to_numeric(traxn_features["payment_value_1m"], errors="coerce"),
+cust_1m=pd.to_numeric(traxn_features["cust_1m"], errors="coerce"),
+vol_1m=pd.to_numeric(traxn_features["vol_1m"], errors="coerce"),
+)[[
+"msisdn",
+"tbl_dt",
+"agent_profile",
+"average_balance",
+"revenue_1m",
+"cash_in_value_1m",
+"cash_out_value_1m",
+"payment_value_1m",
+"cust_1m",
+"vol_1m",
+]]
+
+
+2. loan_summary_recent_features
+
+DATA_PATH = "C:\\Users\\mikiiv.UG\\Documents\\Data\\Agents_PD\\snapshots_202601112144.csv" # TODO: change this
+DATE_FORMAT = "%Y%m%d" # tbl_dt and activation_dt format 20251116
+OUTPUT_DIR = "Agents_PD"
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+# 3. Load data
+loan_summary_features = pd.read_csv(DATA_PATH)
+
+def clean_datetime_column(df, col, date_format=None):
+if col in df.columns:
+cleaned_vals = (
+df[col]
+.astype("string")
+.str.strip()
+.str.replace(r"\.\d+$", "", regex=True)
+.replace({"<NA>": pd.NA, "": pd.NA, "None": pd.NA})
+)
+df[col] = pd.to_datetime(cleaned_vals, format=date_format, errors="coerce")
+return df
+
+tl_name = ["last_disbursement_date","last_repayment_date","snapshot_dt","tbl_dt"]
+for col_name in tl_name:
+if col_name in loan_summary_features.columns:
+loan_summary_features = clean_timestamp_column(loan_summary_features, col_name)
+
+
+
+loan_summary_recent_features = (
+loan_summary_features.assign(
+msisdn=loan_summary_features["msisdn"].astype("string"),
+snapshot_dt=pd.to_datetime(
+loan_summary_features["snapshot_dt"]
+.astype("string")
+.str.strip()
+.str.split(".")
+.str[0],
+format="%Y-%m-%d",
+errors="coerce",
+).dt.date,
+last_disbursement_date=pd.to_datetime(
+loan_summary_features["last_disbursement_date"]
+.astype("string")
+.str.strip()
+.str.split(".")
+.str[0],
+format="%Y-%m-%d",
+errors="coerce",
+).dt.date,
+last_repayment_date=pd.to_datetime(
+loan_summary_features["last_repayment_date"]
+.astype("string")
+.str.strip()
+.str.split(".")
+.str[0],
+format="%Y-%m-%d",
+errors="coerce",
+).dt.date,
+disbursement_vol_1m=pd.to_numeric(
+loan_summary_features["disbursement_vol_1m"],
+errors="coerce",
+),
+disbursement_val_1m=pd.to_numeric(
+loan_summary_features["disbursement_val_1m"],
+errors="coerce",
+),
+repayment_vol_1m=pd.to_numeric(
+loan_summary_features["repayment_vol_1m"],
+errors="coerce",
+),
+repayment_val_1m=pd.to_numeric(
+loan_summary_features["repayment_val_1m"],
+errors="coerce",
+),
+penalties_1m=pd.to_numeric(
+loan_summary_features["penalties_1m"],
+errors="coerce",
+),
+)
+.groupby(["msisdn", "snapshot_dt"], as_index=False)
+.agg(
+last_disbursement_date=("last_disbursement_date", "max"),
+last_repayment_date=("last_repayment_date", "max"),
+disbursement_vol_1m=("disbursement_vol_1m", "sum"),
+disbursement_val_1m=("disbursement_val_1m", "sum"),
+repayment_vol_1m=("repayment_vol_1m", "sum"),
+repayment_val_1m=("repayment_val_1m", "sum"),
+penalties_1m=("penalties_1m", "sum"),
+)
+)
+
+3. borrower_limit_features
+
+DATA_PATH = "C:\\Users\\mikiiv.UG\\Documents\\Data\\Agents_PD\\borrower_limit_features_202603262045.csv" # TODO: change this
+DATE_FORMAT = "%Y%m%d" # tbl_dt and activation_dt format 20251116
+OUTPUT_DIR = "Agents_PD"
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+# 3. Load data
+borrower_limit_features = pd.read_csv(DATA_PATH)
+
+ts_cols = ["first_loan_ts", "latest_loan_ts","latest_disbursement_ts"]
+for col_name in ts_cols:
+if col_name in borrower_limit_features.columns:
+borrower_limit_features[col_name] = pd.to_datetime(
+borrower_limit_features[col_name]
+.astype("string")
+.str.replace(r"\.\d+$", "", regex=True),
+format="%Y-%m-%d %H:%M:%S",
+errors="coerce",
+)
+
+borrower_limit_features = borrower_limit_features.rename(
+columns={"phonenumber": "msisdn"}
+)
+borrower_limit_features["msisdn"] = borrower_limit_features["msisdn"].astype("string").str.strip()
