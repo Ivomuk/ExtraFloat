@@ -9,18 +9,11 @@
 -- Self-contained: wraps the entire loan-level query from
 -- data/borrower_credit_limit.txt (UNCHANGED — kept as the base query) as the
 -- `loan_level` CTE, then aggregates it up to the borrower level.
---
--- NOTE: the base query's `milestones` / `checkpoints` CTEs reference a CTE
--- named `cure_progress`, but the CTE that actually exists is
--- `cure_progress_base` (see borrower_credit_limit.txt lines 76, 102, 116).
--- That reference is corrected below (cure_progress -> cure_progress_base) so
--- this query can run; borrower_credit_limit.txt itself is left unchanged.
 -- ============================================================================
 
 WITH loan_level AS (
 
-    -- ── Begin: loan-level query from borrower_credit_limit.txt (unchanged, ──
-    -- ── except for the cure_progress -> cure_progress_base fix noted above) ──
+    -- ── Begin: loan-level query from borrower_credit_limit.txt (unchanged) ──
     WITH base AS (
         SELECT
             transactionid,
@@ -112,6 +105,14 @@ WITH loan_level AS (
             ) AS recovery_count
         FROM cure_events ce
     ),
+    cure_progress AS (
+        SELECT
+            cpb.*,
+            MAX(cumulative_cure) OVER (
+                PARTITION BY requestid, phonenumber
+            ) AS max_cumulative_recovery
+        FROM cure_progress_base cpb
+    ),
     -- EXTENDED MILESTONES
     milestones AS (
         SELECT
@@ -122,7 +123,7 @@ WITH loan_level AS (
             MIN(CASE WHEN cumulative_cure >= disbursed_amount * 0.75 THEN event_ts END) AS ts_75pct,
             MIN(CASE WHEN cumulative_cure >= disbursed_amount THEN event_ts END) AS principal_cure_ts,
             MIN(CASE WHEN cumulative_cure >= disbursed_amount + total_penalty THEN event_ts END) AS full_balance_cure_ts
-        FROM cure_progress_base
+        FROM cure_progress
         GROUP BY requestid, phonenumber
     ),
     -- =========================
@@ -136,7 +137,7 @@ WITH loan_level AS (
             COALESCE(MAX(cumulative_cure) FILTER (WHERE hours_since_disbursement <= 12),0) AS recovery_12h,
             COALESCE(MAX(cumulative_cure) FILTER (WHERE hours_since_disbursement <= 24),0) AS recovery_24h,
             COALESCE(MAX(cumulative_cure) FILTER (WHERE hours_since_disbursement <= 26),0) AS recovery_26h
-        FROM cure_progress_base
+        FROM cure_progress
         GROUP BY requestid, phonenumber
     ),
     -- EXTENDED LOAN FINAL
