@@ -254,7 +254,7 @@ on tf.msisdn = w.msisdn
 and tf.snapshot_dt = w.snapshot_dt
 group by w.msisdn, w.snapshot_dt
 )
-select distinct
+select
 b.*,
 f.Last_disbursement_date,
 f.disbursement_vol_1M,
