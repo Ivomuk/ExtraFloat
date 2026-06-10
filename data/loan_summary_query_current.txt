@@ -80,52 +80,52 @@ max(case
 when tbl_dt > dt_m6 and tbl_dt <= snapshot_dt and tranname = 'XtraFloat Payment'
 then tbl_dt end
 ) as Last_repayment_date,
-count(distinct case
+approx_distinct(case
 when tbl_dt > dt_m1 and tbl_dt <= snapshot_dt and tranname = 'XtraFloat Penalty'
 then telecomid end
 ) as penalties_1M,
-count(distinct case
+approx_distinct(case
 when tbl_dt > dt_m3 and tbl_dt <= snapshot_dt and tranname = 'XtraFloat Penalty'
 then telecomid end
 ) as penalties_3M,
-count(distinct case
+approx_distinct(case
 when tbl_dt > dt_m6 and tbl_dt <= snapshot_dt and tranname = 'XtraFloat Penalty'
 then telecomid end
 ) as penalties_6M,
 
-count(distinct case
+approx_distinct(case
 when tbl_dt > dt_m1 and tbl_dt <= snapshot_dt and tranname = 'XtraFloat Dispatch'
 then telecomid end
 ) as disbursement_vol_1M,
-count(distinct case
+approx_distinct(case
 when tbl_dt > dt_d30 and tbl_dt <= snapshot_dt and tranname = 'XtraFloat Dispatch'
 then telecomid end
 ) as disbursement_vol_M1,
-count(distinct case
+approx_distinct(case
 when tbl_dt > dt_d60 and tbl_dt <= dt_d30 and tranname = 'XtraFloat Dispatch'
 then telecomid end
 ) as disbursement_vol_M2,
-count(distinct case
+approx_distinct(case
 when tbl_dt > dt_d90 and tbl_dt <= dt_d60 and tranname = 'XtraFloat Dispatch'
 then telecomid end
 ) as disbursement_vol_M3,
-count(distinct case
+approx_distinct(case
 when tbl_dt > dt_d120 and tbl_dt <= dt_d90 and tranname = 'XtraFloat Dispatch'
 then telecomid end
 ) as disbursement_vol_M4,
-count(distinct case
+approx_distinct(case
 when tbl_dt > dt_d150 and tbl_dt <= dt_d120 and tranname = 'XtraFloat Dispatch'
 then telecomid end
 ) as disbursement_vol_M5,
-count(distinct case
+approx_distinct(case
 when tbl_dt > dt_d180 and tbl_dt <= dt_d150 and tranname = 'XtraFloat Dispatch'
 then telecomid end
 ) as disbursement_vol_M6,
-count(distinct case
+approx_distinct(case
 when tbl_dt > dt_m3 and tbl_dt <= snapshot_dt and tranname = 'XtraFloat Dispatch'
 then telecomid end
 ) as disbursement_vol_3M,
-count(distinct case
+approx_distinct(case
 when tbl_dt > dt_m6 and tbl_dt <= snapshot_dt and tranname = 'XtraFloat Dispatch'
 then telecomid end
 ) as disbursement_vol_6M,
@@ -165,40 +165,40 @@ coalesce(sum(case
 when tbl_dt > dt_m6 and tbl_dt <= snapshot_dt and tranname = 'XtraFloat Dispatch'
 then try_cast(amount as bigint) end
 ), 0) as disbursement_val_6M,
-count(distinct case
+approx_distinct(case
 when tbl_dt > dt_m1 and tbl_dt <= snapshot_dt and tranname = 'XtraFloat Payment'
 then telecomid end
 ) as repayment_vol_1M,
-count(distinct case
+approx_distinct(case
 when tbl_dt > dt_d30 and tbl_dt <= snapshot_dt and tranname = 'XtraFloat Payment'
 then telecomid end
 ) as Repayment_vol_M1,
 
-count(distinct case
+approx_distinct(case
 when tbl_dt > dt_d60 and tbl_dt <= dt_d30 and tranname = 'XtraFloat Payment'
 then telecomid end
 ) as Repayment_vol_M2,
-count(distinct case
+approx_distinct(case
 when tbl_dt > dt_d90 and tbl_dt <= dt_d60 and tranname = 'XtraFloat Payment'
 then telecomid end
 ) as Repayment_vol_M3,
-count(distinct case
+approx_distinct(case
 when tbl_dt > dt_d120 and tbl_dt <= dt_d90 and tranname = 'XtraFloat Payment'
 then telecomid end
 ) as Repayment_vol_M4,
-count(distinct case
+approx_distinct(case
 when tbl_dt > dt_d150 and tbl_dt <= dt_d120 and tranname = 'XtraFloat Payment'
 then telecomid end
 ) as Repayment_vol_M5,
-count(distinct case
+approx_distinct(case
 when tbl_dt > dt_d180 and tbl_dt <= dt_d150 and tranname = 'XtraFloat Payment'
 then telecomid end
 ) as Repayment_vol_M6,
-count(distinct case
+approx_distinct(case
 when tbl_dt > dt_m3 and tbl_dt <= snapshot_dt and tranname = 'XtraFloat Payment'
 then telecomid end
 ) as repayment_vol_3M,
-count(distinct case
+approx_distinct(case
 when tbl_dt > dt_m6 and tbl_dt <= snapshot_dt and tranname = 'XtraFloat Payment'
 then telecomid end
 ) as repayment_vol_6M,
@@ -246,7 +246,7 @@ labels as (
 select
 w.msisdn as phonenumber,
 w.snapshot_dt,
-count(distinct case
+approx_distinct(case
 when tf.tbl_dt <= w.dt_p30 and tf.tranname = 'XtraFloat Penalty'
 then tf.telecomid end
 ) as future_penalties_30D,
