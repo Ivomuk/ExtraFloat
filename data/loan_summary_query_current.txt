@@ -1,17 +1,13 @@
-WITH base_results AS (
 SELECT *
 from
 (
 with snapshots as (
-select cast(20251231 as bigint) as snapshot_dt, 'train' as split
-union all
-select cast(20260531 as bigint) as snapshot_dt, 'validation' as split
+select cast(20260531 as bigint) as snapshot_dt
 ),
 base as (
 select
 b0.msisdn,
-s.snapshot_dt,
-s.split
+s.snapshot_dt
 from (
 select distinct msisdn
 from devdata.account_holder_dump
@@ -25,7 +21,6 @@ win as (
 select
 b.msisdn,
 b.snapshot_dt,
-b.split,
 try_cast(date_format(date_add('month', -6, date_parse(cast(b.snapshot_dt as varchar), '%Y%m%d')), '%Y%m%d') as bigint) as dt_m6,
 try_cast(date_format(date_add('month', -3, date_parse(cast(b.snapshot_dt as varchar), '%Y%m%d')), '%Y%m%d') as bigint) as dt_m3,
 try_cast(date_format(date_add('month', -1, date_parse(cast(b.snapshot_dt as varchar), '%Y%m%d')), '%Y%m%d') as bigint) as dt_m1,
@@ -34,44 +29,30 @@ try_cast(date_format(date_add('day', -60, date_parse(cast(b.snapshot_dt as varch
 try_cast(date_format(date_add('day', -90, date_parse(cast(b.snapshot_dt as varchar), '%Y%m%d')), '%Y%m%d') as bigint) as dt_d90,
 try_cast(date_format(date_add('day', -120, date_parse(cast(b.snapshot_dt as varchar), '%Y%m%d')), '%Y%m%d') as bigint) as dt_d120,
 try_cast(date_format(date_add('day', -150, date_parse(cast(b.snapshot_dt as varchar), '%Y%m%d')), '%Y%m%d') as bigint) as dt_d150,
-try_cast(date_format(date_add('day', -180, date_parse(cast(b.snapshot_dt as varchar), '%Y%m%d')), '%Y%m%d') as bigint) as dt_d180,
-try_cast(date_format(date_add('day', 30, date_parse(cast(b.snapshot_dt as varchar), '%Y%m%d')), '%Y%m%d') as bigint) as dt_p30
+try_cast(date_format(date_add('day', -180, date_parse(cast(b.snapshot_dt as varchar), '%Y%m%d')), '%Y%m%d') as bigint) as dt_d180
 from base b
 ),
 t_pull as (
 select
 w.msisdn,
 w.snapshot_dt,
-w.split,
 t.tbl_dt,
 t.tranname,
 t.telecomid,
 t.amount,
 w.dt_m6, w.dt_m3, w.dt_m1,
-w.dt_d30, w.dt_d60, w.dt_d90, w.dt_d120, w.dt_d150, w.dt_d180,
-w.dt_p30
+w.dt_d30, w.dt_d60, w.dt_d90, w.dt_d120, w.dt_d150, w.dt_d180
 from win w
 left join devdata.xtrafloat_daily_trans t
 on t.phonenumber = w.msisdn
 and t.tbl_dt > w.dt_d180
-and t.tbl_dt <= w.dt_p30
+and t.tbl_dt <= w.snapshot_dt
 and t.tranname in ('XtraFloat Dispatch', 'XtraFloat Payment', 'XtraFloat Penalty')
-),
-t_hist as (
-select *
-from t_pull
-where tbl_dt <= snapshot_dt
-),
-t_fut as (
-select *
-from t_pull
-where tbl_dt > snapshot_dt
 ),
 features as (
 select
 msisdn as phonenumber,
 snapshot_dt,
-split,
 max(case
 when tbl_dt > dt_m6 and tbl_dt <= snapshot_dt and tranname = 'XtraFloat Dispatch'
 then tbl_dt end
@@ -238,26 +219,10 @@ coalesce(sum(case
 when tbl_dt > dt_m6 and tbl_dt <= snapshot_dt and tranname = 'XtraFloat Payment'
 then -1 * cast(amount as double) end
 ), 0) as repayment_val_6M
-from t_hist
-group by msisdn, snapshot_dt, split
-),
-/* Forward-looking label + observability flag (ONLY from t_fut, but anchored on win) */
-labels as (
-select
-w.msisdn as phonenumber,
-w.snapshot_dt,
-approx_distinct(case
-when tf.tbl_dt <= w.dt_p30 and tf.tranname = 'XtraFloat Penalty'
-then tf.telecomid end
-) as future_penalties_30D,
-case when count(tf.tbl_dt) > 0 then 1 else 0 end as outcome_observed_30D
-from win w
-left join t_fut tf
-on tf.msisdn = w.msisdn
-and tf.snapshot_dt = w.snapshot_dt
-group by w.msisdn, w.snapshot_dt
+from t_pull
+group by msisdn, snapshot_dt
 )
-select distinct
+select
 b.*,
 f.Last_disbursement_date,
 f.disbursement_vol_1M,
@@ -299,18 +264,11 @@ f.Repayment_val_M4,
 f.Repayment_vol_M5,
 f.Repayment_val_M5,
 f.Repayment_vol_M6,
-f.Repayment_val_M6,
-l.future_penalties_30D,
-case when l.future_penalties_30D > 0 then 1 else 0 end as bad_state_30D,
-l.outcome_observed_30D
+f.Repayment_val_M6
 from base b
 left join features f
 on b.msisdn = f.phonenumber
 and b.snapshot_dt = f.snapshot_dt
-left join labels l
-on b.msisdn = l.phonenumber
-and b.snapshot_dt = l.snapshot_dt
-where l.outcome_observed_30D = 1
 ) q
 WHERE
 CARDINALITY(
@@ -358,6 +316,4 @@ Repayment_vol_M6,
 Repayment_val_M6],
 x -> x IS NOT NULL AND x <> 0
 )
-) > 0
-)
-SELECT * FROM base_results WHERE split = 'validation';
+) > 0;
