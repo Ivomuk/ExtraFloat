@@ -1,3 +1,4 @@
+WITH base_results AS (
 SELECT *
 from
 (
@@ -310,7 +311,6 @@ left join labels l
 on b.msisdn = l.phonenumber
 and b.snapshot_dt = l.snapshot_dt
 where l.outcome_observed_30D = 1
-and b.split = 'validation'
 ) q
 WHERE
 CARDINALITY(
@@ -358,4 +358,6 @@ Repayment_vol_M6,
 Repayment_val_M6],
 x -> x IS NOT NULL AND x <> 0
 )
-) > 0;
+) > 0
+)
+SELECT * FROM base_results WHERE split = 'validation';
