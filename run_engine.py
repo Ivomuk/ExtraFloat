@@ -36,8 +36,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger("run_engine")
 
-DEFAULT_TRANSACTION  = "data/transaction_capacity_features_sample.txt"
-DEFAULT_BORROWER     = "data/borrower_credit_limit_expected_final.txt"
+DEFAULT_TRANSACTION  = "data/transaction_capacity.csv"
+DEFAULT_BORROWER     = "data/borrower_history.csv"
 DEFAULT_LOAN_SUMMARY = "data/loan_summary.csv"
 DEFAULT_OUTPUT       = "data/engine_output.csv"
 
