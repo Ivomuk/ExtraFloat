@@ -12,7 +12,7 @@ s.split
 from (
 select distinct msisdn
 from devdata.account_holder_dump
-where tbl_dt = 20251115
+where tbl_dt = (select snapshot_dt from snapshots)
 and account_type = 'MOBILE MONEY'
 and lower(profile) like '%agent%'
 ) b0
