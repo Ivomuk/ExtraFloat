@@ -45,7 +45,7 @@ def _read_csv(path: str | Path) -> pd.DataFrame:
         raise FileNotFoundError(
             f"ExtraFloat data loader: file not found — {p.resolve()}"
         )
-    df = pd.read_csv(p, low_memory=False)
+    df = pd.read_csv(p, sep=None, engine="python")
     logger.info("Loaded %s — %d rows, %d columns", p.name, len(df), len(df.columns))
     return df
 
