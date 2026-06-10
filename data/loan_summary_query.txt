@@ -2,9 +2,7 @@ SELECT *
 from
 (
 with snapshots as (
-select cast(20250930 as bigint) as snapshot_dt, 'train' as split
-union all
-select cast(20251115 as bigint) as snapshot_dt, 'validation' as split
+select cast(20260531 as bigint) as snapshot_dt, 'current' as split
 ),
 base as (
 select

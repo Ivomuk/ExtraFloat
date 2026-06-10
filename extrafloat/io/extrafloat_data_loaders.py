@@ -127,6 +127,7 @@ def load_loan_summary_recent_features(path: str | Path) -> pd.DataFrame:
     ``prepare_loan_summary_recent_features()``.
     """
     df = _read_csv(path)
+    df.columns = df.columns.str.lower()
 
     # ── Date parsing ────────────────────────────────────────────────────────
     df = _parse_dates(
