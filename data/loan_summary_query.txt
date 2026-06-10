@@ -10,11 +10,12 @@ b0.msisdn,
 s.snapshot_dt,
 s.split
 from (
-select distinct msisdn
+select msisdn
 from devdata.account_holder_dump
 where tbl_dt = (select snapshot_dt from snapshots)
 and account_type = 'MOBILE MONEY'
 and lower(profile) like '%agent%'
+group by msisdn
 ) b0
 cross join snapshots s
 ),
@@ -77,55 +78,55 @@ max(case
 when tbl_dt > dt_m6 and tbl_dt <= snapshot_dt and tranname = 'XtraFloat Payment'
 then tbl_dt end
 ) as Last_repayment_date,
-approx_distinct(case
+coalesce(cardinality(approx_set(case
 when tbl_dt > dt_m1 and tbl_dt <= snapshot_dt and tranname = 'XtraFloat Penalty'
 then telecomid end
-) as penalties_1M,
-approx_distinct(case
+)), 0) as penalties_1M,
+coalesce(cardinality(approx_set(case
 when tbl_dt > dt_m3 and tbl_dt <= snapshot_dt and tranname = 'XtraFloat Penalty'
 then telecomid end
-) as penalties_3M,
-approx_distinct(case
+)), 0) as penalties_3M,
+coalesce(cardinality(approx_set(case
 when tbl_dt > dt_m6 and tbl_dt <= snapshot_dt and tranname = 'XtraFloat Penalty'
 then telecomid end
-) as penalties_6M,
+)), 0) as penalties_6M,
 
-approx_distinct(case
+coalesce(cardinality(approx_set(case
 when tbl_dt > dt_m1 and tbl_dt <= snapshot_dt and tranname = 'XtraFloat Dispatch'
 then telecomid end
-) as disbursement_vol_1M,
-approx_distinct(case
+)), 0) as disbursement_vol_1M,
+coalesce(cardinality(approx_set(case
 when tbl_dt > dt_d30 and tbl_dt <= snapshot_dt and tranname = 'XtraFloat Dispatch'
 then telecomid end
-) as disbursement_vol_M1,
-approx_distinct(case
+)), 0) as disbursement_vol_M1,
+coalesce(cardinality(approx_set(case
 when tbl_dt > dt_d60 and tbl_dt <= dt_d30 and tranname = 'XtraFloat Dispatch'
 then telecomid end
-) as disbursement_vol_M2,
-approx_distinct(case
+)), 0) as disbursement_vol_M2,
+coalesce(cardinality(approx_set(case
 when tbl_dt > dt_d90 and tbl_dt <= dt_d60 and tranname = 'XtraFloat Dispatch'
 then telecomid end
-) as disbursement_vol_M3,
-approx_distinct(case
+)), 0) as disbursement_vol_M3,
+coalesce(cardinality(approx_set(case
 when tbl_dt > dt_d120 and tbl_dt <= dt_d90 and tranname = 'XtraFloat Dispatch'
 then telecomid end
-) as disbursement_vol_M4,
-approx_distinct(case
+)), 0) as disbursement_vol_M4,
+coalesce(cardinality(approx_set(case
 when tbl_dt > dt_d150 and tbl_dt <= dt_d120 and tranname = 'XtraFloat Dispatch'
 then telecomid end
-) as disbursement_vol_M5,
-approx_distinct(case
+)), 0) as disbursement_vol_M5,
+coalesce(cardinality(approx_set(case
 when tbl_dt > dt_d180 and tbl_dt <= dt_d150 and tranname = 'XtraFloat Dispatch'
 then telecomid end
-) as disbursement_vol_M6,
-approx_distinct(case
+)), 0) as disbursement_vol_M6,
+coalesce(cardinality(approx_set(case
 when tbl_dt > dt_m3 and tbl_dt <= snapshot_dt and tranname = 'XtraFloat Dispatch'
 then telecomid end
-) as disbursement_vol_3M,
-approx_distinct(case
+)), 0) as disbursement_vol_3M,
+coalesce(cardinality(approx_set(case
 when tbl_dt > dt_m6 and tbl_dt <= snapshot_dt and tranname = 'XtraFloat Dispatch'
 then telecomid end
-) as disbursement_vol_6M,
+)), 0) as disbursement_vol_6M,
 coalesce(sum(case
 when tbl_dt > dt_m1 and tbl_dt <= snapshot_dt and tranname = 'XtraFloat Dispatch'
 then try_cast(amount as bigint) end
@@ -162,43 +163,43 @@ coalesce(sum(case
 when tbl_dt > dt_m6 and tbl_dt <= snapshot_dt and tranname = 'XtraFloat Dispatch'
 then try_cast(amount as bigint) end
 ), 0) as disbursement_val_6M,
-approx_distinct(case
+coalesce(cardinality(approx_set(case
 when tbl_dt > dt_m1 and tbl_dt <= snapshot_dt and tranname = 'XtraFloat Payment'
 then telecomid end
-) as repayment_vol_1M,
-approx_distinct(case
+)), 0) as repayment_vol_1M,
+coalesce(cardinality(approx_set(case
 when tbl_dt > dt_d30 and tbl_dt <= snapshot_dt and tranname = 'XtraFloat Payment'
 then telecomid end
-) as Repayment_vol_M1,
+)), 0) as Repayment_vol_M1,
 
-approx_distinct(case
+coalesce(cardinality(approx_set(case
 when tbl_dt > dt_d60 and tbl_dt <= dt_d30 and tranname = 'XtraFloat Payment'
 then telecomid end
-) as Repayment_vol_M2,
-approx_distinct(case
+)), 0) as Repayment_vol_M2,
+coalesce(cardinality(approx_set(case
 when tbl_dt > dt_d90 and tbl_dt <= dt_d60 and tranname = 'XtraFloat Payment'
 then telecomid end
-) as Repayment_vol_M3,
-approx_distinct(case
+)), 0) as Repayment_vol_M3,
+coalesce(cardinality(approx_set(case
 when tbl_dt > dt_d120 and tbl_dt <= dt_d90 and tranname = 'XtraFloat Payment'
 then telecomid end
-) as Repayment_vol_M4,
-approx_distinct(case
+)), 0) as Repayment_vol_M4,
+coalesce(cardinality(approx_set(case
 when tbl_dt > dt_d150 and tbl_dt <= dt_d120 and tranname = 'XtraFloat Payment'
 then telecomid end
-) as Repayment_vol_M5,
-approx_distinct(case
+)), 0) as Repayment_vol_M5,
+coalesce(cardinality(approx_set(case
 when tbl_dt > dt_d180 and tbl_dt <= dt_d150 and tranname = 'XtraFloat Payment'
 then telecomid end
-) as Repayment_vol_M6,
-approx_distinct(case
+)), 0) as Repayment_vol_M6,
+coalesce(cardinality(approx_set(case
 when tbl_dt > dt_m3 and tbl_dt <= snapshot_dt and tranname = 'XtraFloat Payment'
 then telecomid end
-) as repayment_vol_3M,
-approx_distinct(case
+)), 0) as repayment_vol_3M,
+coalesce(cardinality(approx_set(case
 when tbl_dt > dt_m6 and tbl_dt <= snapshot_dt and tranname = 'XtraFloat Payment'
 then telecomid end
-) as repayment_vol_6M,
+)), 0) as repayment_vol_6M,
 coalesce(sum(case
 when tbl_dt > dt_m1 and tbl_dt <= snapshot_dt and tranname = 'XtraFloat Payment'
 then -1 * cast(amount as double) end
@@ -243,10 +244,10 @@ labels as (
 select
 w.msisdn as phonenumber,
 w.snapshot_dt,
-approx_distinct(case
+coalesce(cardinality(approx_set(case
 when tf.tbl_dt <= w.dt_p30 and tf.tranname = 'XtraFloat Penalty'
 then tf.telecomid end
-) as future_penalties_30D,
+)), 0) as future_penalties_30D,
 case when count(tf.tbl_dt) > 0 then 1 else 0 end as outcome_observed_30D
 from win w
 left join t_fut tf
