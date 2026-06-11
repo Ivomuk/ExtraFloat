@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "extrafloat"
+version = "0.1.0"
+description = "Mobile money extra float credit limit engine — Uganda (BoU supervised)"
+requires-python = ">=3.9"
+dependencies = [
+    "numpy>=1.24",
+    "pandas>=2.0",
+]
+
+[project.optional-dependencies]
+monitor = ["scipy>=1.11"]
+dev     = ["pytest>=8.0"]
+
+[tool.setuptools.packages.find]
+where   = ["."]
+include = ["extrafloat*"]

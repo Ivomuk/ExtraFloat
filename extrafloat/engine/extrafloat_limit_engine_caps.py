@@ -250,7 +250,7 @@ def _validate_config(cfg):
     Validate the full cap configuration.
 
     Checks:
-    - Risk-tier score thresholds are strictly increasing.
+    - Risk-tier score thresholds are strictly decreasing (tier_1 > tier_2 > tier_3).
     - Standard combination weights sum to approximately 1.0.
 
     Raises ValueError on any validation failure.
@@ -467,8 +467,13 @@ def compute_capacity_cap(features_df, config=None):
     # constrained relative to their tier ceiling.
     # ─────────────────────────────────────────────────────────────
 
-    # Use median effective ceiling for log denominator to keep scaling
-    # consistent across rows (avoids per-row log-base variation).
+    # Median effective ceiling is used as the log-scaling denominator so that
+    # all rows share the same log-base, making capacity scores comparable across
+    # agent tiers. The trade-off is mild cross-row coupling: an individual
+    # agent's scaled score depends on the population tier mix in the batch.
+    # Recalibrate if the typical tier distribution shifts materially (e.g.
+    # a surge in diamond agents would raise the median ceiling and compress
+    # scores for lower tiers). A fixed reference ceiling is an alternative.
     ceiling = float(effective_ceiling.median()) if len(effective_ceiling) > 0 else global_ceiling
     if ceiling <= 0.0:
         ceiling = global_ceiling
@@ -626,8 +631,10 @@ def compute_recent_usage_cap(features_df, config=None):
     recent_disbursement_1m_raw = _safe_series(df, "recent_disbursement_amount_1m", 0.0)
     recent_repayment_1m_raw = _safe_series(df, "recent_repayment_amount_1m", 0.0)
 
-    recent_disbursement_3m = _safe_series(df, "recent_disbursement_amount_3m", 0.0)
-    recent_repayment_3m = _safe_series(df, "recent_repayment_amount_3m", 0.0)
+    # 3m values are period totals; divide by 3 to convert to monthly average
+    # before blending so both legs share the same UGX/month scale.
+    recent_disbursement_3m = _safe_series(df, "recent_disbursement_amount_3m", 0.0) / 3.0
+    recent_repayment_3m    = _safe_series(df, "recent_repayment_amount_3m",    0.0) / 3.0
 
     recent_disbursement_amount = (
         0.7 * recent_disbursement_1m_raw
@@ -1516,7 +1523,6 @@ def apply_policy_adjustments(features_df, config=None):
     df["active_floor_applied"] = active_floor_applied.astype(int)
     df["policy_reason"] = policy_reason
     df["policy_cap"] = policy_cap
-    df["final_limit"] = final_cap
 
     return df
 # ─────────────────────────────────────────────────────────────────────────────
