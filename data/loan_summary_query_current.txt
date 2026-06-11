@@ -2,24 +2,24 @@ SELECT *
 from
 (
 with snapshots as (
-select cast(20260531 as bigint) as snapshot_dt
+select cast(20250831 as bigint) as snapshot_dt
 ),
 base as (
 select
-b0.msisdn,
+b0.pos_msisdn,
+b0.agent_msisdn,
 s.snapshot_dt
 from (
-select distinct msisdn
-from devdata.account_holder_dump
-where tbl_dt = 20260531
-and account_type = 'MOBILE MONEY'
-and lower(profile) like '%agent%'
+select pos_msisdn, agent_msisdn
+from analytics.agent_lending_api_v101
+where date_key = 20250731
 ) b0
 cross join snapshots s
 ),
 win as (
 select
-b.msisdn,
+b.pos_msisdn,
+b.agent_msisdn,
 b.snapshot_dt,
 try_cast(date_format(date_add('month', -6, date_parse(cast(b.snapshot_dt as varchar), '%Y%m%d')), '%Y%m%d') as bigint) as dt_m6,
 try_cast(date_format(date_add('month', -3, date_parse(cast(b.snapshot_dt as varchar), '%Y%m%d')), '%Y%m%d') as bigint) as dt_m3,
@@ -34,7 +34,8 @@ from base b
 ),
 t_pull as (
 select
-w.msisdn,
+w.pos_msisdn,
+w.agent_msisdn,
 w.snapshot_dt,
 t.tbl_dt,
 t.tranname,
@@ -44,14 +45,14 @@ w.dt_m6, w.dt_m3, w.dt_m1,
 w.dt_d30, w.dt_d60, w.dt_d90, w.dt_d120, w.dt_d150, w.dt_d180
 from win w
 left join devdata.xtrafloat_daily_trans t
-on t.phonenumber = w.msisdn
+on t.phonenumber = w.agent_msisdn
 and t.tbl_dt > w.dt_d180
 and t.tbl_dt <= w.snapshot_dt
 and t.tranname in ('XtraFloat Dispatch', 'XtraFloat Payment', 'XtraFloat Penalty')
 ),
 features as (
 select
-msisdn as phonenumber,
+agent_msisdn as phonenumber,
 snapshot_dt,
 max(case
 when tbl_dt > dt_m6 and tbl_dt <= snapshot_dt and tranname = 'XtraFloat Dispatch'
@@ -61,52 +62,51 @@ max(case
 when tbl_dt > dt_m6 and tbl_dt <= snapshot_dt and tranname = 'XtraFloat Payment'
 then tbl_dt end
 ) as Last_repayment_date,
-approx_distinct(case
+count(distinct case
 when tbl_dt > dt_m1 and tbl_dt <= snapshot_dt and tranname = 'XtraFloat Penalty'
 then telecomid end
 ) as penalties_1M,
-approx_distinct(case
+count(distinct case
 when tbl_dt > dt_m3 and tbl_dt <= snapshot_dt and tranname = 'XtraFloat Penalty'
 then telecomid end
 ) as penalties_3M,
-approx_distinct(case
+count(distinct case
 when tbl_dt > dt_m6 and tbl_dt <= snapshot_dt and tranname = 'XtraFloat Penalty'
 then telecomid end
 ) as penalties_6M,
-
-approx_distinct(case
+count(distinct case
 when tbl_dt > dt_m1 and tbl_dt <= snapshot_dt and tranname = 'XtraFloat Dispatch'
 then telecomid end
 ) as disbursement_vol_1M,
-approx_distinct(case
+count(distinct case
 when tbl_dt > dt_d30 and tbl_dt <= snapshot_dt and tranname = 'XtraFloat Dispatch'
 then telecomid end
 ) as disbursement_vol_M1,
-approx_distinct(case
+count(distinct case
 when tbl_dt > dt_d60 and tbl_dt <= dt_d30 and tranname = 'XtraFloat Dispatch'
 then telecomid end
 ) as disbursement_vol_M2,
-approx_distinct(case
+count(distinct case
 when tbl_dt > dt_d90 and tbl_dt <= dt_d60 and tranname = 'XtraFloat Dispatch'
 then telecomid end
 ) as disbursement_vol_M3,
-approx_distinct(case
+count(distinct case
 when tbl_dt > dt_d120 and tbl_dt <= dt_d90 and tranname = 'XtraFloat Dispatch'
 then telecomid end
 ) as disbursement_vol_M4,
-approx_distinct(case
+count(distinct case
 when tbl_dt > dt_d150 and tbl_dt <= dt_d120 and tranname = 'XtraFloat Dispatch'
 then telecomid end
 ) as disbursement_vol_M5,
-approx_distinct(case
+count(distinct case
 when tbl_dt > dt_d180 and tbl_dt <= dt_d150 and tranname = 'XtraFloat Dispatch'
 then telecomid end
 ) as disbursement_vol_M6,
-approx_distinct(case
+count(distinct case
 when tbl_dt > dt_m3 and tbl_dt <= snapshot_dt and tranname = 'XtraFloat Dispatch'
 then telecomid end
 ) as disbursement_vol_3M,
-approx_distinct(case
+count(distinct case
 when tbl_dt > dt_m6 and tbl_dt <= snapshot_dt and tranname = 'XtraFloat Dispatch'
 then telecomid end
 ) as disbursement_vol_6M,
@@ -146,40 +146,39 @@ coalesce(sum(case
 when tbl_dt > dt_m6 and tbl_dt <= snapshot_dt and tranname = 'XtraFloat Dispatch'
 then try_cast(amount as bigint) end
 ), 0) as disbursement_val_6M,
-approx_distinct(case
+count(distinct case
 when tbl_dt > dt_m1 and tbl_dt <= snapshot_dt and tranname = 'XtraFloat Payment'
 then telecomid end
 ) as repayment_vol_1M,
-approx_distinct(case
+count(distinct case
 when tbl_dt > dt_d30 and tbl_dt <= snapshot_dt and tranname = 'XtraFloat Payment'
 then telecomid end
 ) as Repayment_vol_M1,
-
-approx_distinct(case
+count(distinct case
 when tbl_dt > dt_d60 and tbl_dt <= dt_d30 and tranname = 'XtraFloat Payment'
 then telecomid end
 ) as Repayment_vol_M2,
-approx_distinct(case
+count(distinct case
 when tbl_dt > dt_d90 and tbl_dt <= dt_d60 and tranname = 'XtraFloat Payment'
 then telecomid end
 ) as Repayment_vol_M3,
-approx_distinct(case
+count(distinct case
 when tbl_dt > dt_d120 and tbl_dt <= dt_d90 and tranname = 'XtraFloat Payment'
 then telecomid end
 ) as Repayment_vol_M4,
-approx_distinct(case
+count(distinct case
 when tbl_dt > dt_d150 and tbl_dt <= dt_d120 and tranname = 'XtraFloat Payment'
 then telecomid end
 ) as Repayment_vol_M5,
-approx_distinct(case
+count(distinct case
 when tbl_dt > dt_d180 and tbl_dt <= dt_d150 and tranname = 'XtraFloat Payment'
 then telecomid end
 ) as Repayment_vol_M6,
-approx_distinct(case
+count(distinct case
 when tbl_dt > dt_m3 and tbl_dt <= snapshot_dt and tranname = 'XtraFloat Payment'
 then telecomid end
 ) as repayment_vol_3M,
-approx_distinct(case
+count(distinct case
 when tbl_dt > dt_m6 and tbl_dt <= snapshot_dt and tranname = 'XtraFloat Payment'
 then telecomid end
 ) as repayment_vol_6M,
@@ -220,10 +219,12 @@ when tbl_dt > dt_m6 and tbl_dt <= snapshot_dt and tranname = 'XtraFloat Payment'
 then -1 * cast(amount as double) end
 ), 0) as repayment_val_6M
 from t_pull
-group by msisdn, snapshot_dt
+group by agent_msisdn, snapshot_dt
 )
 select
-b.*,
+b.agent_msisdn as msisdn,
+b.snapshot_dt,
+b.pos_msisdn,
 f.Last_disbursement_date,
 f.disbursement_vol_1M,
 f.disbursement_val_1M,
@@ -267,7 +268,7 @@ f.Repayment_vol_M6,
 f.Repayment_val_M6
 from base b
 left join features f
-on b.msisdn = f.phonenumber
+on b.agent_msisdn = f.phonenumber
 and b.snapshot_dt = f.snapshot_dt
 ) q
 WHERE
