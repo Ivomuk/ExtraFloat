@@ -42,6 +42,7 @@ import sys
 from pathlib import Path
 
 import joblib
+import numpy as np
 import pandas as pd
 
 from pd_model.config import feature_config

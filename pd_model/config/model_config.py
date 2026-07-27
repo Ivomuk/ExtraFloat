@@ -69,6 +69,7 @@ class ModelConfig:
     # General numerics
     # ------------------------------------------------------------------ #
     eps: float = 1e-6                       # smoothing / division guard
+    random_state: int = 42                  # global seed for splits / bootstrapping
 
     # ------------------------------------------------------------------ #
     # Thin-file policy

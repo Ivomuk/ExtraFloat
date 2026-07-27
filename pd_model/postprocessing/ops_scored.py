@@ -178,7 +178,7 @@ def build_exec_summary(
 def build_bucket_summary(
     ops_scored: pd.DataFrame,
     target_col: str = "bad_state",
-    cal_pd_col: str = "cal_pd_xgb",
+    cal_pd_col: str = feature_config.CAL_PD_COL,
 ) -> pd.DataFrame:
     """
     Group-by final_policy_bucket × thin_file_flag → n, obs_bad_rate, avg_cal_pd.
