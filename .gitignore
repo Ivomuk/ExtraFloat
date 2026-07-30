@@ -4,9 +4,10 @@ __pycache__/
 *.pyd
 .Python
 *.egg-info/
+*.egg
+.eggs/
 dist/
 build/
-.eggs/
 .venv/
 venv/
 .env

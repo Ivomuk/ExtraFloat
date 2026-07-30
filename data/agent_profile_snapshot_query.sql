@@ -180,75 +180,75 @@ features AS (
         snapshot_dt,
 
         -- ── CASH-OUT ──────────────────────────────────────────────────────
-        COALESCE(COUNT(DISTINCT CASE WHEN trantype = 'CASH_OUT' AND tbl_dt > dt_m1 THEN tbl_dt || '-' || cust_msisdn END), 0)  AS cash_out_vol_1m,
-        COALESCE(COUNT(DISTINCT CASE WHEN trantype = 'CASH_OUT' AND tbl_dt > dt_m3 THEN tbl_dt || '-' || cust_msisdn END), 0)  AS cash_out_vol_3m,
-        COALESCE(COUNT(DISTINCT CASE WHEN trantype = 'CASH_OUT'                     THEN tbl_dt || '-' || cust_msisdn END), 0)  AS cash_out_vol_6m,
+        COALESCE(APPROX_DISTINCT(CASE WHEN trantype = 'CASH_OUT' AND tbl_dt > dt_m1 THEN tbl_dt || '-' || cust_msisdn END), 0)  AS cash_out_vol_1m,
+        COALESCE(APPROX_DISTINCT(CASE WHEN trantype = 'CASH_OUT' AND tbl_dt > dt_m3 THEN tbl_dt || '-' || cust_msisdn END), 0)  AS cash_out_vol_3m,
+        COALESCE(APPROX_DISTINCT(CASE WHEN trantype = 'CASH_OUT'                     THEN tbl_dt || '-' || cust_msisdn END), 0)  AS cash_out_vol_6m,
 
         COALESCE(SUM(CASE WHEN trantype = 'CASH_OUT' AND tbl_dt > dt_m1 THEN amount END), 0)   AS cash_out_value_1m,
         COALESCE(SUM(CASE WHEN trantype = 'CASH_OUT' AND tbl_dt > dt_m3 THEN amount END), 0)   AS cash_out_value_3m,
         COALESCE(SUM(CASE WHEN trantype = 'CASH_OUT'                     THEN amount END), 0)   AS cash_out_value_6m,
 
-        COALESCE(COUNT(DISTINCT CASE WHEN trantype = 'CASH_OUT' AND tbl_dt > dt_m1 AND counterparty_msisdn IS NOT NULL THEN counterparty_msisdn END), 0) AS cash_out_peers_1m,
-        COALESCE(COUNT(DISTINCT CASE WHEN trantype = 'CASH_OUT' AND tbl_dt > dt_m3 AND counterparty_msisdn IS NOT NULL THEN counterparty_msisdn END), 0) AS cash_out_peers_3m,
-        COALESCE(COUNT(DISTINCT CASE WHEN trantype = 'CASH_OUT'                     AND counterparty_msisdn IS NOT NULL THEN counterparty_msisdn END), 0) AS cash_out_peers_6m,
+        COALESCE(APPROX_DISTINCT(CASE WHEN trantype = 'CASH_OUT' AND tbl_dt > dt_m1 AND counterparty_msisdn IS NOT NULL THEN counterparty_msisdn END), 0) AS cash_out_peers_1m,
+        COALESCE(APPROX_DISTINCT(CASE WHEN trantype = 'CASH_OUT' AND tbl_dt > dt_m3 AND counterparty_msisdn IS NOT NULL THEN counterparty_msisdn END), 0) AS cash_out_peers_3m,
+        COALESCE(APPROX_DISTINCT(CASE WHEN trantype = 'CASH_OUT'                     AND counterparty_msisdn IS NOT NULL THEN counterparty_msisdn END), 0) AS cash_out_peers_6m,
 
         COALESCE(SUM(CASE WHEN trantype = 'CASH_OUT' AND tbl_dt > dt_m1 THEN comm_amount END), 0) AS cash_out_comm_1m,
         COALESCE(SUM(CASE WHEN trantype = 'CASH_OUT' AND tbl_dt > dt_m3 THEN comm_amount END), 0) AS cash_out_comm_3m,
         COALESCE(SUM(CASE WHEN trantype = 'CASH_OUT'                     THEN comm_amount END), 0) AS cash_out_comm_6m,
 
-        COALESCE(COUNT(DISTINCT CASE WHEN trantype = 'CASH_OUT' AND tbl_dt > dt_m1 THEN cust_msisdn END), 0) AS cash_out_cust_1m,
-        COALESCE(COUNT(DISTINCT CASE WHEN trantype = 'CASH_OUT' AND tbl_dt > dt_m3 THEN cust_msisdn END), 0) AS cash_out_cust_3m,
-        COALESCE(COUNT(DISTINCT CASE WHEN trantype = 'CASH_OUT'                     THEN cust_msisdn END), 0) AS cash_out_cust_6m,
+        COALESCE(APPROX_DISTINCT(CASE WHEN trantype = 'CASH_OUT' AND tbl_dt > dt_m1 THEN cust_msisdn END), 0) AS cash_out_cust_1m,
+        COALESCE(APPROX_DISTINCT(CASE WHEN trantype = 'CASH_OUT' AND tbl_dt > dt_m3 THEN cust_msisdn END), 0) AS cash_out_cust_3m,
+        COALESCE(APPROX_DISTINCT(CASE WHEN trantype = 'CASH_OUT'                     THEN cust_msisdn END), 0) AS cash_out_cust_6m,
 
         -- ── CASH-IN ───────────────────────────────────────────────────────
-        COALESCE(COUNT(DISTINCT CASE WHEN trantype = 'CASH_IN' AND tbl_dt > dt_m1 THEN tbl_dt || '-' || cust_msisdn END), 0)  AS cash_in_vol_1m,
-        COALESCE(COUNT(DISTINCT CASE WHEN trantype = 'CASH_IN' AND tbl_dt > dt_m3 THEN tbl_dt || '-' || cust_msisdn END), 0)  AS cash_in_vol_3m,
-        COALESCE(COUNT(DISTINCT CASE WHEN trantype = 'CASH_IN'                     THEN tbl_dt || '-' || cust_msisdn END), 0)  AS cash_in_vol_6m,
+        COALESCE(APPROX_DISTINCT(CASE WHEN trantype = 'CASH_IN' AND tbl_dt > dt_m1 THEN tbl_dt || '-' || cust_msisdn END), 0)  AS cash_in_vol_1m,
+        COALESCE(APPROX_DISTINCT(CASE WHEN trantype = 'CASH_IN' AND tbl_dt > dt_m3 THEN tbl_dt || '-' || cust_msisdn END), 0)  AS cash_in_vol_3m,
+        COALESCE(APPROX_DISTINCT(CASE WHEN trantype = 'CASH_IN'                     THEN tbl_dt || '-' || cust_msisdn END), 0)  AS cash_in_vol_6m,
 
         COALESCE(SUM(CASE WHEN trantype = 'CASH_IN' AND tbl_dt > dt_m1 THEN amount END), 0)   AS cash_in_value_1m,
         COALESCE(SUM(CASE WHEN trantype = 'CASH_IN' AND tbl_dt > dt_m3 THEN amount END), 0)   AS cash_in_value_3m,
         COALESCE(SUM(CASE WHEN trantype = 'CASH_IN'                     THEN amount END), 0)   AS cash_in_value_6m,
 
-        COALESCE(COUNT(DISTINCT CASE WHEN trantype = 'CASH_IN' AND tbl_dt > dt_m1 AND counterparty_msisdn IS NOT NULL THEN counterparty_msisdn END), 0) AS cash_in_peers_1m,
-        COALESCE(COUNT(DISTINCT CASE WHEN trantype = 'CASH_IN' AND tbl_dt > dt_m3 AND counterparty_msisdn IS NOT NULL THEN counterparty_msisdn END), 0) AS cash_in_peers_3m,
-        COALESCE(COUNT(DISTINCT CASE WHEN trantype = 'CASH_IN'                     AND counterparty_msisdn IS NOT NULL THEN counterparty_msisdn END), 0) AS cash_in_peers_6m,
+        COALESCE(APPROX_DISTINCT(CASE WHEN trantype = 'CASH_IN' AND tbl_dt > dt_m1 AND counterparty_msisdn IS NOT NULL THEN counterparty_msisdn END), 0) AS cash_in_peers_1m,
+        COALESCE(APPROX_DISTINCT(CASE WHEN trantype = 'CASH_IN' AND tbl_dt > dt_m3 AND counterparty_msisdn IS NOT NULL THEN counterparty_msisdn END), 0) AS cash_in_peers_3m,
+        COALESCE(APPROX_DISTINCT(CASE WHEN trantype = 'CASH_IN'                     AND counterparty_msisdn IS NOT NULL THEN counterparty_msisdn END), 0) AS cash_in_peers_6m,
 
         COALESCE(SUM(CASE WHEN trantype = 'CASH_IN' AND tbl_dt > dt_m1 THEN comm_amount END), 0) AS cash_in_comm_1m,
         COALESCE(SUM(CASE WHEN trantype = 'CASH_IN' AND tbl_dt > dt_m3 THEN comm_amount END), 0) AS cash_in_comm_3m,
         COALESCE(SUM(CASE WHEN trantype = 'CASH_IN'                     THEN comm_amount END), 0) AS cash_in_comm_6m,
 
-        COALESCE(COUNT(DISTINCT CASE WHEN trantype = 'CASH_IN' AND tbl_dt > dt_m1 THEN cust_msisdn END), 0) AS cash_in_cust_1m,
-        COALESCE(COUNT(DISTINCT CASE WHEN trantype = 'CASH_IN' AND tbl_dt > dt_m3 THEN cust_msisdn END), 0) AS cash_in_cust_3m,
-        COALESCE(COUNT(DISTINCT CASE WHEN trantype = 'CASH_IN'                     THEN cust_msisdn END), 0) AS cash_in_cust_6m,
+        COALESCE(APPROX_DISTINCT(CASE WHEN trantype = 'CASH_IN' AND tbl_dt > dt_m1 THEN cust_msisdn END), 0) AS cash_in_cust_1m,
+        COALESCE(APPROX_DISTINCT(CASE WHEN trantype = 'CASH_IN' AND tbl_dt > dt_m3 THEN cust_msisdn END), 0) AS cash_in_cust_3m,
+        COALESCE(APPROX_DISTINCT(CASE WHEN trantype = 'CASH_IN'                     THEN cust_msisdn END), 0) AS cash_in_cust_6m,
 
         -- ── PAYMENT ───────────────────────────────────────────────────────
-        COALESCE(COUNT(DISTINCT CASE WHEN trantype = 'PAYMENT' AND tbl_dt > dt_m1 THEN tbl_dt || '-' || cust_msisdn END), 0)  AS payment_vol_1m,
-        COALESCE(COUNT(DISTINCT CASE WHEN trantype = 'PAYMENT' AND tbl_dt > dt_m3 THEN tbl_dt || '-' || cust_msisdn END), 0)  AS payment_vol_3m,
-        COALESCE(COUNT(DISTINCT CASE WHEN trantype = 'PAYMENT'                     THEN tbl_dt || '-' || cust_msisdn END), 0)  AS payment_vol_6m,
+        COALESCE(APPROX_DISTINCT(CASE WHEN trantype = 'PAYMENT' AND tbl_dt > dt_m1 THEN tbl_dt || '-' || cust_msisdn END), 0)  AS payment_vol_1m,
+        COALESCE(APPROX_DISTINCT(CASE WHEN trantype = 'PAYMENT' AND tbl_dt > dt_m3 THEN tbl_dt || '-' || cust_msisdn END), 0)  AS payment_vol_3m,
+        COALESCE(APPROX_DISTINCT(CASE WHEN trantype = 'PAYMENT'                     THEN tbl_dt || '-' || cust_msisdn END), 0)  AS payment_vol_6m,
 
         COALESCE(SUM(CASE WHEN trantype = 'PAYMENT' AND tbl_dt > dt_m1 THEN amount END), 0)   AS payment_value_1m,
         COALESCE(SUM(CASE WHEN trantype = 'PAYMENT' AND tbl_dt > dt_m3 THEN amount END), 0)   AS payment_value_3m,
         COALESCE(SUM(CASE WHEN trantype = 'PAYMENT'                     THEN amount END), 0)   AS payment_value_6m,
 
-        COALESCE(COUNT(DISTINCT CASE WHEN trantype = 'PAYMENT' AND tbl_dt > dt_m1 AND counterparty_msisdn IS NOT NULL THEN counterparty_msisdn END), 0) AS payment_peers_1m,
-        COALESCE(COUNT(DISTINCT CASE WHEN trantype = 'PAYMENT' AND tbl_dt > dt_m3 AND counterparty_msisdn IS NOT NULL THEN counterparty_msisdn END), 0) AS payment_peers_3m,
-        COALESCE(COUNT(DISTINCT CASE WHEN trantype = 'PAYMENT'                     AND counterparty_msisdn IS NOT NULL THEN counterparty_msisdn END), 0) AS payment_peers_6m,
+        COALESCE(APPROX_DISTINCT(CASE WHEN trantype = 'PAYMENT' AND tbl_dt > dt_m1 AND counterparty_msisdn IS NOT NULL THEN counterparty_msisdn END), 0) AS payment_peers_1m,
+        COALESCE(APPROX_DISTINCT(CASE WHEN trantype = 'PAYMENT' AND tbl_dt > dt_m3 AND counterparty_msisdn IS NOT NULL THEN counterparty_msisdn END), 0) AS payment_peers_3m,
+        COALESCE(APPROX_DISTINCT(CASE WHEN trantype = 'PAYMENT'                     AND counterparty_msisdn IS NOT NULL THEN counterparty_msisdn END), 0) AS payment_peers_6m,
 
         COALESCE(SUM(CASE WHEN trantype = 'PAYMENT' AND tbl_dt > dt_m1 THEN comm_amount END), 0) AS payment_comm_1m,
         COALESCE(SUM(CASE WHEN trantype = 'PAYMENT' AND tbl_dt > dt_m3 THEN comm_amount END), 0) AS payment_comm_3m,
         COALESCE(SUM(CASE WHEN trantype = 'PAYMENT'                     THEN comm_amount END), 0) AS payment_comm_6m,
 
-        COALESCE(COUNT(DISTINCT CASE WHEN trantype = 'PAYMENT' AND tbl_dt > dt_m1 THEN cust_msisdn END), 0) AS payment_cust_1m,
-        COALESCE(COUNT(DISTINCT CASE WHEN trantype = 'PAYMENT' AND tbl_dt > dt_m3 THEN cust_msisdn END), 0) AS payment_cust_3m,
-        COALESCE(COUNT(DISTINCT CASE WHEN trantype = 'PAYMENT'                     THEN cust_msisdn END), 0) AS payment_cust_6m,
+        COALESCE(APPROX_DISTINCT(CASE WHEN trantype = 'PAYMENT' AND tbl_dt > dt_m1 THEN cust_msisdn END), 0) AS payment_cust_1m,
+        COALESCE(APPROX_DISTINCT(CASE WHEN trantype = 'PAYMENT' AND tbl_dt > dt_m3 THEN cust_msisdn END), 0) AS payment_cust_3m,
+        COALESCE(APPROX_DISTINCT(CASE WHEN trantype = 'PAYMENT'                     THEN cust_msisdn END), 0) AS payment_cust_6m,
 
         -- ── ALL-TYPE TOTALS ───────────────────────────────────────────────
-        COALESCE(COUNT(DISTINCT CASE WHEN tbl_dt > dt_m1 THEN cust_msisdn END), 0) AS cust_1m,
-        COALESCE(COUNT(DISTINCT CASE WHEN tbl_dt > dt_m3 THEN cust_msisdn END), 0) AS cust_3m,
+        COALESCE(APPROX_DISTINCT(CASE WHEN tbl_dt > dt_m1 THEN cust_msisdn END), 0) AS cust_1m,
+        COALESCE(APPROX_DISTINCT(CASE WHEN tbl_dt > dt_m3 THEN cust_msisdn END), 0) AS cust_3m,
         COALESCE(COUNT(DISTINCT                                cust_msisdn    ), 0) AS cust_6m,
 
-        COALESCE(COUNT(DISTINCT CASE WHEN tbl_dt > dt_m1 THEN tbl_dt || '-' || cust_msisdn END), 0) AS vol_1m,
-        COALESCE(COUNT(DISTINCT CASE WHEN tbl_dt > dt_m3 THEN tbl_dt || '-' || cust_msisdn END), 0) AS vol_3m,
+        COALESCE(APPROX_DISTINCT(CASE WHEN tbl_dt > dt_m1 THEN tbl_dt || '-' || cust_msisdn END), 0) AS vol_1m,
+        COALESCE(APPROX_DISTINCT(CASE WHEN tbl_dt > dt_m3 THEN tbl_dt || '-' || cust_msisdn END), 0) AS vol_3m,
         COALESCE(COUNT(DISTINCT                                tbl_dt || '-' || cust_msisdn    ), 0) AS vol_6m
 
     FROM txn_pull
