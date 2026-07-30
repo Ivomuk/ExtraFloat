@@ -1,0 +1,565 @@
+-- ============================================================================
+-- borrower_credit_limit_aggregated.txt
+-- ============================================================================
+-- Produces the BORROWER-LEVEL dataset expected by
+-- prepare_borrower_limit_features() / load_borrower_limit_features()
+-- (one row per phonenumber), matching the shape of
+-- data/borrower_credit_limit_expected_final.txt.
+--
+-- Self-contained: wraps the entire loan-level query from
+-- data/borrower_credit_limit.txt (UNCHANGED — kept as the base query) as the
+-- `loan_level` CTE, then aggregates it up to the borrower level.
+-- ============================================================================
+
+WITH loan_level AS (
+
+    -- ── Begin: loan-level query from borrower_credit_limit.txt (unchanged) ──
+    WITH base AS (
+        SELECT
+            transactionid,
+            regexp_replace(trim(cast(phonenumber AS varchar)), '[^0-9]', '') AS phonenumber,
+            cast(requestid AS varchar) AS requestid,
+            lower(trim(tranname)) AS tranname,
+            try_cast(original_timestamp_enrich AS timestamp) AS event_ts,
+            cast(amount AS double) AS raw_amount
+        FROM devdata.xtrafloat_daily_trans
+        WHERE try_cast(original_timestamp_enrich AS timestamp) IS NOT NULL
+          AND requestid IS NOT NULL
+          AND phonenumber IS NOT NULL
+    ),
+    dedup AS (
+        SELECT *
+        FROM (
+            SELECT b.*,
+                ROW_NUMBER() OVER (
+                    PARTITION BY transactionid
+                    ORDER BY event_ts DESC
+                ) rn
+            FROM base b
+        )
+        WHERE rn = 1
+    ),
+    classified AS (
+        SELECT
+            d.*,
+            CASE
+                WHEN tranname = 'xtrafloat dispatch' THEN 'disbursement'
+                WHEN tranname IN ('xtrafloat payment','recovery payment') THEN 'recovery'
+                WHEN tranname LIKE '%reimb%' THEN 'reimbursement'
+                WHEN tranname = 'xtrafloat penalty' THEN 'penalty'
+                ELSE 'other'
+            END AS txn_type,
+            abs(raw_amount) AS amount
+        FROM dedup d
+    ),
+    loan_core AS (
+        SELECT
+            requestid,
+            phonenumber,
+            MIN(CASE WHEN txn_type='disbursement' THEN event_ts END) AS disbursement_ts,
+            SUM(CASE WHEN txn_type='disbursement' THEN amount ELSE 0 END) AS disbursed_amount,
+            SUM(CASE WHEN txn_type='recovery' THEN amount ELSE 0 END) AS total_recovered,
+            SUM(CASE WHEN txn_type='reimbursement' THEN amount ELSE 0 END) AS total_reimbursed,
+            SUM(CASE WHEN txn_type='penalty' THEN amount ELSE 0 END) AS total_penalty
+        FROM classified
+        GROUP BY requestid, phonenumber
+    ),
+    recovery_times AS (
+        SELECT
+            requestid,
+            phonenumber,
+            MIN(CASE WHEN txn_type IN ('recovery','reimbursement') THEN event_ts END) AS first_recovery_ts,
+            MAX(CASE WHEN txn_type IN ('recovery','reimbursement') THEN event_ts END) AS last_recovery_ts
+        FROM classified
+        GROUP BY requestid, phonenumber
+    ),
+    cure_events AS (
+        SELECT
+            c.requestid,
+            c.phonenumber,
+            c.event_ts,
+            CASE WHEN c.txn_type IN ('recovery','reimbursement') THEN c.amount ELSE 0 END AS cure_amount,
+            l.disbursement_ts,
+            l.disbursed_amount,
+            l.total_penalty
+        FROM classified c
+        JOIN loan_core l
+            ON c.requestid = l.requestid
+           AND c.phonenumber = l.phonenumber
+        WHERE c.event_ts >= l.disbursement_ts
+    ),
+    -- EXTENDED CURE PROGRESS
+    cure_progress_base AS (
+        SELECT
+            ce.*,
+            SUM(cure_amount) OVER (
+                PARTITION BY requestid, phonenumber
+                ORDER BY event_ts
+            ) AS cumulative_cure,
+            date_diff('second', disbursement_ts, event_ts)/3600.0 AS hours_since_disbursement,
+            COUNT(*) OVER (
+                PARTITION BY requestid, phonenumber
+            ) AS txn_count,
+            SUM(CASE WHEN cure_amount > 0 THEN 1 ELSE 0 END) OVER (
+                PARTITION BY requestid, phonenumber
+            ) AS recovery_count
+        FROM cure_events ce
+    ),
+    cure_progress AS (
+        SELECT
+            cpb.*,
+            MAX(cumulative_cure) OVER (
+                PARTITION BY requestid, phonenumber
+            ) AS max_cumulative_recovery
+        FROM cure_progress_base cpb
+    ),
+    -- EXTENDED MILESTONES
+    milestones AS (
+        SELECT
+            requestid,
+            phonenumber,
+            MAX(cumulative_cure) AS total_cure_cashflow,
+            MIN(CASE WHEN cumulative_cure >= disbursed_amount * 0.5 THEN event_ts END) AS ts_50pct,
+            MIN(CASE WHEN cumulative_cure >= disbursed_amount * 0.75 THEN event_ts END) AS ts_75pct,
+            MIN(CASE WHEN cumulative_cure >= disbursed_amount THEN event_ts END) AS principal_cure_ts,
+            MIN(CASE WHEN cumulative_cure >= disbursed_amount + total_penalty THEN event_ts END) AS full_balance_cure_ts
+        FROM cure_progress
+        GROUP BY requestid, phonenumber
+    ),
+    -- =========================
+    -- EXTENDED CHECKPOINTS
+    -- =========================
+    checkpoints AS (
+        SELECT
+            requestid,
+            phonenumber,
+            COALESCE(MAX(cumulative_cure) FILTER (WHERE hours_since_disbursement <= 6),0) AS recovery_6h,
+            COALESCE(MAX(cumulative_cure) FILTER (WHERE hours_since_disbursement <= 12),0) AS recovery_12h,
+            COALESCE(MAX(cumulative_cure) FILTER (WHERE hours_since_disbursement <= 24),0) AS recovery_24h,
+            COALESCE(MAX(cumulative_cure) FILTER (WHERE hours_since_disbursement <= 26),0) AS recovery_26h
+        FROM cure_progress
+        GROUP BY requestid, phonenumber
+    ),
+    -- EXTENDED LOAN FINAL
+    loan_final AS (
+        SELECT
+            l.requestid,
+            l.phonenumber,
+            l.disbursement_ts,
+            l.disbursed_amount,
+            COALESCE(l.total_recovered,0) AS total_recovered,
+            COALESCE(l.total_reimbursed,0) AS total_reimbursed,
+            COALESCE(l.total_penalty,0) AS total_penalty,
+            COALESCE(l.total_recovered,0) + COALESCE(l.total_reimbursed,0) AS total_cure_cashflow,
+            m.principal_cure_ts,
+            m.full_balance_cure_ts,
+            date_diff('second', l.disbursement_ts, m.principal_cure_ts)/3600.0 AS hours_to_principal_cure,
+            c.recovery_6h,
+            c.recovery_12h,
+            c.recovery_24h,
+            c.recovery_26h,
+            c.recovery_24h / NULLIF(l.disbursed_amount,0) AS pct_recovered_24h,
+            (l.disbursed_amount - c.recovery_24h) AS unpaid_amount_24h,
+            (l.disbursed_amount - c.recovery_24h) / NULLIF(l.disbursed_amount,0) AS pct_unpaid_24h,
+            (l.disbursed_amount - c.recovery_26h) AS unpaid_amount_26h,
+            (l.disbursed_amount - c.recovery_26h) / NULLIF(l.disbursed_amount,0) AS pct_unpaid_26h,
+            CASE WHEN m.principal_cure_ts <= l.disbursement_ts + INTERVAL '24' HOUR THEN 1 ELSE 0 END AS on_time_24h_flag,
+            CASE WHEN m.principal_cure_ts <= l.disbursement_ts + INTERVAL '26' HOUR THEN 1 ELSE 0 END AS on_time_26h_flag,
+            CASE WHEN m.principal_cure_ts IS NULL OR m.principal_cure_ts > l.disbursement_ts + INTERVAL '26' HOUR THEN 1 ELSE 0 END AS default_26h_flag,
+            CASE
+                WHEN total_cure_cashflow = 0 THEN 'no_recovery'
+                WHEN m.principal_cure_ts IS NULL THEN 'partial_only'
+                WHEN m.principal_cure_ts <= l.disbursement_ts + INTERVAL '24' HOUR THEN 'on_time_24h'
+                WHEN m.principal_cure_ts <= l.disbursement_ts + INTERVAL '26' HOUR THEN 'grace_24_26h'
+                ELSE 'late_cured'
+            END AS repayment_bucket,
+            -- NEW FEATURES
+            c.recovery_6h / NULLIF(l.disbursed_amount,0) AS pct_recovered_6h,
+            c.recovery_12h / NULLIF(l.disbursed_amount,0) AS pct_recovered_12h,
+            (l.disbursed_amount - c.recovery_24h) AS remaining_after_24h,
+            (total_cure_cashflow - c.recovery_24h) AS recovery_after_24h,
+            CASE WHEN c.recovery_24h < l.disbursed_amount THEN 1 ELSE 0 END AS default_24h_flag,
+            CASE
+                WHEN m.principal_cure_ts IS NULL
+                  OR m.principal_cure_ts > l.disbursement_ts + INTERVAL '48' HOUR
+                THEN 1 ELSE 0
+            END AS severe_default_48h_flag,
+            CASE WHEN total_cure_cashflow = 0 THEN 1 ELSE 0 END AS zero_recovery_flag,
+            rt.first_recovery_ts,
+            rt.last_recovery_ts,
+            date(rt.first_recovery_ts) AS first_recovery_date,
+            date(rt.last_recovery_ts) AS last_recovery_date,
+            date_diff('day', l.disbursement_ts, rt.last_recovery_ts) AS days_to_last_recovery,
+            date_diff('hour', l.disbursement_ts, rt.first_recovery_ts) AS hours_to_first_recovery,
+            date_diff('hour', l.disbursement_ts, rt.last_recovery_ts) AS hours_to_last_recovery,
+            hour(l.disbursement_ts) AS disbursement_hour,
+            CASE
+                WHEN hour(l.disbursement_ts) BETWEEN 6 AND 11 THEN 'morning'
+                WHEN hour(l.disbursement_ts) BETWEEN 12 AND 17 THEN 'afternoon'
+                WHEN hour(l.disbursement_ts) BETWEEN 18 AND 22 THEN 'evening'
+                ELSE 'night'
+            END AS disbursement_time_bucket,
+            CASE
+                WHEN day_of_week(l.disbursement_ts) IN (6,7) THEN 'weekend'
+                ELSE 'weekday'
+            END AS disbursement_day_type,
+
+            -- OUTSTANDING & STATUS
+
+            (l.disbursed_amount - total_cure_cashflow) AS outstanding_balance,
+            CASE
+                WHEN total_cure_cashflow = 0 THEN 'no_recovery'
+
+                WHEN total_cure_cashflow < l.disbursed_amount THEN 'partial'
+
+                WHEN total_cure_cashflow >= l.disbursed_amount
+                 AND l.total_penalty = 0 THEN 'closed'
+
+                WHEN total_cure_cashflow >= l.disbursed_amount
+                 AND l.total_penalty > 0
+                 AND total_cure_cashflow < l.disbursed_amount + l.total_penalty
+                THEN 'principal_cured_penalty_outstanding'
+
+                WHEN total_cure_cashflow >= l.disbursed_amount + l.total_penalty
+                 AND l.total_penalty > 0
+                THEN 'closed_with_penalty'
+
+                ELSE 'unknown'
+            END AS loan_status
+        FROM loan_core l
+        LEFT JOIN milestones m
+            ON l.requestid = m.requestid
+           AND l.phonenumber = m.phonenumber
+        LEFT JOIN checkpoints c
+            ON l.requestid = c.requestid
+           AND l.phonenumber = c.phonenumber
+        LEFT JOIN recovery_times rt
+            ON l.requestid = rt.requestid
+           AND l.phonenumber = rt.phonenumber
+    ),
+    -- FIXED BORROWER HISTORY
+    borrower_history_base AS (
+        SELECT
+            lf.*,
+            COUNT(*) OVER (
+                PARTITION BY phonenumber
+                ORDER BY disbursement_ts, requestid
+                ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+            ) AS num_prior_loans,
+            AVG(on_time_24h_flag) OVER (
+                PARTITION BY phonenumber
+                ORDER BY disbursement_ts, requestid
+                ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+            ) AS prior_on_time_24h_rate,
+            AVG(hours_to_principal_cure) OVER (
+                PARTITION BY phonenumber
+                ORDER BY disbursement_ts, requestid
+                ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+            ) AS avg_prior_hours_to_cure,
+            MAX(hours_to_principal_cure) OVER (
+                PARTITION BY phonenumber
+                ORDER BY disbursement_ts, requestid
+                ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+            ) AS worst_prior_hours_to_cure,
+            STDDEV(hours_to_principal_cure) OVER (
+                PARTITION BY phonenumber
+                ORDER BY disbursement_ts, requestid
+                ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+            ) AS cure_time_volatility,
+            AVG(on_time_24h_flag) OVER (
+                PARTITION BY phonenumber
+                ORDER BY disbursement_ts, requestid
+                ROWS BETWEEN 3 PRECEDING AND 1 PRECEDING
+            ) AS recent_3_on_time_rate,
+            AVG(hours_to_principal_cure) OVER (
+                PARTITION BY phonenumber
+                ORDER BY disbursement_ts, requestid
+                ROWS BETWEEN 3 PRECEDING AND 1 PRECEDING
+            ) AS recent_3_avg_cure_time,
+            -- NEW DEFAULT RATES
+            -- average default rate across all prior loans only
+            AVG(default_24h_flag) OVER (
+                PARTITION BY phonenumber
+                ORDER BY disbursement_ts, requestid
+                ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+            ) AS lifetime_prior_default_24h_rate,
+            AVG(default_24h_flag) OVER (
+                PARTITION BY phonenumber
+                ORDER BY disbursement_ts, requestid
+                ROWS BETWEEN 5 PRECEDING AND 1 PRECEDING
+            ) AS recent_5_default_24h_rate,
+            -- TREND
+            (
+                AVG(hours_to_principal_cure) OVER (
+                    PARTITION BY phonenumber
+                    ORDER BY disbursement_ts, requestid
+                    ROWS BETWEEN 3 PRECEDING AND 1 PRECEDING
+                )
+                -
+                AVG(hours_to_principal_cure) OVER (
+                    PARTITION BY phonenumber
+                    ORDER BY disbursement_ts, requestid
+                    ROWS BETWEEN 6 PRECEDING AND 4 PRECEDING
+                )
+            ) AS cure_time_trend
+        FROM loan_final lf
+    ),
+    borrower_history AS (
+        SELECT
+            bhb.*,
+            CASE
+                WHEN cure_time_trend IS NULL THEN 'insufficient_history'
+                WHEN cure_time_trend < 0 THEN 'improving'
+                WHEN cure_time_trend > 0 THEN 'deteriorating'
+                ELSE 'stable'
+            END AS borrower_trend
+        FROM borrower_history_base bhb
+    ),
+    borrower_history_final AS (
+        SELECT
+            bh.*,
+            CASE
+                WHEN num_prior_loans = 0 THEN 'no_history'
+                WHEN num_prior_loans < 3 THEN 'thin_file'
+                WHEN cure_time_volatility IS NULL THEN 'insufficient_history'
+                ELSE 'thick_file'
+            END AS borrower_profile_type
+        FROM borrower_history bh
+    ),
+    -- RECENT LOAN WINDOWS + STREAKS (MEMORY SAFE)
+    recent_loan_windows AS (
+        SELECT
+            bhf.*,
+            -- rolling loan count (proxy for 30d)
+            COUNT(*) OVER (
+                PARTITION BY phonenumber
+                ORDER BY disbursement_ts, requestid
+                ROWS BETWEEN 50 PRECEDING AND 1 PRECEDING
+            ) AS loans_last_50_loans,
+            -- rolling defaults
+            COALESCE(
+                SUM(default_24h_flag) OVER (
+                    PARTITION BY phonenumber
+                    ORDER BY disbursement_ts, requestid
+                    ROWS BETWEEN 50 PRECEDING AND 1 PRECEDING
+                ),
+                0
+            ) AS defaults_last_50_loans,
+            -- streak reset groups
+            SUM(CASE WHEN on_time_24h_flag = 0 THEN 1 ELSE 0 END) OVER (
+                PARTITION BY phonenumber
+                ORDER BY disbursement_ts, requestid
+                ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+            ) AS on_time_streak_group,
+            SUM(CASE WHEN default_24h_flag = 0 THEN 1 ELSE 0 END) OVER (
+                PARTITION BY phonenumber
+                ORDER BY disbursement_ts, requestid
+                ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+            ) AS default_streak_group
+        FROM borrower_history_final bhf
+    ),
+    streaks AS (
+        SELECT
+            rlw.*,
+            -- safe default rate
+            CASE
+                WHEN loans_last_50_loans >= 5
+                THEN defaults_last_50_loans * 1.0 / loans_last_50_loans
+                ELSE NULL
+            END AS default_rate_last_50_loans,
+            -- streak counters
+            SUM(CASE WHEN on_time_24h_flag = 1 THEN 1 ELSE 0 END) OVER (
+                PARTITION BY phonenumber, on_time_streak_group
+                ORDER BY disbursement_ts, requestid
+                ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+            ) AS on_time_streak_current,
+            SUM(CASE WHEN default_24h_flag = 1 THEN 1 ELSE 0 END) OVER (
+                PARTITION BY phonenumber, default_streak_group
+                ORDER BY disbursement_ts, requestid
+                ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+            ) AS default_streak_current
+        FROM recent_loan_windows rlw
+    ),
+    streaks_final AS (
+        SELECT
+            s.*,
+            COALESCE(LAG(on_time_streak_current) OVER (
+                PARTITION BY phonenumber
+                ORDER BY disbursement_ts, requestid
+            ), 0) AS prior_on_time_streak,
+            COALESCE(LAG(default_streak_current) OVER (
+                PARTITION BY phonenumber
+                ORDER BY disbursement_ts, requestid
+            ), 0) AS prior_default_streak
+        FROM streaks s
+    ),
+    exposure_features AS (
+        SELECT
+            bh.*,
+            AVG(disbursed_amount) OVER (
+                PARTITION BY phonenumber
+                ORDER BY disbursement_ts, requestid
+                ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+            ) AS avg_prior_loan_size,
+            disbursed_amount / NULLIF(
+                AVG(disbursed_amount) OVER (
+                    PARTITION BY phonenumber
+                    ORDER BY disbursement_ts, requestid
+                    ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+                ),0
+            ) AS loan_size_vs_history_ratio,
+            MAX(disbursed_amount) OVER (
+                PARTITION BY phonenumber
+                ORDER BY disbursement_ts, requestid
+                ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+            ) AS max_prior_loan_size,
+            -- RELATIVE SIZE (kept both, since you had both)
+            disbursed_amount / NULLIF(
+                AVG(disbursed_amount) OVER (
+                    PARTITION BY phonenumber
+                    ORDER BY disbursement_ts, requestid
+                    ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+                ), 0
+            ) AS loan_size_vs_avg_ratio,
+            disbursed_amount / NULLIF(
+                MAX(disbursed_amount) OVER (
+                    PARTITION BY phonenumber
+                    ORDER BY disbursement_ts, requestid
+                    ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+                ), 0
+            ) AS loan_size_vs_max_ratio,
+            -- alternate logic = increase vs prior loan. did limit increase versus last loan?
+            CASE
+                WHEN num_prior_loans = 0 THEN 0
+                WHEN disbursed_amount > MAX(disbursed_amount) OVER (
+                    PARTITION BY phonenumber
+                    ORDER BY disbursement_ts, requestid
+                    ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+                ) THEN 1
+                ELSE 0
+            END AS loan_above_prior_max_flag
+        FROM streaks_final bh
+    )
+    SELECT *
+    FROM exposure_features
+    -- ── End: loan-level query from borrower_credit_limit.txt ──────────────────
+),
+
+-- ============================================================================
+-- Bucket 1 — Lifetime aggregates: one row per phonenumber, computed across
+-- ALL of the borrower's loans via GROUP BY.
+-- ============================================================================
+borrower_lifetime_aggregates AS (
+    SELECT
+        phonenumber,
+        COUNT(*)                                  AS total_loans,
+        MIN(disbursement_ts)                      AS first_loan_ts,
+        MAX(disbursement_ts)                      AS latest_loan_ts,
+        SUM(disbursed_amount)                     AS total_disbursed_amount,
+        AVG(disbursed_amount)                     AS avg_loan_size_lifetime,
+        MAX(disbursed_amount)                     AS max_loan_size_lifetime,
+        AVG(on_time_24h_flag)                     AS lifetime_on_time_24h_rate,
+        AVG(on_time_26h_flag)                     AS lifetime_on_time_26h_rate,
+        AVG(default_24h_flag)                     AS lifetime_default_24h_rate,
+        AVG(default_26h_flag)                     AS lifetime_default_26h_rate,
+        AVG(severe_default_48h_flag)              AS lifetime_severe_default_48h_rate,
+        AVG(zero_recovery_flag)                   AS lifetime_zero_recovery_rate,
+        AVG(hours_to_principal_cure)              AS lifetime_avg_hours_to_principal_cure,
+        MAX(hours_to_principal_cure)              AS lifetime_worst_hours_to_principal_cure,
+        STDDEV(hours_to_principal_cure)           AS lifetime_cure_time_volatility
+    FROM loan_level
+    GROUP BY phonenumber
+),
+
+-- ============================================================================
+-- Bucket 2 — Latest-loan snapshot: the single most recent loan per borrower,
+-- selected the same way prepare_borrower_limit_features() deduplicates
+-- (latest_disbursement_ts desc, latest_requestid desc — see
+-- extrafloat_limit_engine_features.py lines 317-326).
+-- ============================================================================
+latest_loan_snapshot AS (
+    SELECT
+        phonenumber,
+        requestid           AS latest_requestid,
+        disbursement_ts     AS latest_disbursement_ts,
+        disbursed_amount    AS latest_disbursed_amount,
+        num_prior_loans,
+        prior_on_time_24h_rate,
+        avg_prior_hours_to_cure,
+        worst_prior_hours_to_cure,
+        cure_time_volatility,
+        recent_3_on_time_rate,
+        recent_3_avg_cure_time,
+        lifetime_prior_default_24h_rate,
+        recent_5_default_24h_rate,
+        cure_time_trend,
+        borrower_trend,
+        borrower_profile_type,
+        loans_last_50_loans,
+        defaults_last_50_loans,
+        default_rate_last_50_loans,
+        prior_on_time_streak,
+        prior_default_streak,
+        avg_prior_loan_size,
+        max_prior_loan_size,
+        loan_size_vs_avg_ratio,
+        loan_size_vs_max_ratio,
+        loan_above_prior_max_flag,
+        ROW_NUMBER() OVER (
+            PARTITION BY phonenumber
+            ORDER BY disbursement_ts DESC, requestid DESC
+        ) AS rn
+    FROM loan_level
+)
+
+-- ============================================================================
+-- Final projection — borrower-level dataset, 41 columns matching
+-- data/borrower_credit_limit_expected_final.txt (column names and order).
+-- ============================================================================
+SELECT
+    a.phonenumber,
+    a.total_loans,
+    a.first_loan_ts,
+    a.latest_loan_ts,
+    a.total_disbursed_amount,
+    a.avg_loan_size_lifetime,
+    a.max_loan_size_lifetime,
+    a.lifetime_on_time_24h_rate,
+    a.lifetime_on_time_26h_rate,
+    a.lifetime_default_24h_rate,
+    a.lifetime_default_26h_rate,
+    a.lifetime_severe_default_48h_rate,
+    a.lifetime_zero_recovery_rate,
+    a.lifetime_avg_hours_to_principal_cure,
+    a.lifetime_worst_hours_to_principal_cure,
+    a.lifetime_cure_time_volatility,
+    b.latest_requestid,
+    b.latest_disbursement_ts,
+    b.latest_disbursed_amount,
+    b.num_prior_loans,
+    b.prior_on_time_24h_rate,
+    b.avg_prior_hours_to_cure,
+    b.worst_prior_hours_to_cure,
+    b.cure_time_volatility,
+    b.recent_3_on_time_rate,
+    b.recent_3_avg_cure_time,
+    b.lifetime_prior_default_24h_rate,
+    b.recent_5_default_24h_rate,
+    b.cure_time_trend,
+    b.borrower_trend,
+    b.borrower_profile_type,
+    b.loans_last_50_loans,
+    b.defaults_last_50_loans,
+    b.default_rate_last_50_loans,
+    b.prior_on_time_streak,
+    b.prior_default_streak,
+    b.avg_prior_loan_size,
+    b.max_prior_loan_size,
+    b.loan_size_vs_avg_ratio,
+    b.loan_size_vs_max_ratio,
+    b.loan_above_prior_max_flag
+FROM borrower_lifetime_aggregates a
+INNER JOIN (
+    SELECT * FROM latest_loan_snapshot WHERE rn = 1
+) b
+    ON a.phonenumber = b.phonenumber
