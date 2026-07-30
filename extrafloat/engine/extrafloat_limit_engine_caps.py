@@ -307,13 +307,16 @@ def compute_risk_cap(features_df, config=None):
     if "cal_pd" in df.columns and df["cal_pd"].notna().any():
         # PD model pipeline path: use calibrated PD score from the upstream model.
         # cal_pd is probability of default (high = risky); invert so high risk_score = safe.
+        # The experience ramp is NOT applied here — thin-file handling is already
+        # embedded in cal_pd via the scorecard's never_loan_pd_like path.
         risk_score = _clip_series(
             1.0 - _safe_series(df, "cal_pd", 0.5),
             risk_cfg["min_score"],
             risk_cfg["max_score"],
         )
+        risk_cap = risk_score * risk_cfg["base_limit"]
         logger.info(
-            "compute_risk_cap: using cal_pd path — mean_cal_pd=%.4f, mean_risk_score=%.4f",
+            "compute_risk_cap: cal_pd path — mean_cal_pd=%.4f, mean_risk_score=%.4f",
             float(_safe_series(df, "cal_pd", 0.5).mean()),
             float(risk_score.mean()),
         )
@@ -344,17 +347,19 @@ def compute_risk_cap(features_df, config=None):
             + volatility_penalty * risk_cfg["volatility_weight"]
         )
         risk_score = _clip_series(risk_score, risk_cfg["min_score"], risk_cfg["max_score"])
+        risk_cap = risk_score * risk_cfg["base_limit"]
 
-    risk_cap = risk_score * risk_cfg["base_limit"]
+        # Experience ramp: scale down the cap for agents with few loans.
+        # Applied in the fallback path only — the PD model already accounts
+        # for loan history depth via thin-file routing and feature engineering.
+        exp_cfg = cfg["experience"]
+        experience_factor = _clip_series(
+            _safe_series(df, "total_loans") / exp_cfg["minimum_total_loans_for_full_trust"],
+            exp_cfg["min_experience_factor"],
+            1.00,
+        )
+        risk_cap = risk_cap * experience_factor
 
-    exp_cfg = cfg["experience"]
-    experience_factor = _clip_series(
-        _safe_series(df, "total_loans") / exp_cfg["minimum_total_loans_for_full_trust"],
-        exp_cfg["min_experience_factor"],
-        1.00,
-    )
-
-    risk_cap = risk_cap * experience_factor
     risk_cap = _clip_series(risk_cap, cfg["global_floor_limit"], cfg["global_ceiling_limit"])
 
     df["risk_score"] = risk_score

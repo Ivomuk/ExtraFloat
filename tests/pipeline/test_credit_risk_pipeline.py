@@ -10,6 +10,9 @@ are required. They verify:
   4. cal_pd appears in FINAL_OUTPUT_COLUMNS when keep_intermediate=False.
   5. run_credit_risk_pipeline() joins PD output onto engine features and
      produces the expected output columns.
+  6. experience_factor is NOT applied on the cal_pd path (fix 3).
+  7. Preflight check raises a clear error when artifacts are missing (fix 2).
+  8. Preflight check passes silently when all artifacts are present (fix 2).
 """
 
 from __future__ import annotations
@@ -264,6 +267,7 @@ def test_pipeline_produces_required_output_columns(tmp_path):
     })
 
     with (
+        patch("run_credit_risk_pipeline._check_artifacts"),
         patch("run_credit_risk_pipeline.pd.read_csv", return_value=df_agent_profile),
         patch("run_credit_risk_pipeline.load_transaction_capacity_features") as mock_txn,
         patch("run_credit_risk_pipeline.load_loan_summary_recent_features")  as mock_loan,
@@ -309,6 +313,7 @@ def test_pd_model_file_is_separate_from_transaction_file(tmp_path):
         return pd_scored
 
     with (
+        patch("run_credit_risk_pipeline._check_artifacts"),
         patch("run_credit_risk_pipeline.pd.read_csv", return_value=sentinel_agent),
         patch("run_credit_risk_pipeline.load_transaction_capacity_features",
               return_value=sentinel_txn),
@@ -331,3 +336,70 @@ def test_pd_model_file_is_separate_from_transaction_file(tmp_path):
         "run_inference_pipeline must receive the agent profile DataFrame "
         "(pd_model_file), not the transaction capacity DataFrame"
     )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 7. Experience factor NOT applied on the cal_pd path (fix 3)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_experience_factor_not_applied_on_cal_pd_path():
+    """
+    A thin-file agent (total_loans=1) and an experienced agent (total_loans=50)
+    with the same cal_pd must get the same risk_cap on the cal_pd path.
+
+    If the experience_factor were still applied, the thin-file agent would get
+    a lower risk_cap (factor = 1/10 = 0.10 vs 1.00 for experienced agent),
+    double-penalising what the PD model already handled via never_loan_pd_like.
+    """
+    cal_pd = 0.20  # risk_score = 0.80 for both agents
+
+    df_thin = _minimal_features_df(n=1)
+    df_thin["cal_pd"] = cal_pd
+    df_thin["total_loans"] = 1  # thin-file: very few loans
+
+    df_experienced = _minimal_features_df(n=1)
+    df_experienced["cal_pd"] = cal_pd
+    df_experienced["total_loans"] = 50  # experienced borrower
+
+    result_thin       = compute_risk_cap(df_thin)
+    result_experienced = compute_risk_cap(df_experienced)
+
+    np.testing.assert_allclose(
+        result_thin["risk_cap"].values,
+        result_experienced["risk_cap"].values,
+        atol=1e-6,
+        err_msg=(
+            "risk_cap must be identical for thin-file and experienced agents "
+            "when cal_pd is the same — experience_factor must not be applied "
+            "on the cal_pd path"
+        ),
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 8. Preflight artifact check (fix 2)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_preflight_raises_on_missing_artifacts(tmp_path):
+    from run_credit_risk_pipeline import _check_artifacts, _REQUIRED_ARTIFACTS
+
+    # Empty artifacts dir — all files missing
+    with pytest.raises(FileNotFoundError) as exc_info:
+        _check_artifacts(tmp_path)
+
+    msg = str(exc_info.value)
+    # Error must name at least one missing file and show the training command
+    assert any(f in msg for f in _REQUIRED_ARTIFACTS)
+    assert "pd_model.run_pipeline" in msg
+    assert "--output-dir" in msg
+
+
+def test_preflight_passes_when_all_artifacts_present(tmp_path):
+    from run_credit_risk_pipeline import _check_artifacts, _REQUIRED_ARTIFACTS
+
+    # Create all required artifact files (empty is fine — preflight only checks existence)
+    for fname in _REQUIRED_ARTIFACTS:
+        (tmp_path / fname).touch()
+
+    # Should complete without raising
+    _check_artifacts(tmp_path)

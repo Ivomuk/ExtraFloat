@@ -81,6 +81,39 @@ logging.basicConfig(
 )
 logger = logging.getLogger("credit_risk_pipeline")
 
+# Artifact files produced by pd_model.run_pipeline that must exist before scoring.
+_REQUIRED_ARTIFACTS = [
+    "xgb_model.joblib",
+    "lgbm_model.joblib",
+    "feature_order.json",
+    "pd_calibration_map.csv",
+    "xgb_policy_thresholds.csv",
+    "lgb_policy_thresholds.csv",
+    "transform_report.csv",
+]
+
+
+def _check_artifacts(artifacts_dir: Path) -> None:
+    """
+    Raise FileNotFoundError early if any required PD model artifact is missing.
+
+    Called before run_inference_pipeline() so failures surface with a clear
+    message and the exact training command, rather than crashing deep inside
+    load_artifacts() with a generic FileNotFoundError.
+    """
+    missing = [f for f in _REQUIRED_ARTIFACTS if not (artifacts_dir / f).exists()]
+    if missing:
+        raise FileNotFoundError(
+            f"Missing PD model artifacts in {artifacts_dir}:\n"
+            + "  " + ", ".join(missing) + "\n\n"
+            "Train the model first:\n"
+            "  python -m pd_model.run_pipeline \\\n"
+            "      --train-file  <agent_snapshot_train.csv> \\\n"
+            "      --val-file    <agent_snapshot_val.csv> \\\n"
+            f"      --output-dir  {artifacts_dir}\n\n"
+            "Or run:  make train"
+        )
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Pipeline
@@ -152,6 +185,7 @@ def run_credit_risk_pipeline(
     # account_balance, cash_in/out volumes, customer counts, etc.) — the
     # schema the PD model's Phase 2.1 feature engineering expects.
     logger.info("Stage 2: running PD model inference (champion=%s)", champion)
+    _check_artifacts(artifacts_dir)
     pd_scored = run_inference_pipeline(
         df_raw=df_agent,
         artifacts_dir=artifacts_dir,
