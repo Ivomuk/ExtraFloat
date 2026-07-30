@@ -5,27 +5,53 @@ End-to-end CreditRisk pipeline: PD model → credit limit engine.
 
 Pipeline stages
 ---------------
-1. Load raw data (three CSV inputs for the engine).
+1. Load four input files (one for the PD model, three for the engine).
 2. Run the PD model inference pipeline → cal_pd per agent.
-3. Build engine features from the same raw data.
+3. Build engine features from the three engine CSVs.
 4. Join cal_pd onto the engine features DataFrame (on agent_msisdn / msisdn).
 5. Run the credit limit engine → assigned_limit + risk_tier + cal_pd per agent.
 6. Optionally write the result to a CSV.
+
+Input files
+-----------
+The PD model and credit limit engine draw from different source tables and
+require separate input files:
+
+``--pd-model-file``
+    Agent profile snapshot — broad MTN MoMo agent behavioural features:
+    commission, account_balance, cash_in/out volumes, customer counts,
+    activation_dt, date_of_birth, etc.  Fed to PD model Phase 2.1 feature
+    engineering (``run_phase_2_1_richer_tx_behaviour``).
+
+``--transaction-file``
+    XtraFloat transaction capacity aggregations — avg_balance_30d/90d,
+    net_cashflow_30d/90d, txn_count_30d/90d, payments_in_30d/90d, etc.
+    Fed to the engine's capacity cap.
+
+``--loan-file``
+    XtraFloat loan summary — disbursement/repayment volumes and penalty
+    counts over 1m/3m windows.  Fed to the engine's recent usage cap.
+
+``--borrower-file``
+    Borrower credit history — on_time_repayment_rate, lifetime_default_rate,
+    prior loan sizes, lifetime_loan_count.  Fed to the engine's prior
+    exposure cap and risk signal fallback.
 
 Usage
 -----
 ::
 
     python run_credit_risk_pipeline.py \\
+        --pd-model-file     data/agent_profile_snapshot.csv \\
         --transaction-file  data/transaction_capacity.csv \\
         --loan-file         data/loan_summary.csv \\
         --borrower-file     data/borrower_credit.csv \\
         --artifacts-dir     pd_model/artifacts/ \\
         --output            output/credit_risk_output.csv
 
-All --*-file arguments accept either CSV or tab-delimited text files
-(auto-detected by pandas).  --artifacts-dir must contain the trained model
-artifacts produced by ``python -m pd_model.run_pipeline``.
+All --*-file arguments accept CSV or tab-delimited text (auto-detected).
+--artifacts-dir must contain the trained model artifacts produced by
+``python -m pd_model.run_pipeline``.
 """
 
 from __future__ import annotations
@@ -61,6 +87,7 @@ logger = logging.getLogger("credit_risk_pipeline")
 # ─────────────────────────────────────────────────────────────────────────────
 
 def run_credit_risk_pipeline(
+    pd_model_file: str | Path,
     transaction_file: str | Path,
     loan_file: str | Path,
     borrower_file: str | Path,
@@ -75,9 +102,19 @@ def run_credit_risk_pipeline(
 
     Parameters
     ----------
-    transaction_file : path to the agent transaction capacity CSV
-    loan_file        : path to the loan summary CSV
-    borrower_file    : path to the borrower credit history CSV
+    pd_model_file    : agent profile snapshot CSV — broad MTN MoMo behavioural
+                       features (commission, account_balance, cash_in/out,
+                       customer counts, activation_dt, date_of_birth, …).
+                       Fed to PD model Phase 2.1 feature engineering.
+    transaction_file : XtraFloat transaction capacity CSV — avg_balance_30d/90d,
+                       net_cashflow_30d/90d, txn_count_30d/90d, etc.
+                       Fed to the engine capacity cap.
+    loan_file        : XtraFloat loan summary CSV — disbursement/repayment
+                       volumes and penalty counts over 1m/3m windows.
+                       Fed to the engine recent usage cap.
+    borrower_file    : Borrower credit history CSV — on_time_repayment_rate,
+                       lifetime_default_rate, prior loan sizes, etc.
+                       Fed to the engine prior exposure cap.
     artifacts_dir    : directory containing trained PD model artifacts
                        (xgb_model.joblib, lgbm_model.joblib, pd_calibration_map.csv, …)
     repayment_file   : optional repayment history CSV for Phase 2.2 PD features.
@@ -96,9 +133,14 @@ def run_credit_risk_pipeline(
 
     # ── Stage 1: Load raw data ──────────────────────────────────────────────
     logger.info("Stage 1: loading raw data")
+    df_agent    = pd.read_csv(pd_model_file, sep=None, engine="python")
     df_txn      = load_transaction_capacity_features(transaction_file)
     df_loan     = load_loan_summary_recent_features(loan_file)
     df_borrower = load_borrower_limit_features(borrower_file)
+    logger.info(
+        "Loaded — pd_model: %d rows | txn: %d rows | loan: %d rows | borrower: %d rows",
+        len(df_agent), len(df_txn), len(df_loan), len(df_borrower),
+    )
 
     repayment_df = None
     if repayment_file is not None:
@@ -106,14 +148,12 @@ def run_credit_risk_pipeline(
         logger.info("Repayment file loaded: %d rows", len(repayment_df))
 
     # ── Stage 2: PD model scoring ───────────────────────────────────────────
+    # df_agent is the broad MTN MoMo agent profile snapshot (commission,
+    # account_balance, cash_in/out volumes, customer counts, etc.) — the
+    # schema the PD model's Phase 2.1 feature engineering expects.
     logger.info("Stage 2: running PD model inference (champion=%s)", champion)
-    artifacts = load_artifacts(artifacts_dir)
-
-    # run_inference_pipeline expects the raw agent snapshot DataFrame.
-    # Use the transaction file as the primary snapshot — it carries agent_msisdn
-    # and all Phase 2.1 behavioural columns the PD model needs.
     pd_scored = run_inference_pipeline(
-        df_raw=df_txn.copy(),
+        df_raw=df_agent,
         artifacts_dir=artifacts_dir,
         repayment_df=repayment_df,
         champion=champion,
@@ -176,12 +216,20 @@ def _parse_args(argv=None):
         description="CreditRisk pipeline: PD model → credit limit engine",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    p.add_argument("--transaction-file",  required=True, help="Agent transaction capacity CSV")
-    p.add_argument("--loan-file",         required=True, help="Loan summary CSV")
-    p.add_argument("--borrower-file",     required=True, help="Borrower credit history CSV")
-    p.add_argument("--artifacts-dir",     required=True, help="Trained PD model artifacts directory")
-    p.add_argument("--repayment-file",    default=None,  help="Optional repayment history CSV")
-    p.add_argument("--output",            default=None,  help="Output CSV path (omit to print summary only)")
+    p.add_argument("--pd-model-file",     required=True,
+                   help="Agent profile snapshot CSV (broad MTN MoMo behavioural features for PD model)")
+    p.add_argument("--transaction-file",  required=True,
+                   help="XtraFloat transaction capacity CSV (engine capacity cap)")
+    p.add_argument("--loan-file",         required=True,
+                   help="XtraFloat loan summary CSV (engine recent usage cap)")
+    p.add_argument("--borrower-file",     required=True,
+                   help="Borrower credit history CSV (engine prior exposure cap)")
+    p.add_argument("--artifacts-dir",     required=True,
+                   help="Trained PD model artifacts directory")
+    p.add_argument("--repayment-file",    default=None,
+                   help="Optional repayment history CSV for PD model Phase 2.2 features")
+    p.add_argument("--output",            default=None,
+                   help="Output CSV path (omit to print summary only)")
     p.add_argument("--champion",          default="xgb", choices=["xgb", "lgb"])
     p.add_argument("--keep-intermediate", action="store_true",
                    help="Retain all intermediate engine columns in output")
@@ -192,6 +240,7 @@ def main(argv=None):
     args = _parse_args(argv)
 
     result = run_credit_risk_pipeline(
+        pd_model_file=args.pd_model_file,
         transaction_file=args.transaction_file,
         loan_file=args.loan_file,
         borrower_file=args.borrower_file,
