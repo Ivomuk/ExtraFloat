@@ -1,19 +1,19 @@
-from extrafloat.engine.extrafloat_limit_engine_caps import (
-    _get_config,
-    _safe_series,
-    _clip_series,
-    _round_to_nearest,
-    _validate_config,        # was _validate_tier_config — now correctly named
-    compute_capacity_cap,
-    compute_recent_usage_cap,
-    compute_prior_exposure_cap,
-    compute_risk_cap,
-    combine_caps,
-    apply_policy_adjustments,
-)
-
 import numpy as np
 import pandas as pd
+
+from extrafloat.engine.extrafloat_limit_engine_caps import (
+    _clip_series,
+    _get_config,
+    _round_to_nearest,
+    _safe_series,
+    _validate_config,  # was _validate_tier_config — now correctly named
+    apply_policy_adjustments,
+    combine_caps,
+    compute_capacity_cap,
+    compute_prior_exposure_cap,
+    compute_recent_usage_cap,
+    compute_risk_cap,
+)
 
 # compute_risk_cap() derives risk_score internally from component features
 # (on_time_repayment_rate, lifetime_default_rate, etc.), so no columns are
@@ -64,15 +64,11 @@ FINAL_OUTPUT_COLUMNS = [
 def validate_required_columns(features_df):
     missing_cols = [col for col in REQUIRED_COLUMNS if col not in features_df.columns]
     if missing_cols:
-        raise ValueError(
-            "Missing required columns: " + ", ".join(sorted(missing_cols))
-        )
+        raise ValueError("Missing required columns: " + ", ".join(sorted(missing_cols)))
 
 
 def validate_expected_columns(features_df):
-    missing_expected_cols = [
-        col for col in OPTIONAL_BUT_EXPECTED_COLUMNS if col not in features_df.columns
-    ]
+    missing_expected_cols = [col for col in OPTIONAL_BUT_EXPECTED_COLUMNS if col not in features_df.columns]
     return missing_expected_cols
 
 
@@ -164,7 +160,7 @@ def run_extrafloat_limit_engine(
     validate_inputs=True,
 ):
     cfg = _get_config(config)
-    _validate_config(cfg)   # validates tier thresholds + weight sums
+    _validate_config(cfg)  # validates tier thresholds + weight sums
 
     if validate_inputs:
         validate_required_columns(features_df)
@@ -200,6 +196,7 @@ def extract_drift_snapshot(result_df):
     reference window to pass to extrafloat_drift_monitor.run_drift_monitor().
     Does NOT import from extrafloat_drift_monitor — no circular dependency.
     """
+
     def _rate(col):
         if col not in result_df.columns:
             return None
@@ -214,10 +211,10 @@ def extract_drift_snapshot(result_df):
             return None
         return {
             "mean": float(s.mean()),
-            "p25":  float(s.quantile(0.25)),
-            "p50":  float(s.quantile(0.50)),
-            "p75":  float(s.quantile(0.75)),
-            "p95":  float(s.quantile(0.95)),
+            "p25": float(s.quantile(0.25)),
+            "p50": float(s.quantile(0.50)),
+            "p75": float(s.quantile(0.75)),
+            "p95": float(s.quantile(0.95)),
         }
 
     def _cat_dist(col):
@@ -226,18 +223,18 @@ def extract_drift_snapshot(result_df):
         return result_df[col].value_counts(normalize=True).to_dict()
 
     return {
-        "row_count":                          len(result_df),
-        "run_timestamp":                      pd.Timestamp.utcnow().isoformat(),
-        "assigned_limit":                     _pct_stats("assigned_limit"),
-        "risk_score":                         _pct_stats("risk_score"),
-        "risk_tier_distribution":             _cat_dist("risk_tier"),
-        "combined_top_driver_distribution":   _cat_dist("combined_top_driver"),
-        "capacity_top_driver_distribution":   _cat_dist("capacity_top_driver"),
-        "policy_reason_distribution":         _cat_dist("policy_reason"),
-        "regulatory_cap_rate":                _rate("regulatory_cap_applied"),
-        "thin_file_rate":                     _rate("is_thin_file"),
-        "proven_good_rate":                   _rate("is_proven_good_borrower"),
-        "active_floor_applied_rate":          _rate("active_floor_applied"),
-        "fallback_inputs_rate":               _rate("capacity_fallback_inputs"),
-        "missing_inputs_rate":                _rate("capacity_missing_inputs"),
+        "row_count": len(result_df),
+        "run_timestamp": pd.Timestamp.utcnow().isoformat(),
+        "assigned_limit": _pct_stats("assigned_limit"),
+        "risk_score": _pct_stats("risk_score"),
+        "risk_tier_distribution": _cat_dist("risk_tier"),
+        "combined_top_driver_distribution": _cat_dist("combined_top_driver"),
+        "capacity_top_driver_distribution": _cat_dist("capacity_top_driver"),
+        "policy_reason_distribution": _cat_dist("policy_reason"),
+        "regulatory_cap_rate": _rate("regulatory_cap_applied"),
+        "thin_file_rate": _rate("is_thin_file"),
+        "proven_good_rate": _rate("is_proven_good_borrower"),
+        "active_floor_applied_rate": _rate("active_floor_applied"),
+        "fallback_inputs_rate": _rate("capacity_fallback_inputs"),
+        "missing_inputs_rate": _rate("capacity_missing_inputs"),
     }

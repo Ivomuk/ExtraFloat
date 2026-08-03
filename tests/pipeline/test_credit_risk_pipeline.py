@@ -24,7 +24,6 @@ import pandas as pd
 import pytest
 
 from extrafloat.engine.extrafloat_limit_engine_caps import (
-    DEFAULT_CAP_CONFIG,
     _get_config,
     compute_risk_cap,
 )
@@ -33,72 +32,75 @@ from extrafloat.engine.run_extrafloat_limit_engine import (
     run_extrafloat_limit_engine,
 )
 
-
 # ─────────────────────────────────────────────────────────────────────────────
 # Helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def _minimal_features_df(n: int = 5, seed: int = 42) -> pd.DataFrame:
     """Minimal engine-compatible features DataFrame with all optional signals."""
     rng = np.random.default_rng(seed)
-    return pd.DataFrame({
-        "msisdn": [f"256700{i:06d}" for i in range(n)],
-        # Capacity signals
-        "avg_balance_30d":          rng.uniform(5e5, 5e6, n),
-        "avg_balance_90d":          rng.uniform(5e5, 5e6, n),
-        "net_cashflow_30d":         rng.uniform(1e5, 1e6, n),
-        "net_cashflow_90d":         rng.uniform(1e5, 1e6, n),
-        "txn_count_30d":            rng.integers(10, 200, n).astype(float),
-        "txn_count_90d":            rng.integers(30, 600, n).astype(float),
-        "payments_in_30d":          rng.uniform(1e5, 5e5, n),
-        "payments_in_90d":          rng.uniform(3e5, 1.5e6, n),
-        "active_customers_30d":     rng.integers(5, 100, n).astype(float),
-        "active_customers_90d":     rng.integers(15, 300, n).astype(float),
-        "recent_disbursement_volume": rng.uniform(1e5, 1e6, n),
-        "recent_repayment_volume":  rng.uniform(1e5, 1e6, n),
-        "recent_repayment_performance": rng.uniform(0.5, 1.0, n),
-        "recent_penalty_count":     rng.integers(0, 3, n).astype(float),
-        "coverage_ratio":           rng.uniform(0.7, 1.2, n),
-        # Risk signals (used in fallback path)
-        "on_time_repayment_rate":   rng.uniform(0.6, 1.0, n),
-        "lifetime_default_rate":    rng.uniform(0.0, 0.2, n),
-        "default_rate_last_10_loans": rng.uniform(0.0, 0.15, n),
-        "default_rate_last_50_loans": rng.uniform(0.0, 0.15, n),
-        "avg_cure_time_hours":      rng.uniform(0.0, 48.0, n),
-        "cure_time_volatility":     rng.uniform(0.0, 24.0, n),
-        "repayment_stability_score": rng.uniform(0.5, 1.0, n),
-        # Prior exposure
-        "avg_prior_loan_size":      rng.uniform(1e4, 5e5, n),
-        "max_prior_loan_size":      rng.uniform(2e4, 8e5, n),
-        "current_loan_size":        rng.uniform(1e4, 3e5, n),
-        "prior_limit":              rng.uniform(1e4, 5e5, n),
-        # Borrower attributes
-        "is_thin_file":             rng.integers(0, 2, n).astype(float),
-        "is_active_borrower":       rng.integers(0, 2, n).astype(float),
-        "lifetime_loan_count":      rng.integers(1, 30, n).astype(float),
-        "total_loans":              rng.integers(1, 30, n).astype(float),
-        # Agent tier
-        "agent_tier":               rng.choice(["gold", "platinum", "silver"], n),
-    })
+    return pd.DataFrame(
+        {
+            "msisdn": [f"256700{i:06d}" for i in range(n)],
+            # Capacity signals
+            "avg_balance_30d": rng.uniform(5e5, 5e6, n),
+            "avg_balance_90d": rng.uniform(5e5, 5e6, n),
+            "net_cashflow_30d": rng.uniform(1e5, 1e6, n),
+            "net_cashflow_90d": rng.uniform(1e5, 1e6, n),
+            "txn_count_30d": rng.integers(10, 200, n).astype(float),
+            "txn_count_90d": rng.integers(30, 600, n).astype(float),
+            "payments_in_30d": rng.uniform(1e5, 5e5, n),
+            "payments_in_90d": rng.uniform(3e5, 1.5e6, n),
+            "active_customers_30d": rng.integers(5, 100, n).astype(float),
+            "active_customers_90d": rng.integers(15, 300, n).astype(float),
+            "recent_disbursement_volume": rng.uniform(1e5, 1e6, n),
+            "recent_repayment_volume": rng.uniform(1e5, 1e6, n),
+            "recent_repayment_performance": rng.uniform(0.5, 1.0, n),
+            "recent_penalty_count": rng.integers(0, 3, n).astype(float),
+            "coverage_ratio": rng.uniform(0.7, 1.2, n),
+            # Risk signals (used in fallback path)
+            "on_time_repayment_rate": rng.uniform(0.6, 1.0, n),
+            "lifetime_default_rate": rng.uniform(0.0, 0.2, n),
+            "default_rate_last_10_loans": rng.uniform(0.0, 0.15, n),
+            "default_rate_last_50_loans": rng.uniform(0.0, 0.15, n),
+            "avg_cure_time_hours": rng.uniform(0.0, 48.0, n),
+            "cure_time_volatility": rng.uniform(0.0, 24.0, n),
+            "repayment_stability_score": rng.uniform(0.5, 1.0, n),
+            # Prior exposure
+            "avg_prior_loan_size": rng.uniform(1e4, 5e5, n),
+            "max_prior_loan_size": rng.uniform(2e4, 8e5, n),
+            "current_loan_size": rng.uniform(1e4, 3e5, n),
+            "prior_limit": rng.uniform(1e4, 5e5, n),
+            # Borrower attributes
+            "is_thin_file": rng.integers(0, 2, n).astype(float),
+            "is_active_borrower": rng.integers(0, 2, n).astype(float),
+            "lifetime_loan_count": rng.integers(1, 30, n).astype(float),
+            "total_loans": rng.integers(1, 30, n).astype(float),
+            # Agent tier
+            "agent_tier": rng.choice(["gold", "platinum", "silver"], n),
+        }
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 1. compute_risk_cap — cal_pd short-circuit path
 # ─────────────────────────────────────────────────────────────────────────────
 
-class TestComputeRiskCapCalPdPath:
 
+class TestComputeRiskCapCalPdPath:
     def test_risk_score_equals_one_minus_cal_pd(self):
         df = _minimal_features_df(n=10)
-        cal_pd_values = np.array([0.05, 0.10, 0.20, 0.30, 0.40,
-                                  0.50, 0.60, 0.70, 0.80, 0.90])
+        cal_pd_values = np.array([0.05, 0.10, 0.20, 0.30, 0.40, 0.50, 0.60, 0.70, 0.80, 0.90])
         df["cal_pd"] = cal_pd_values
 
         result = compute_risk_cap(df)
 
         expected = np.clip(1.0 - cal_pd_values, 0.0, 1.0)
         np.testing.assert_allclose(
-            result["risk_score"].values, expected, atol=1e-9,
+            result["risk_score"].values,
+            expected,
+            atol=1e-9,
             err_msg="risk_score should equal 1 - cal_pd when cal_pd is present",
         )
 
@@ -133,8 +135,8 @@ class TestComputeRiskCapCalPdPath:
 # 2. compute_risk_cap — 7-signal fallback path
 # ─────────────────────────────────────────────────────────────────────────────
 
-class TestComputeRiskCapFallback:
 
+class TestComputeRiskCapFallback:
     def test_fallback_used_when_cal_pd_absent(self):
         df = _minimal_features_df(n=5)
         assert "cal_pd" not in df.columns
@@ -160,6 +162,7 @@ class TestComputeRiskCapFallback:
 # 3. FINAL_OUTPUT_COLUMNS includes cal_pd
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def test_final_output_columns_includes_cal_pd():
     assert "cal_pd" in FINAL_OUTPUT_COLUMNS, (
         "cal_pd must be in FINAL_OUTPUT_COLUMNS so it survives keep_intermediate=False"
@@ -178,8 +181,8 @@ def test_cal_pd_present_in_trimmed_output():
 # 4. Full engine run with cal_pd
 # ─────────────────────────────────────────────────────────────────────────────
 
-class TestEngineWithCalPd:
 
+class TestEngineWithCalPd:
     def test_end_to_end_with_cal_pd(self):
         df = _minimal_features_df(n=20)
         df["cal_pd"] = np.linspace(0.02, 0.90, 20)
@@ -197,7 +200,7 @@ class TestEngineWithCalPd:
         df_risky = _minimal_features_df(n=10, seed=1)
         df_risky["cal_pd"] = 0.85  # very risky
 
-        result_safe  = run_extrafloat_limit_engine(df_safe,  keep_intermediate=False)
+        result_safe = run_extrafloat_limit_engine(df_safe, keep_intermediate=False)
         result_risky = run_extrafloat_limit_engine(df_risky, keep_intermediate=False)
 
         assert result_safe["assigned_limit"].mean() > result_risky["assigned_limit"].mean(), (
@@ -221,6 +224,7 @@ class TestEngineWithCalPd:
 # 5. Pipeline join: agents missing cal_pd fall back to 7-signal blend
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def test_partial_cal_pd_coverage():
     df = _minimal_features_df(n=10)
     # Only 5 of 10 agents have cal_pd
@@ -231,23 +235,24 @@ def test_partial_cal_pd_coverage():
     assert len(result) == 10
     assert result["assigned_limit"].notna().all(), "All agents must receive a limit"
     # Agents with cal_pd should have risk_score ≈ 0.85
-    np.testing.assert_allclose(
-        result.loc[:4, "risk_score"].values, 0.85, atol=1e-9
-    )
+    np.testing.assert_allclose(result.loc[:4, "risk_score"].values, 0.85, atol=1e-9)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 6. run_credit_risk_pipeline integration smoke test (mocked PD model)
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def _make_pd_scored(msisdn_list):
     n = len(msisdn_list)
-    return pd.DataFrame({
-        "agent_msisdn": msisdn_list,
-        "cal_pd": np.linspace(0.05, 0.60, n),
-        "thin_file_flag": [0] * n,
-        "final_policy_bucket": ["APPROVE_50"] * n,
-    })
+    return pd.DataFrame(
+        {
+            "agent_msisdn": msisdn_list,
+            "cal_pd": np.linspace(0.05, 0.60, n),
+            "thin_file_flag": [0] * n,
+            "final_policy_bucket": ["APPROVE_50"] * n,
+        }
+    )
 
 
 def test_pipeline_produces_required_output_columns(tmp_path):
@@ -257,27 +262,28 @@ def test_pipeline_produces_required_output_columns(tmp_path):
     msisdn_list = [f"256700{i:06d}" for i in range(n)]
 
     df_features = _minimal_features_df(n=n)
-    pd_scored   = _make_pd_scored(msisdn_list)
+    pd_scored = _make_pd_scored(msisdn_list)
 
-    df_raw = pd.DataFrame({
-        "agent_msisdn": msisdn_list,
-        "commission":      np.random.default_rng(0).uniform(1e4, 1e5, n),
-        "account_balance": np.random.default_rng(1).uniform(1e5, 5e6, n),
-    })
+    df_raw = pd.DataFrame(
+        {
+            "agent_msisdn": msisdn_list,
+            "commission": np.random.default_rng(0).uniform(1e4, 1e5, n),
+            "account_balance": np.random.default_rng(1).uniform(1e5, 5e6, n),
+        }
+    )
 
     with (
         patch("run_credit_risk_pipeline._check_artifacts"),
         patch("run_credit_risk_pipeline.pd.read_csv", return_value=df_raw),
         patch("run_credit_risk_pipeline.load_transaction_capacity_features") as mock_txn,
-        patch("run_credit_risk_pipeline.load_loan_summary_recent_features")  as mock_loan,
-        patch("run_credit_risk_pipeline.load_borrower_limit_features")       as mock_bor,
+        patch("run_credit_risk_pipeline.load_loan_summary_recent_features") as mock_loan,
+        patch("run_credit_risk_pipeline.load_borrower_limit_features") as mock_bor,
         patch("run_credit_risk_pipeline.run_inference_pipeline", return_value=pd_scored),
-        patch("run_credit_risk_pipeline.build_extrafloat_limit_engine_features",
-              return_value=df_features),
+        patch("run_credit_risk_pipeline.build_extrafloat_limit_engine_features", return_value=df_features),
     ):
-        mock_txn.return_value  = MagicMock()
+        mock_txn.return_value = MagicMock()
         mock_loan.return_value = MagicMock()
-        mock_bor.return_value  = MagicMock()
+        mock_bor.return_value = MagicMock()
 
         result = run_credit_risk_pipeline(
             transaction_file="dummy_txn.csv",
@@ -300,11 +306,11 @@ def test_inference_receives_raw_data_with_agent_msisdn(tmp_path):
     n = 4
     msisdn_list = [f"256700{i:06d}" for i in range(n)]
     df_features = _minimal_features_df(n=n)
-    pd_scored   = _make_pd_scored(msisdn_list)
+    pd_scored = _make_pd_scored(msisdn_list)
 
     # Raw read returns agent_msisdn; loader returns msisdn (engine rename)
-    raw_df    = pd.DataFrame({"agent_msisdn": msisdn_list, "commission": [1.0] * n})
-    engine_df = pd.DataFrame({"msisdn":       msisdn_list, "commission": [1.0] * n})
+    raw_df = pd.DataFrame({"agent_msisdn": msisdn_list, "commission": [1.0] * n})
+    engine_df = pd.DataFrame({"msisdn": msisdn_list, "commission": [1.0] * n})
 
     captured = {}
 
@@ -315,13 +321,11 @@ def test_inference_receives_raw_data_with_agent_msisdn(tmp_path):
     with (
         patch("run_credit_risk_pipeline._check_artifacts"),
         patch("run_credit_risk_pipeline.pd.read_csv", return_value=raw_df),
-        patch("run_credit_risk_pipeline.load_transaction_capacity_features",
-              return_value=engine_df),
-        patch("run_credit_risk_pipeline.load_loan_summary_recent_features",  return_value=MagicMock()),
-        patch("run_credit_risk_pipeline.load_borrower_limit_features",        return_value=MagicMock()),
+        patch("run_credit_risk_pipeline.load_transaction_capacity_features", return_value=engine_df),
+        patch("run_credit_risk_pipeline.load_loan_summary_recent_features", return_value=MagicMock()),
+        patch("run_credit_risk_pipeline.load_borrower_limit_features", return_value=MagicMock()),
         patch("run_credit_risk_pipeline.run_inference_pipeline", side_effect=capture_inference),
-        patch("run_credit_risk_pipeline.build_extrafloat_limit_engine_features",
-              return_value=df_features),
+        patch("run_credit_risk_pipeline.build_extrafloat_limit_engine_features", return_value=df_features),
     ):
         run_credit_risk_pipeline(
             transaction_file="dummy_txn.csv",
@@ -340,6 +344,7 @@ def test_inference_receives_raw_data_with_agent_msisdn(tmp_path):
 # ─────────────────────────────────────────────────────────────────────────────
 # 7. Experience factor NOT applied on the cal_pd path (fix 3)
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 def test_experience_factor_not_applied_on_cal_pd_path():
     """
@@ -360,7 +365,7 @@ def test_experience_factor_not_applied_on_cal_pd_path():
     df_experienced["cal_pd"] = cal_pd
     df_experienced["total_loans"] = 50  # experienced borrower
 
-    result_thin       = compute_risk_cap(df_thin)
+    result_thin = compute_risk_cap(df_thin)
     result_experienced = compute_risk_cap(df_experienced)
 
     np.testing.assert_allclose(
@@ -379,8 +384,9 @@ def test_experience_factor_not_applied_on_cal_pd_path():
 # 8. Preflight artifact check (fix 2)
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def test_preflight_raises_on_missing_artifacts(tmp_path):
-    from run_credit_risk_pipeline import _check_artifacts, _REQUIRED_ARTIFACTS
+    from run_credit_risk_pipeline import _REQUIRED_ARTIFACTS, _check_artifacts
 
     # Empty artifacts dir — all files missing
     with pytest.raises(FileNotFoundError) as exc_info:
@@ -395,22 +401,24 @@ def test_preflight_raises_on_missing_artifacts(tmp_path):
 
 def test_preflight_passes_when_all_artifacts_present(tmp_path):
     import json as _json
-    from run_credit_risk_pipeline import _check_artifacts, _REQUIRED_ARTIFACTS
+
+    from run_credit_risk_pipeline import _REQUIRED_ARTIFACTS, _check_artifacts
 
     for fname in _REQUIRED_ARTIFACTS:
         if fname == "model_metadata.json":
-            # Empty checksums → warning + early return, no error
+            # Empty checksums — use allow_unverified=True (dev/test mode)
             (tmp_path / fname).write_text(_json.dumps({}))
         else:
             (tmp_path / fname).touch()
 
-    # Should complete without raising
-    _check_artifacts(tmp_path)
+    # allow_unverified=True: placeholder metadata warns but does not raise
+    _check_artifacts(tmp_path, allow_unverified=True)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 8. pd_decile — population-relative risk rank from cal_pd
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 def test_pd_decile_computed_when_cal_pd_present():
     """pd_decile (1–10) is present and correctly ordered when cal_pd is available."""
@@ -464,6 +472,7 @@ def test_pd_decile_in_final_output_columns():
 # 9. F5 — Calibration fail-closed
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def test_calibration_exception_propagates():
     """After F5 fix: calibration failure must raise, not be swallowed."""
     from pd_model.modeling.inference import ModelArtifacts, score_new_agents
@@ -476,13 +485,9 @@ def test_calibration_exception_propagates():
     df["thin_file_flag"] = 0  # all thick-file → triggers calibration path
 
     mock_xgb = MagicMock()
-    mock_xgb.predict_proba.return_value = np.column_stack(
-        [np.full(n, 0.8), np.full(n, 0.2)]
-    )
+    mock_xgb.predict_proba.return_value = np.column_stack([np.full(n, 0.8), np.full(n, 0.2)])
     mock_lgb = MagicMock()
-    mock_lgb.predict_proba.return_value = np.column_stack(
-        [np.full(n, 0.7), np.full(n, 0.3)]
-    )
+    mock_lgb.predict_proba.return_value = np.column_stack([np.full(n, 0.7), np.full(n, 0.3)])
 
     artifacts = ModelArtifacts(
         xgb_model=mock_xgb,
@@ -494,8 +499,9 @@ def test_calibration_exception_propagates():
         transform_report=pd.DataFrame({"feature": [], "action": []}),
     )
 
-    with patch("pd_model.modeling.inference.attach_cal_pd",
-               side_effect=RuntimeError("Calibration map corrupt")):
+    with patch(
+        "pd_model.modeling.inference.attach_cal_pd", side_effect=RuntimeError("Calibration map corrupt")
+    ):
         with pytest.raises(RuntimeError, match="Calibration map corrupt"):
             score_new_agents(df, artifacts)
 
@@ -511,18 +517,14 @@ def test_score_source_pd_model_when_cal_pd_present(tmp_path):
 
     with (
         patch("run_credit_risk_pipeline._check_artifacts"),
-        patch("run_credit_risk_pipeline.pd.read_csv",
-              return_value=pd.DataFrame({"agent_msisdn": msisdn_list})),
-        patch("run_credit_risk_pipeline.load_transaction_capacity_features",
-              return_value=MagicMock()),
-        patch("run_credit_risk_pipeline.load_loan_summary_recent_features",
-              return_value=MagicMock()),
-        patch("run_credit_risk_pipeline.load_borrower_limit_features",
-              return_value=MagicMock()),
-        patch("run_credit_risk_pipeline.run_inference_pipeline",
-              return_value=pd_scored),
-        patch("run_credit_risk_pipeline.build_extrafloat_limit_engine_features",
-              return_value=df_features),
+        patch(
+            "run_credit_risk_pipeline.pd.read_csv", return_value=pd.DataFrame({"agent_msisdn": msisdn_list})
+        ),
+        patch("run_credit_risk_pipeline.load_transaction_capacity_features", return_value=MagicMock()),
+        patch("run_credit_risk_pipeline.load_loan_summary_recent_features", return_value=MagicMock()),
+        patch("run_credit_risk_pipeline.load_borrower_limit_features", return_value=MagicMock()),
+        patch("run_credit_risk_pipeline.run_inference_pipeline", return_value=pd_scored),
+        patch("run_credit_risk_pipeline.build_extrafloat_limit_engine_features", return_value=df_features),
     ):
         result = run_credit_risk_pipeline(
             transaction_file="dummy.csv",
@@ -547,26 +549,24 @@ def test_score_source_fallback_when_cal_pd_absent(tmp_path):
     df_features = _minimal_features_df(n=n)
 
     # PD model returns NaN cal_pd for all agents (e.g. not in PD output)
-    pd_scored_no_pd = pd.DataFrame({
-        "agent_msisdn": msisdn_list,
-        "cal_pd":        [float("nan")] * n,
-        "thin_file_flag": [0] * n,
-    })
+    pd_scored_no_pd = pd.DataFrame(
+        {
+            "agent_msisdn": msisdn_list,
+            "cal_pd": [float("nan")] * n,
+            "thin_file_flag": [0] * n,
+        }
+    )
 
     with (
         patch("run_credit_risk_pipeline._check_artifacts"),
-        patch("run_credit_risk_pipeline.pd.read_csv",
-              return_value=pd.DataFrame({"agent_msisdn": msisdn_list})),
-        patch("run_credit_risk_pipeline.load_transaction_capacity_features",
-              return_value=MagicMock()),
-        patch("run_credit_risk_pipeline.load_loan_summary_recent_features",
-              return_value=MagicMock()),
-        patch("run_credit_risk_pipeline.load_borrower_limit_features",
-              return_value=MagicMock()),
-        patch("run_credit_risk_pipeline.run_inference_pipeline",
-              return_value=pd_scored_no_pd),
-        patch("run_credit_risk_pipeline.build_extrafloat_limit_engine_features",
-              return_value=df_features),
+        patch(
+            "run_credit_risk_pipeline.pd.read_csv", return_value=pd.DataFrame({"agent_msisdn": msisdn_list})
+        ),
+        patch("run_credit_risk_pipeline.load_transaction_capacity_features", return_value=MagicMock()),
+        patch("run_credit_risk_pipeline.load_loan_summary_recent_features", return_value=MagicMock()),
+        patch("run_credit_risk_pipeline.load_borrower_limit_features", return_value=MagicMock()),
+        patch("run_credit_risk_pipeline.run_inference_pipeline", return_value=pd_scored_no_pd),
+        patch("run_credit_risk_pipeline.build_extrafloat_limit_engine_features", return_value=df_features),
     ):
         result = run_credit_risk_pipeline(
             transaction_file="dummy.csv",
@@ -584,6 +584,7 @@ def test_score_source_fallback_when_cal_pd_absent(tmp_path):
 # 10. F6 — Join integrity
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def test_join_raises_on_duplicate_engine_msisdn(tmp_path):
     """Duplicate msisdn in engine features must raise ValueError before the join."""
     from run_credit_risk_pipeline import run_credit_risk_pipeline
@@ -598,18 +599,16 @@ def test_join_raises_on_duplicate_engine_msisdn(tmp_path):
 
     with (
         patch("run_credit_risk_pipeline._check_artifacts"),
-        patch("run_credit_risk_pipeline.pd.read_csv",
-              return_value=pd.DataFrame({"agent_msisdn": msisdn_list})),
-        patch("run_credit_risk_pipeline.load_transaction_capacity_features",
-              return_value=MagicMock()),
-        patch("run_credit_risk_pipeline.load_loan_summary_recent_features",
-              return_value=MagicMock()),
-        patch("run_credit_risk_pipeline.load_borrower_limit_features",
-              return_value=MagicMock()),
-        patch("run_credit_risk_pipeline.run_inference_pipeline",
-              return_value=pd_scored),
-        patch("run_credit_risk_pipeline.build_extrafloat_limit_engine_features",
-              return_value=df_features_dup),
+        patch(
+            "run_credit_risk_pipeline.pd.read_csv", return_value=pd.DataFrame({"agent_msisdn": msisdn_list})
+        ),
+        patch("run_credit_risk_pipeline.load_transaction_capacity_features", return_value=MagicMock()),
+        patch("run_credit_risk_pipeline.load_loan_summary_recent_features", return_value=MagicMock()),
+        patch("run_credit_risk_pipeline.load_borrower_limit_features", return_value=MagicMock()),
+        patch("run_credit_risk_pipeline.run_inference_pipeline", return_value=pd_scored),
+        patch(
+            "run_credit_risk_pipeline.build_extrafloat_limit_engine_features", return_value=df_features_dup
+        ),
     ):
         with pytest.raises(ValueError, match="Duplicate msisdn in engine features"):
             run_credit_risk_pipeline(
@@ -634,18 +633,14 @@ def test_join_raises_on_duplicate_pd_msisdn(tmp_path):
 
     with (
         patch("run_credit_risk_pipeline._check_artifacts"),
-        patch("run_credit_risk_pipeline.pd.read_csv",
-              return_value=pd.DataFrame({"agent_msisdn": msisdn_list})),
-        patch("run_credit_risk_pipeline.load_transaction_capacity_features",
-              return_value=MagicMock()),
-        patch("run_credit_risk_pipeline.load_loan_summary_recent_features",
-              return_value=MagicMock()),
-        patch("run_credit_risk_pipeline.load_borrower_limit_features",
-              return_value=MagicMock()),
-        patch("run_credit_risk_pipeline.run_inference_pipeline",
-              return_value=pd_scored_dup),
-        patch("run_credit_risk_pipeline.build_extrafloat_limit_engine_features",
-              return_value=df_features),
+        patch(
+            "run_credit_risk_pipeline.pd.read_csv", return_value=pd.DataFrame({"agent_msisdn": msisdn_list})
+        ),
+        patch("run_credit_risk_pipeline.load_transaction_capacity_features", return_value=MagicMock()),
+        patch("run_credit_risk_pipeline.load_loan_summary_recent_features", return_value=MagicMock()),
+        patch("run_credit_risk_pipeline.load_borrower_limit_features", return_value=MagicMock()),
+        patch("run_credit_risk_pipeline.run_inference_pipeline", return_value=pd_scored_dup),
+        patch("run_credit_risk_pipeline.build_extrafloat_limit_engine_features", return_value=df_features),
     ):
         with pytest.raises(ValueError, match="Duplicate agent_msisdn in PD output"):
             run_credit_risk_pipeline(
@@ -670,18 +665,16 @@ def test_join_raises_on_null_engine_msisdn(tmp_path, null_value):
 
     with (
         patch("run_credit_risk_pipeline._check_artifacts"),
-        patch("run_credit_risk_pipeline.pd.read_csv",
-              return_value=pd.DataFrame({"agent_msisdn": msisdn_list})),
-        patch("run_credit_risk_pipeline.load_transaction_capacity_features",
-              return_value=MagicMock()),
-        patch("run_credit_risk_pipeline.load_loan_summary_recent_features",
-              return_value=MagicMock()),
-        patch("run_credit_risk_pipeline.load_borrower_limit_features",
-              return_value=MagicMock()),
-        patch("run_credit_risk_pipeline.run_inference_pipeline",
-              return_value=pd_scored),
-        patch("run_credit_risk_pipeline.build_extrafloat_limit_engine_features",
-              return_value=df_features_null),
+        patch(
+            "run_credit_risk_pipeline.pd.read_csv", return_value=pd.DataFrame({"agent_msisdn": msisdn_list})
+        ),
+        patch("run_credit_risk_pipeline.load_transaction_capacity_features", return_value=MagicMock()),
+        patch("run_credit_risk_pipeline.load_loan_summary_recent_features", return_value=MagicMock()),
+        patch("run_credit_risk_pipeline.load_borrower_limit_features", return_value=MagicMock()),
+        patch("run_credit_risk_pipeline.run_inference_pipeline", return_value=pd_scored),
+        patch(
+            "run_credit_risk_pipeline.build_extrafloat_limit_engine_features", return_value=df_features_null
+        ),
     ):
         with pytest.raises(ValueError, match="null msisdn"):
             run_credit_risk_pipeline(
@@ -708,18 +701,14 @@ def test_msisdn_dot_zero_normalized(tmp_path):
 
     with (
         patch("run_credit_risk_pipeline._check_artifacts"),
-        patch("run_credit_risk_pipeline.pd.read_csv",
-              return_value=pd.DataFrame({"agent_msisdn": canonical})),
-        patch("run_credit_risk_pipeline.load_transaction_capacity_features",
-              return_value=MagicMock()),
-        patch("run_credit_risk_pipeline.load_loan_summary_recent_features",
-              return_value=MagicMock()),
-        patch("run_credit_risk_pipeline.load_borrower_limit_features",
-              return_value=MagicMock()),
-        patch("run_credit_risk_pipeline.run_inference_pipeline",
-              return_value=pd_scored),
-        patch("run_credit_risk_pipeline.build_extrafloat_limit_engine_features",
-              return_value=df_features_dot0),
+        patch("run_credit_risk_pipeline.pd.read_csv", return_value=pd.DataFrame({"agent_msisdn": canonical})),
+        patch("run_credit_risk_pipeline.load_transaction_capacity_features", return_value=MagicMock()),
+        patch("run_credit_risk_pipeline.load_loan_summary_recent_features", return_value=MagicMock()),
+        patch("run_credit_risk_pipeline.load_borrower_limit_features", return_value=MagicMock()),
+        patch("run_credit_risk_pipeline.run_inference_pipeline", return_value=pd_scored),
+        patch(
+            "run_credit_risk_pipeline.build_extrafloat_limit_engine_features", return_value=df_features_dot0
+        ),
     ):
         result = run_credit_risk_pipeline(
             transaction_file="dummy.csv",
@@ -739,11 +728,13 @@ def test_msisdn_dot_zero_normalized(tmp_path):
 # Checksum integrity tests (NF2)
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def test_checksum_passes_with_valid_artifacts(tmp_path):
     """_check_artifacts does not raise when all stored checksums match."""
     import hashlib
     import json as _json
-    from run_credit_risk_pipeline import _check_artifacts, _REQUIRED_ARTIFACTS
+
+    from run_credit_risk_pipeline import _REQUIRED_ARTIFACTS, _check_artifacts
 
     artifact_hashes = {}
     for fname in _REQUIRED_ARTIFACTS:
@@ -763,7 +754,8 @@ def test_checksum_mismatch_raises_on_preflight(tmp_path):
     """_check_artifacts raises RuntimeError when a stored checksum does not match."""
     import hashlib
     import json as _json
-    from run_credit_risk_pipeline import _check_artifacts, _REQUIRED_ARTIFACTS
+
+    from run_credit_risk_pipeline import _REQUIRED_ARTIFACTS, _check_artifacts
 
     artifact_hashes = {}
     for fname in _REQUIRED_ARTIFACTS:
@@ -784,10 +776,11 @@ def test_checksum_mismatch_raises_on_preflight(tmp_path):
 
 
 def test_preflight_warns_when_no_checksums_stored(tmp_path, caplog):
-    """_check_artifacts emits a warning but does not raise when artifact_sha256 is absent."""
+    """With allow_unverified=True, absent checksums produce a warning but not an error."""
     import json as _json
     import logging
-    from run_credit_risk_pipeline import _check_artifacts, _REQUIRED_ARTIFACTS
+
+    from run_credit_risk_pipeline import _REQUIRED_ARTIFACTS, _check_artifacts
 
     for fname in _REQUIRED_ARTIFACTS:
         if fname == "model_metadata.json":
@@ -796,8 +789,47 @@ def test_preflight_warns_when_no_checksums_stored(tmp_path, caplog):
             (tmp_path / fname).touch()
 
     with caplog.at_level(logging.WARNING, logger="credit_risk_pipeline"):
-        _check_artifacts(tmp_path)  # must not raise
+        _check_artifacts(tmp_path, allow_unverified=True)  # must not raise
 
     assert any("no artifact_sha256 checksums" in r.message for r in caplog.records), (
         "Expected a warning about missing checksums"
     )
+
+
+def test_preflight_raises_when_no_checksums_and_not_allow_unverified(tmp_path):
+    """Without allow_unverified, absent checksums raise RuntimeError (production default)."""
+    import json as _json
+
+    from run_credit_risk_pipeline import _REQUIRED_ARTIFACTS, _check_artifacts
+
+    for fname in _REQUIRED_ARTIFACTS:
+        if fname == "model_metadata.json":
+            (tmp_path / fname).write_text(_json.dumps({}))
+        else:
+            (tmp_path / fname).touch()
+
+    with pytest.raises(RuntimeError, match="no artifact_sha256 checksums"):
+        _check_artifacts(tmp_path, allow_unverified=False)
+
+
+def test_preflight_raises_when_artifact_missing_from_manifest(tmp_path):
+    """Without allow_unverified, an artifact absent from the hash map raises RuntimeError."""
+    import hashlib
+    import json as _json
+
+    from run_credit_risk_pipeline import _REQUIRED_ARTIFACTS, _check_artifacts
+
+    artifact_hashes = {}
+    for fname in _REQUIRED_ARTIFACTS:
+        if fname == "model_metadata.json":
+            continue
+        fpath = tmp_path / fname
+        fpath.write_bytes(b"content")
+        artifact_hashes[fname] = hashlib.sha256(fpath.read_bytes()).hexdigest()
+
+    # Remove one artifact from the manifest
+    del artifact_hashes["xgb_model.joblib"]
+    (tmp_path / "model_metadata.json").write_text(_json.dumps({"artifact_sha256": artifact_hashes}))
+
+    with pytest.raises(RuntimeError, match="No stored checksum"):
+        _check_artifacts(tmp_path, allow_unverified=False)

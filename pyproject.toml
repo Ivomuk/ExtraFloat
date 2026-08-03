@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "credit-risk"
 version = "0.1.0"
 description = "End-to-end credit risk pipeline: PD model (XGBoost/LightGBM) → mobile money float limit engine"
-requires-python = ">=3.10"
+requires-python = ">=3.10,<3.13"
 dependencies = [
     "numpy>=1.24",
     "pandas>=2.0",
@@ -20,7 +20,7 @@ dependencies = [
 [project.optional-dependencies]
 shap    = ["shap"]
 monitor = ["scipy>=1.11"]
-dev     = ["pytest>=8.0", "pytest-cov"]
+dev     = ["pytest>=8.0", "pytest-cov", "ruff>=0.4"]
 
 [project.scripts]
 credit-risk-pipeline = "run_credit_risk_pipeline:main"
@@ -32,3 +32,28 @@ include = ["pd_model*", "extrafloat*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests", "pd_model/tests"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 110
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes
+    "I",    # isort
+    "UP",   # pyupgrade
+    "B",    # flake8-bugbear
+    "C4",   # flake8-comprehensions
+    "TID",  # flake8-tidy-imports
+]
+ignore = [
+    "E501",  # line-too-long — handled by formatter, not linter
+    "B008",  # function-calls in default args (common in pandas/numpy defaults)
+    "UP007", # use X | Y for type union — keep | syntax for py3.10+ only
+]
+
+[tool.ruff.lint.per-file-ignores]
+"pd_model/tests/**" = ["E402"]    # module-level imports not at top (test fixtures)
+"tests/**" = ["E402"]

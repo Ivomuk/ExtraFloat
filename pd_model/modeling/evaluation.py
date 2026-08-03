@@ -22,6 +22,7 @@ logger = get_logger(__name__)
 # AUC helpers
 # ======================================================================== #
 
+
 def safe_auc_with_reason(
     y: pd.Series,
     p: pd.Series,
@@ -34,8 +35,9 @@ def safe_auc_with_reason(
     (auc_value, reason_str)  where reason_str is "ok" on success or a short
     diagnostic string otherwise.
     """
-    df_tmp = pd.DataFrame({"y": pd.Series(y).reset_index(drop=True),
-                           "p": pd.Series(p).reset_index(drop=True)}).dropna()
+    df_tmp = pd.DataFrame(
+        {"y": pd.Series(y).reset_index(drop=True), "p": pd.Series(p).reset_index(drop=True)}
+    ).dropna()
     if df_tmp.shape[0] == 0:
         return np.nan, "no_rows"
     if int(df_tmp["y"].nunique()) < 2:
@@ -46,6 +48,7 @@ def safe_auc_with_reason(
 # ======================================================================== #
 # Decile table builder
 # ======================================================================== #
+
 
 def build_decile_tables(
     df: pd.DataFrame,
@@ -93,9 +96,7 @@ def build_decile_tables(
         thin_num = pd.to_numeric(df_work[thin_flag_col], errors="coerce")
         thin_bin = np.where(pd.isna(thin_num), np.nan, (thin_num >= thin_threshold).astype(int))
         df_work["thin_segment"] = (
-            pd.Series(thin_bin, index=df_work.index)
-            .map({0: "non_thin", 1: "thin"})
-            .fillna("missing_flag")
+            pd.Series(thin_bin, index=df_work.index).map({0: "non_thin", 1: "thin"}).fillna("missing_flag")
         )
         seg_col_use = "thin_segment"
     else:
@@ -113,17 +114,17 @@ def build_decile_tables(
         y_vals = seg_df[target_col].values
         p_vals = seg_df[score_col].values
         mask = ~pd.isna(p_vals)
-        auc_val, _ = safe_auc_with_reason(
-            pd.Series(y_vals[mask]), pd.Series(p_vals[mask])
+        auc_val, _ = safe_auc_with_reason(pd.Series(y_vals[mask]), pd.Series(p_vals[mask]))
+        seg_rows.append(
+            {
+                "segment": seg_name,
+                "n": int(seg_df.shape[0]),
+                "bad_rate": float(np.mean(y_vals)),
+                "avg_score": float(np.nanmean(p_vals)),
+                "auc": auc_val,
+                "score_null_rate": float(np.mean(pd.isna(p_vals))),
+            }
         )
-        seg_rows.append({
-            "segment": seg_name,
-            "n": int(seg_df.shape[0]),
-            "bad_rate": float(np.mean(y_vals)),
-            "avg_score": float(np.nanmean(p_vals)),
-            "auc": auc_val,
-            "score_null_rate": float(np.mean(pd.isna(p_vals))),
-        })
 
     seg_summary_df = pd.DataFrame(seg_rows)
     if seg_col_use == "thin_segment" and seg_summary_df.shape[0] > 0:
@@ -132,7 +133,9 @@ def build_decile_tables(
             categories=["non_thin", "thin", "missing_flag"],
             ordered=True,
         )
-        seg_summary_df = seg_summary_df.assign(segment=seg_order).sort_values("segment").reset_index(drop=True)
+        seg_summary_df = (
+            seg_summary_df.assign(segment=seg_order).sort_values("segment").reset_index(drop=True)
+        )
     elif seg_summary_df.shape[0] > 0:
         seg_summary_df = seg_summary_df.sort_values("segment").reset_index(drop=True)
 
@@ -143,11 +146,13 @@ def build_decile_tables(
         if tmp.shape[0] == 0:
             return pd.DataFrame({"note": [f"{label}: no non-null scores"], "n": [0]})
         if int(tmp[score_col].nunique()) < n_bins:
-            return pd.DataFrame({
-                "note": [f"{label}: not enough unique scores for {n_bins} bins"],
-                "unique_scores": [int(tmp[score_col].nunique())],
-                "n": [int(tmp.shape[0])],
-            })
+            return pd.DataFrame(
+                {
+                    "note": [f"{label}: not enough unique scores for {n_bins} bins"],
+                    "unique_scores": [int(tmp[score_col].nunique())],
+                    "n": [int(tmp.shape[0])],
+                }
+            )
         tmp["decile"] = pd.qcut(tmp[score_col], n_bins, labels=False, duplicates="drop").astype(int) + 1
         overall_bad = float(tmp[target_col].mean())
         tbl = (
@@ -189,6 +194,7 @@ def build_decile_tables(
 # ======================================================================== #
 # Model comparison
 # ======================================================================== #
+
 
 def compare_models_deciles(
     df_a: pd.DataFrame,
@@ -250,27 +256,31 @@ def compare_models_deciles(
     auc_a = _overall_auc(df_a, score_a)
     auc_b = _overall_auc(df_b, score_b)
 
-    summary = pd.DataFrame([
-        {
-            "model": name_a,
-            "auc": auc_a,
-            "top_decile_bad_rate": _top_decile_bad(res_a["overall"]),
-            "bottom_decile_bad_rate": _bot_decile_bad(res_a["overall"]),
-            "seg_col_used": res_a.get("seg_col"),
-        },
-        {
-            "model": name_b,
-            "auc": auc_b,
-            "top_decile_bad_rate": _top_decile_bad(res_b["overall"]),
-            "bottom_decile_bad_rate": _bot_decile_bad(res_b["overall"]),
-            "seg_col_used": res_b.get("seg_col"),
-        },
-    ])
+    summary = pd.DataFrame(
+        [
+            {
+                "model": name_a,
+                "auc": auc_a,
+                "top_decile_bad_rate": _top_decile_bad(res_a["overall"]),
+                "bottom_decile_bad_rate": _bot_decile_bad(res_a["overall"]),
+                "seg_col_used": res_a.get("seg_col"),
+            },
+            {
+                "model": name_b,
+                "auc": auc_b,
+                "top_decile_bad_rate": _top_decile_bad(res_b["overall"]),
+                "bottom_decile_bad_rate": _bot_decile_bad(res_b["overall"]),
+                "seg_col_used": res_b.get("seg_col"),
+            },
+        ]
+    )
 
     logger.info(
         "compare_models_deciles: %s AUC=%.4f | %s AUC=%.4f",
-        name_a, auc_a if not np.isnan(auc_a) else -1,
-        name_b, auc_b if not np.isnan(auc_b) else -1,
+        name_a,
+        auc_a if not np.isnan(auc_a) else -1,
+        name_b,
+        auc_b if not np.isnan(auc_b) else -1,
     )
 
     return summary, res_a, res_b

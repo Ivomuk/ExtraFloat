@@ -1,4 +1,5 @@
 """Tests for pd_model.modeling.calibration."""
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -10,7 +11,6 @@ from pd_model.modeling.calibration import (
     build_pd_calibration_map,
     build_policy_tables,
     run_bootstrap_comparison,
-    run_locked_policy_pipeline,
 )
 
 
@@ -18,12 +18,14 @@ def _scored_df(n: int = 6000, seed: int = 5) -> pd.DataFrame:
     rng = np.random.default_rng(seed)
     x = rng.normal(0, 1, n)
     y = (x + rng.normal(0, 0.5, n) > 0).astype(int)
-    return pd.DataFrame({
-        "agent_msisdn": [f"msisdn_{i}" for i in range(n)],
-        "bad_state": y,
-        "raw_score": 1 / (1 + np.exp(-x)),
-        "thin_file_flag": rng.integers(0, 2, n),
-    })
+    return pd.DataFrame(
+        {
+            "agent_msisdn": [f"msisdn_{i}" for i in range(n)],
+            "bad_state": y,
+            "raw_score": 1 / (1 + np.exp(-x)),
+            "thin_file_flag": rng.integers(0, 2, n),
+        }
+    )
 
 
 # Use a relaxed config for testing (lower min_n, min_bads)

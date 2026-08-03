@@ -9,9 +9,6 @@ as inline literals.
 
 from __future__ import annotations
 
-from typing import FrozenSet, List, Tuple
-
-
 # ======================================================================== #
 # Column name constants
 # ======================================================================== #
@@ -24,7 +21,7 @@ THIN_FILE_PRIOR_COL: str = "thin_file_pd_prior"
 SNAPSHOT_COL: str = "snapshot_dt"
 SPLIT_COL: str = "split"
 
-DATE_COLS: List[str] = [
+DATE_COLS: list[str] = [
     "tbl_dt",
     "activation_dt",
     "snapshot_dt",
@@ -37,7 +34,7 @@ DATE_COLS: List[str] = [
 # Feature blacklist — columns that must never enter the model feature set
 # ======================================================================== #
 
-PD_FEATURE_BLACKLIST: FrozenSet[str] = frozenset(
+PD_FEATURE_BLACKLIST: frozenset[str] = frozenset(
     {
         # Identifiers / snapshot keys
         "agent_msisdn",
@@ -101,7 +98,7 @@ PD_FEATURE_BLACKLIST: FrozenSet[str] = frozenset(
 # ======================================================================== #
 
 # Substrings whose presence in a column name indicates leakage
-LEAKAGE_PATTERNS: Tuple[str, ...] = (
+LEAKAGE_PATTERNS: tuple[str, ...] = (
     "has_ever",
     "ever_",
     "bad_state",
@@ -122,7 +119,7 @@ LEAKAGE_PATTERNS: Tuple[str, ...] = (
 )
 
 # Substrings indicating identity-like or bookkeeping columns
-ID_LIKE_PATTERNS: Tuple[str, ...] = (
+ID_LIKE_PATTERNS: tuple[str, ...] = (
     "msisdn",
     "imei",
     "imsi",
@@ -146,7 +143,7 @@ ID_LIKE_PATTERNS: Tuple[str, ...] = (
 )
 
 # DPD substring patterns that are definitively leakage
-DPD_BLOCK_PATTERNS: Tuple[str, ...] = (
+DPD_BLOCK_PATTERNS: tuple[str, ...] = (
     "max_dpd",
     "worst_dpd",
     "ever_dpd",
@@ -172,7 +169,7 @@ DPD_BLOCK_PATTERNS: Tuple[str, ...] = (
 )
 
 # DPD substrings that are explicitly allowed despite containing "dpd"
-DPD_ALLOW_PATTERNS: Tuple[str, ...] = (
+DPD_ALLOW_PATTERNS: tuple[str, ...] = (
     "current_dpd",
     "dpd_current",
     "dpd_now",
@@ -185,7 +182,7 @@ DPD_ALLOW_PATTERNS: Tuple[str, ...] = (
 # Transformation classification patterns
 # ======================================================================== #
 
-COUNT_PATTERNS: Tuple[str, ...] = (
+COUNT_PATTERNS: tuple[str, ...] = (
     "cash_in_vol",
     "cash_out_vol",
     "payment_vol",
@@ -202,7 +199,7 @@ COUNT_PATTERNS: Tuple[str, ...] = (
     "vol_6m",
 )
 
-LOG_PATTERNS: Tuple[str, ...] = (
+LOG_PATTERNS: tuple[str, ...] = (
     "_value",
     "_val",
     "commission",
@@ -213,7 +210,7 @@ LOG_PATTERNS: Tuple[str, ...] = (
     "payment_comm_",
 )
 
-SIGNED_AMOUNT_PATTERNS: Tuple[str, ...] = (
+SIGNED_AMOUNT_PATTERNS: tuple[str, ...] = (
     "net_cash_flow",
     "net_cashflow",
     "net_flow",
@@ -228,7 +225,7 @@ SIGNED_AMOUNT_PATTERNS: Tuple[str, ...] = (
     "loss",
 )
 
-CAP_ONLY_PATTERNS: Tuple[str, ...] = (
+CAP_ONLY_PATTERNS: tuple[str, ...] = (
     "_ratio",
     "_intensity",
     "_per_",
@@ -246,7 +243,7 @@ CAP_ONLY_PATTERNS: Tuple[str, ...] = (
     "cust_6m",
 )
 
-PROTECTED_PATTERNS: Tuple[str, ...] = (
+PROTECTED_PATTERNS: tuple[str, ...] = (
     "_flag",
     "_indicator",
     "is_",
@@ -265,7 +262,7 @@ PROTECTED_PATTERNS: Tuple[str, ...] = (
 # Non-behavioural columns excluded from repayment feature list
 # ======================================================================== #
 
-NON_BEHAVIOURAL_COLS: FrozenSet[str] = frozenset(
+NON_BEHAVIOURAL_COLS: frozenset[str] = frozenset(
     {
         "agent_msisdn",
         "msisdn",
@@ -291,7 +288,7 @@ NON_BEHAVIOURAL_COLS: FrozenSet[str] = frozenset(
 )
 
 # Pattern-based forward-looking / label substrings for repayment feature guard
-REPAYMENT_FORBIDDEN_SUBSTRINGS: Tuple[str, ...] = (
+REPAYMENT_FORBIDDEN_SUBSTRINGS: tuple[str, ...] = (
     "bad_state",
     "write_off",
     "written_off",
@@ -313,7 +310,7 @@ WL_BL_COL: str = "xtrafloat_list_type"
 WL_BL_KEY: str = "agent_msisdn_key"
 WL_CATEGORY_COL: str = "agent_category"
 WL_REASON_COL: str = "reason"
-NON_PERF_BLACKLIST_REASONS: Tuple[str, ...] = (
+NON_PERF_BLACKLIST_REASONS: tuple[str, ...] = (
     "As requested by Director",
     "Agent active less than 3 months",
 )

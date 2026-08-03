@@ -2,7 +2,6 @@
 
 import numpy as np
 import pandas as pd
-import pytest
 
 from pd_model.preprocessing.transformations import (
     apply_pd_transformations,

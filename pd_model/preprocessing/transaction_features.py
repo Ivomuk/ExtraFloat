@@ -57,9 +57,7 @@ def run_phase_2_1_richer_tx_behaviour(
     # ------------------------------------------------------------------ #
     if all(c in df.columns for c in ["vol_1m", "vol_3m", "vol_6m"]):
         df["is_fully_inactive_6m"] = (
-            (df["vol_1m"].fillna(0) == 0)
-            & (df["vol_3m"].fillna(0) == 0)
-            & (df["vol_6m"].fillna(0) == 0)
+            (df["vol_1m"].fillna(0) == 0) & (df["vol_3m"].fillna(0) == 0) & (df["vol_6m"].fillna(0) == 0)
         ).astype(int)
 
         df["is_consecutively_inactive"] = (
@@ -70,9 +68,7 @@ def run_phase_2_1_richer_tx_behaviour(
     # B) Activity restart / recovery signal
     # ------------------------------------------------------------------ #
     if all(c in df.columns for c in ["vol_1m", "vol_3m"]):
-        df["activity_restart_flag"] = (
-            (df["vol_1m"] > 0) & (df["vol_3m"] == df["vol_1m"])
-        ).astype(int)
+        df["activity_restart_flag"] = ((df["vol_1m"] > 0) & (df["vol_3m"] == df["vol_1m"])).astype(int)
 
     # ------------------------------------------------------------------ #
     # C) Conditional activity intensity
@@ -93,13 +89,11 @@ def run_phase_2_1_richer_tx_behaviour(
     # ------------------------------------------------------------------ #
     if all(c in df.columns for c in ["vol_1m", "vol_3m", "vol_6m"]):
         df["consistent_volume_decline_flag"] = (
-            (df["vol_1m"] < df["vol_3m"] / 3.0)
-            & (df["vol_3m"] < df["vol_6m"] / 2.0)
+            (df["vol_1m"] < df["vol_3m"] / 3.0) & (df["vol_3m"] < df["vol_6m"] / 2.0)
         ).astype(int)
 
         df["consistent_volume_growth_flag"] = (
-            (df["vol_1m"] > df["vol_3m"] / 3.0)
-            & (df["vol_3m"] > df["vol_6m"] / 2.0)
+            (df["vol_1m"] > df["vol_3m"] / 3.0) & (df["vol_3m"] > df["vol_6m"] / 2.0)
         ).astype(int)
 
     # ------------------------------------------------------------------ #
@@ -115,22 +109,16 @@ def run_phase_2_1_richer_tx_behaviour(
         df["avg_balance_to_vol_3m_ratio"] = df["average_balance"] / (df["vol_3m"] + eps)
 
     if all(c in df.columns for c in ["account_balance", "average_balance"]):
-        df["balance_drawdown_flag"] = (
-            df["account_balance"] < 0.5 * df["average_balance"]
-        ).astype(int)
+        df["balance_drawdown_flag"] = (df["account_balance"] < 0.5 * df["average_balance"]).astype(int)
 
     # ------------------------------------------------------------------ #
     # Customer & peer dependence
     # ------------------------------------------------------------------ #
     if all(c in df.columns for c in ["cust_1m", "cust_3m"]):
-        df["cust_concentration_flag"] = (
-            (df["cust_1m"] / (df["cust_3m"] + eps)) > 0.8
-        ).astype(int)
+        df["cust_concentration_flag"] = ((df["cust_1m"] / (df["cust_3m"] + eps)) > 0.8).astype(int)
 
     if all(c in df.columns for c in ["cash_in_peers_3m", "cash_in_vol_3m"]):
-        df["peer_dependency_ratio"] = df["cash_in_peers_3m"] / (
-            df["cash_in_vol_3m"] + eps
-        )
+        df["peer_dependency_ratio"] = df["cash_in_peers_3m"] / (df["cash_in_vol_3m"] + eps)
         df["high_peer_dependency_flag"] = (df["peer_dependency_ratio"] > 0.7).astype(int)
 
     # ------------------------------------------------------------------ #
@@ -147,14 +135,10 @@ def run_phase_2_1_richer_tx_behaviour(
     # Stress acceleration flags
     # ------------------------------------------------------------------ #
     if all(c in df.columns for c in ["vol_1m", "vol_3m"]):
-        df["sharp_volume_drop_flag"] = (
-            (df["vol_1m"] / (df["vol_3m"] + eps)) < 0.3
-        ).astype(int)
+        df["sharp_volume_drop_flag"] = ((df["vol_1m"] / (df["vol_3m"] + eps)) < 0.3).astype(int)
 
     if all(c in df.columns for c in ["commission", "commission_cluster_mean"]):
-        df["commission_drop_flag"] = (
-            df["commission"] < 0.5 * df["commission_cluster_mean"]
-        ).astype(int)
+        df["commission_drop_flag"] = (df["commission"] < 0.5 * df["commission_cluster_mean"]).astype(int)
 
     # ------------------------------------------------------------------ #
     # Ensure tbl_dt is datetime (for recency calculations)
@@ -167,17 +151,11 @@ def run_phase_2_1_richer_tx_behaviour(
     # 1) Cluster-relative commission and volume
     # ------------------------------------------------------------------ #
     if "commission" in df.columns and "commission_cluster_mean" in df.columns:
-        df["commission_vs_cluster_mean_ratio"] = df["commission"] / (
-            df["commission_cluster_mean"] + eps
-        )
-        df["commission_vs_cluster_mean_diff"] = (
-            df["commission"] - df["commission_cluster_mean"]
-        )
+        df["commission_vs_cluster_mean_ratio"] = df["commission"] / (df["commission_cluster_mean"] + eps)
+        df["commission_vs_cluster_mean_diff"] = df["commission"] - df["commission_cluster_mean"]
 
     if "vol_3m" in df.columns and "vol_3m_cluster_mean" in df.columns:
-        df["vol_3m_vs_cluster_mean_ratio"] = df["vol_3m"] / (
-            df["vol_3m_cluster_mean"] + eps
-        )
+        df["vol_3m_vs_cluster_mean_ratio"] = df["vol_3m"] / (df["vol_3m_cluster_mean"] + eps)
         df["vol_3m_vs_cluster_mean_diff"] = df["vol_3m"] - df["vol_3m_cluster_mean"]
 
     # ------------------------------------------------------------------ #
@@ -191,9 +169,7 @@ def run_phase_2_1_richer_tx_behaviour(
         and "cluster_avg_vol_3m" in df.columns
         and "commission_per_vol_3m" in df.columns
     ):
-        df["cluster_commission_per_vol_3m"] = df["cluster_avg_commission"] / (
-            df["cluster_avg_vol_3m"] + eps
-        )
+        df["cluster_commission_per_vol_3m"] = df["cluster_avg_commission"] / (df["cluster_avg_vol_3m"] + eps)
         df["commission_per_vol_vs_cluster_ratio"] = df["commission_per_vol_3m"] / (
             df["cluster_commission_per_vol_3m"] + eps
         )
@@ -255,18 +231,14 @@ def run_phase_2_1_richer_tx_behaviour(
             df[flag_col] = (df[col].fillna(0) == 0).astype(int)
 
     inactivity_flag_cols = [
-        c
-        for c in ["is_inactive_1m", "is_inactive_3m", "is_inactive_6m"]
-        if c in df.columns
+        c for c in ["is_inactive_1m", "is_inactive_3m", "is_inactive_6m"] if c in df.columns
     ]
 
     if inactivity_flag_cols:
         df["num_inactive_horizons"] = df[inactivity_flag_cols].sum(axis=1)
 
     if all(c in df.columns for c in inactivity_flag_cols):
-        df["max_inactivity_horizon_flag"] = (
-            df["is_inactive_1m"] + df["is_inactive_3m"] + df["is_inactive_6m"]
-        )
+        df["max_inactivity_horizon_flag"] = df["is_inactive_1m"] + df["is_inactive_3m"] + df["is_inactive_6m"]
 
     # ------------------------------------------------------------------ #
     # 5) Recency from snapshot date
@@ -280,8 +252,7 @@ def run_phase_2_1_richer_tx_behaviour(
     # ------------------------------------------------------------------ #
     new_cols = sorted(set(df.columns) - cols_before)
     logger.info(
-        "Phase 2.1: created %d transactional behaviour features "
-        "(df shape: %s → %s)",
+        "Phase 2.1: created %d transactional behaviour features (df shape: %s → %s)",
         len(new_cols),
         df_pd.shape,
         df.shape,

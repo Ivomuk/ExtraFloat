@@ -1,6 +1,6 @@
 """Tests for pd_model.modeling.inference."""
+
 import json
-import tempfile
 from pathlib import Path
 
 import joblib
@@ -15,9 +15,9 @@ from pd_model.modeling.inference import ModelArtifacts, align_features, load_art
 
 def _make_artifacts(tmp_dir: Path, n_features: int = 5) -> ModelArtifacts:
     """Create minimal fake artifacts for testing."""
+    from pd_model.modeling.calibration import attach_cal_pd, build_pd_calibration_map, build_policy_tables
     from pd_model.modeling.lgbm_model import train_lgbm
     from pd_model.modeling.xgb_model import train_xgb
-    from pd_model.modeling.calibration import build_pd_calibration_map, attach_cal_pd, build_policy_tables
 
     rng = np.random.default_rng(99)
     n = 600
@@ -35,6 +35,7 @@ def _make_artifacts(tmp_dir: Path, n_features: int = 5) -> ModelArtifacts:
 
     # Build combined calibration map for both models (same format as run_pipeline step 12)
     import pandas as _pd
+
     xgb_cal_map = build_pd_calibration_map(xgb_val, "xgb", cfg=cfg)
     lgb_cal_map = build_pd_calibration_map(lgb_val, "lgb", cfg=cfg)
     cal_map = _pd.concat([xgb_cal_map, lgb_cal_map], ignore_index=True)
@@ -47,9 +48,7 @@ def _make_artifacts(tmp_dir: Path, n_features: int = 5) -> ModelArtifacts:
     # Write all artifacts
     joblib.dump(xgb_model, tmp_dir / "xgb_model.joblib")
     joblib.dump(lgb_model, tmp_dir / "lgbm_model.joblib")
-    (tmp_dir / "feature_order.json").write_text(
-        json.dumps({"selected_features": feat_names})
-    )
+    (tmp_dir / "feature_order.json").write_text(json.dumps({"selected_features": feat_names}))
     cal_map.to_csv(tmp_dir / "pd_calibration_map.csv", index=False)
     xgb_thresh.to_csv(tmp_dir / "xgb_policy_thresholds.csv", index=False)
     lgb_thresh.to_csv(tmp_dir / "lgb_policy_thresholds.csv", index=False)
@@ -101,9 +100,7 @@ class TestScoreNewAgents:
         artifacts = _make_artifacts(tmp_path)
         n = 50
         rng = np.random.default_rng(11)
-        df = pd.DataFrame(
-            rng.normal(0, 1, (n, 5)), columns=[f"feat_{i}" for i in range(5)]
-        )
+        df = pd.DataFrame(rng.normal(0, 1, (n, 5)), columns=[f"feat_{i}" for i in range(5)])
         df[feature_config.AGENT_KEY] = [f"msisdn_{i}" for i in range(n)]
         df[feature_config.THIN_FILE_COL] = 0
         result = score_new_agents(df, artifacts)
@@ -113,9 +110,7 @@ class TestScoreNewAgents:
         artifacts = _make_artifacts(tmp_path)
         n = 30
         rng = np.random.default_rng(12)
-        df = pd.DataFrame(
-            rng.normal(0, 1, (n, 5)), columns=[f"feat_{i}" for i in range(5)]
-        )
+        df = pd.DataFrame(rng.normal(0, 1, (n, 5)), columns=[f"feat_{i}" for i in range(5)])
         df[feature_config.AGENT_KEY] = [f"msisdn_{i}" for i in range(n)]
         df[feature_config.THIN_FILE_COL] = 0
         result = score_new_agents(df, artifacts)
@@ -131,9 +126,7 @@ class TestScoreNewAgents:
         artifacts = _make_artifacts(tmp_path)
         n = 20
         rng = np.random.default_rng(13)
-        df = pd.DataFrame(
-            rng.normal(0, 1, (n, 5)), columns=[f"feat_{i}" for i in range(5)]
-        )
+        df = pd.DataFrame(rng.normal(0, 1, (n, 5)), columns=[f"feat_{i}" for i in range(5)])
         df[feature_config.AGENT_KEY] = [f"msisdn_{i}" for i in range(n)]
         df[feature_config.THIN_FILE_COL] = 1
         df["never_loan_pd_like"] = rng.uniform(0, 1, n)
@@ -150,9 +143,7 @@ class TestScoreNewAgents:
         n = 20
         rng = np.random.default_rng(14)
         # Only provide 3 out of 5 features
-        df = pd.DataFrame(
-            rng.normal(0, 1, (n, 3)), columns=[f"feat_{i}" for i in range(3)]
-        )
+        df = pd.DataFrame(rng.normal(0, 1, (n, 3)), columns=[f"feat_{i}" for i in range(3)])
         df[feature_config.AGENT_KEY] = [f"msisdn_{i}" for i in range(n)]
         df[feature_config.THIN_FILE_COL] = 0
         # Should not raise — missing features filled with NaN

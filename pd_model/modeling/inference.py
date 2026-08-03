@@ -38,22 +38,24 @@ logger = get_logger(__name__)
 # Artifact container
 # ======================================================================== #
 
+
 @dataclass
 class ModelArtifacts:
     """Container for all serialized pipeline artifacts needed at inference time."""
 
-    xgb_model: Any                          # xgb.XGBClassifier
-    lgb_model: Any                          # lgb.LGBMClassifier
-    feature_order: list[str]                # ordered list of model input features
-    cal_map: pd.DataFrame                   # from build_pd_calibration_map (stacked)
-    xgb_policy_thresholds: pd.DataFrame     # from build_policy_tables
-    lgb_policy_thresholds: pd.DataFrame     # from build_policy_tables
-    transform_report: pd.DataFrame          # from apply_pd_transformations
+    xgb_model: Any  # xgb.XGBClassifier
+    lgb_model: Any  # lgb.LGBMClassifier
+    feature_order: list[str]  # ordered list of model input features
+    cal_map: pd.DataFrame  # from build_pd_calibration_map (stacked)
+    xgb_policy_thresholds: pd.DataFrame  # from build_policy_tables
+    lgb_policy_thresholds: pd.DataFrame  # from build_policy_tables
+    transform_report: pd.DataFrame  # from apply_pd_transformations
 
 
 # ======================================================================== #
 # Artifact loading
 # ======================================================================== #
+
 
 def load_artifacts(artifacts_dir: Path) -> ModelArtifacts:
     """
@@ -99,7 +101,9 @@ def load_artifacts(artifacts_dir: Path) -> ModelArtifacts:
 
     logger.info(
         "load_artifacts: %d features | cal_map bins=%d | xgb_thresh rows=%d",
-        len(feature_order), len(cal_map), len(xgb_policy_thresholds),
+        len(feature_order),
+        len(cal_map),
+        len(xgb_policy_thresholds),
     )
 
     # Log lineage from model_metadata.json if present and non-empty
@@ -107,6 +111,7 @@ def load_artifacts(artifacts_dir: Path) -> ModelArtifacts:
     if meta_path.exists():
         try:
             import json as _json
+
             meta = _json.loads(meta_path.read_text())
             if meta and not meta.get("_comment"):
                 champion_key = meta.get("champion", "xgb")
@@ -118,9 +123,7 @@ def load_artifacts(artifacts_dir: Path) -> ModelArtifacts:
                     meta.get(f"{champion_key}_val_auc") or float("nan"),
                 )
         except json.JSONDecodeError as exc:
-            raise RuntimeError(
-                f"[load_artifacts] model_metadata.json contains invalid JSON: {exc}"
-            ) from exc
+            raise RuntimeError(f"[load_artifacts] model_metadata.json contains invalid JSON: {exc}") from exc
         except Exception:
             pass  # file-read edge cases only; structural errors caught above
 
@@ -138,6 +141,7 @@ def load_artifacts(artifacts_dir: Path) -> ModelArtifacts:
 # ======================================================================== #
 # Feature alignment
 # ======================================================================== #
+
 
 def align_features(
     df_transformed: pd.DataFrame,
@@ -159,7 +163,8 @@ def align_features(
         logger.warning(
             "align_features: %d features in feature_order are missing from "
             "input DataFrame and will be filled with NaN: %s",
-            len(missing), missing[:20],
+            len(missing),
+            missing[:20],
         )
         for f in missing:
             df_transformed[f] = np.nan
@@ -170,6 +175,7 @@ def align_features(
 # ======================================================================== #
 # End-to-end inference
 # ======================================================================== #
+
 
 def score_new_agents(
     df_transformed: pd.DataFrame,
@@ -228,9 +234,14 @@ def score_new_agents(
         raise ValueError(f"champion must be 'xgb' or 'lgb', got '{champion}'")
 
     # Extract meta columns before aligning to feature matrix
-    meta_cols = [feature_config.AGENT_KEY, feature_config.THIN_FILE_COL,
-                 "never_loan_pd_like", "never_loan_score_0_100", "never_loan_points",
-                 "never_loan_top_drivers"]
+    meta_cols = [
+        feature_config.AGENT_KEY,
+        feature_config.THIN_FILE_COL,
+        "never_loan_pd_like",
+        "never_loan_score_0_100",
+        "never_loan_points",
+        "never_loan_top_drivers",
+    ]
 
     if agent_meta is None:
         agent_meta = df_transformed[[c for c in meta_cols if c in df_transformed.columns]].copy()
@@ -242,9 +253,7 @@ def score_new_agents(
     xgb_raw = artifacts.xgb_model.predict_proba(X)[:, 1]
     lgb_raw = artifacts.lgb_model.predict_proba(X)[:, 1]
 
-    logger.info(
-        "score_new_agents: %d agents scored | champion=%s", X.shape[0], champion
-    )
+    logger.info("score_new_agents: %d agents scored | champion=%s", X.shape[0], champion)
 
     # Build output DataFrame
     out = agent_meta.copy().reset_index(drop=True)
@@ -311,14 +320,16 @@ def score_new_agents(
             champ_model = artifacts.xgb_model if champion == "xgb" else artifacts.lgb_model
             shap_vals = compute_shap_values(champ_model, X, model_key=champion)
             reasons_df = build_adverse_action_df(
-                shap_vals, feature_names=artifacts.feature_order,
+                shap_vals,
+                feature_names=artifacts.feature_order,
                 n_reasons=n_adverse_reasons,
             )
             reasons_df.index = out.index
             out = pd.concat([out, reasons_df], axis=1)
             logger.info(
                 "score_new_agents: SHAP adverse reasons added (champion=%s, n_reasons=%d)",
-                champion, n_adverse_reasons,
+                champion,
+                n_adverse_reasons,
             )
         except Exception as exc:
             logger.warning("SHAP computation failed — skipping adverse reasons: %s", exc)
@@ -329,6 +340,7 @@ def score_new_agents(
 # ======================================================================== #
 # Full end-to-end inference pipeline
 # ======================================================================== #
+
 
 def run_inference_pipeline(
     df_raw: pd.DataFrame,
@@ -364,7 +376,6 @@ def run_inference_pipeline(
     )
     from pd_model.preprocessing.transaction_features import run_phase_2_1_richer_tx_behaviour
     from pd_model.preprocessing.transformations import build_transformed_dataframe
-    from pd_model.scoring.iv_selector import iv_filter_phase_2
 
     artifacts = load_artifacts(Path(artifacts_dir))
 
@@ -416,11 +427,20 @@ def run_inference_pipeline(
     return score_new_agents(
         df_transformed=df_transformed,
         artifacts=artifacts,
-        agent_meta=df[[c for c in [
-            fc.AGENT_KEY, fc.THIN_FILE_COL,
-            "never_loan_pd_like", "never_loan_score_0_100",
-            "never_loan_points", "never_loan_top_drivers",
-        ] if c in df.columns]].copy(),
+        agent_meta=df[
+            [
+                c
+                for c in [
+                    fc.AGENT_KEY,
+                    fc.THIN_FILE_COL,
+                    "never_loan_pd_like",
+                    "never_loan_score_0_100",
+                    "never_loan_points",
+                    "never_loan_top_drivers",
+                ]
+                if c in df.columns
+            ]
+        ].copy(),
         cfg=cfg,
         champion=champion,
     )

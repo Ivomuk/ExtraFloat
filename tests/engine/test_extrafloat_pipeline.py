@@ -17,15 +17,9 @@ Covers all 10 requested test scenarios:
   10. End-to-end: features → caps → assigned_limit sensible values
 """
 
-import numpy as np
 import pandas as pd
 import pytest
 
-from extrafloat.engine.extrafloat_limit_engine_features import (
-    build_extrafloat_limit_engine_features,
-    prepare_borrower_limit_features,
-    prepare_transaction_capacity_features,
-)
 from extrafloat.engine.extrafloat_limit_engine_caps import (
     DEFAULT_CAP_CONFIG,
     apply_policy_adjustments,
@@ -35,6 +29,11 @@ from extrafloat.engine.extrafloat_limit_engine_caps import (
     compute_recent_usage_cap,
     compute_risk_cap,
 )
+from extrafloat.engine.extrafloat_limit_engine_features import (
+    build_extrafloat_limit_engine_features,
+    prepare_borrower_limit_features,
+    prepare_transaction_capacity_features,
+)
 from extrafloat.engine.run_extrafloat_limit_engine import run_extrafloat_limit_engine
 
 _THIN_FILE_THRESHOLD = DEFAULT_CAP_CONFIG.get("combination", {}).get("thin_file_threshold", 3)
@@ -43,6 +42,7 @@ _THIN_FILE_THRESHOLD = DEFAULT_CAP_CONFIG.get("combination", {}).get("thin_file_
 # ─────────────────────────────────────────────────────────────────────────────
 # HELPER FACTORIES
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 def _txn_row(**overrides) -> dict:
     """Minimal valid transaction-capacity row using sample-file values."""
@@ -54,23 +54,51 @@ def _txn_row(**overrides) -> dict:
         "average_balance": 37646.15,
         "commission": 14402.80,
         # cash-out
-        "cash_out_vol_1m": 2.0,   "cash_out_vol_3m": 7.0,   "cash_out_vol_6m": 12.0,
-        "cash_out_value_1m": 40000.0, "cash_out_value_3m": 195000.0, "cash_out_value_6m": 680000.0,
-        "cash_out_cust_1m": 2.0,  "cash_out_cust_3m": 7.0,  "cash_out_cust_6m": 12.0,
-        "cash_out_comm_1m": 547.0, "cash_out_comm_3m": 2017.0, "cash_out_comm_6m": 5757.0,
+        "cash_out_vol_1m": 2.0,
+        "cash_out_vol_3m": 7.0,
+        "cash_out_vol_6m": 12.0,
+        "cash_out_value_1m": 40000.0,
+        "cash_out_value_3m": 195000.0,
+        "cash_out_value_6m": 680000.0,
+        "cash_out_cust_1m": 2.0,
+        "cash_out_cust_3m": 7.0,
+        "cash_out_cust_6m": 12.0,
+        "cash_out_comm_1m": 547.0,
+        "cash_out_comm_3m": 2017.0,
+        "cash_out_comm_6m": 5757.0,
         # cash-in
-        "cash_in_vol_1m": 3.0,    "cash_in_vol_3m": 7.0,    "cash_in_vol_6m": 12.0,
-        "cash_in_value_1m": 36000.0, "cash_in_value_3m": 119500.0, "cash_in_value_6m": 170500.0,
-        "cash_in_cust_1m": 3.0,   "cash_in_cust_3m": 7.0,   "cash_in_cust_6m": 12.0,
-        "cash_in_comm_1m": 473.0,  "cash_in_comm_3m": 1193.0, "cash_in_comm_6m": 1993.0,
+        "cash_in_vol_1m": 3.0,
+        "cash_in_vol_3m": 7.0,
+        "cash_in_vol_6m": 12.0,
+        "cash_in_value_1m": 36000.0,
+        "cash_in_value_3m": 119500.0,
+        "cash_in_value_6m": 170500.0,
+        "cash_in_cust_1m": 3.0,
+        "cash_in_cust_3m": 7.0,
+        "cash_in_cust_6m": 12.0,
+        "cash_in_comm_1m": 473.0,
+        "cash_in_comm_3m": 1193.0,
+        "cash_in_comm_6m": 1993.0,
         # payment
-        "payment_vol_1m": 9.0,    "payment_vol_3m": 25.0,   "payment_vol_6m": 36.0,
-        "payment_value_1m": 42000.0, "payment_value_3m": 117500.0, "payment_value_6m": 151200.0,
-        "payment_cust_1m": 9.0,   "payment_cust_3m": 25.0,  "payment_cust_6m": 36.0,
-        "payment_comm_1m": 1848.0, "payment_comm_3m": 5170.0, "payment_comm_6m": 6652.80,
+        "payment_vol_1m": 9.0,
+        "payment_vol_3m": 25.0,
+        "payment_vol_6m": 36.0,
+        "payment_value_1m": 42000.0,
+        "payment_value_3m": 117500.0,
+        "payment_value_6m": 151200.0,
+        "payment_cust_1m": 9.0,
+        "payment_cust_3m": 25.0,
+        "payment_cust_6m": 36.0,
+        "payment_comm_1m": 1848.0,
+        "payment_comm_3m": 5170.0,
+        "payment_comm_6m": 6652.80,
         # totals
-        "cust_1m": 14.0, "cust_3m": 39.0, "cust_6m": 60.0,
-        "vol_1m": 14.0,  "vol_3m": 39.0,  "vol_6m": 60.0,
+        "cust_1m": 14.0,
+        "cust_3m": 39.0,
+        "cust_6m": 60.0,
+        "vol_1m": 14.0,
+        "vol_3m": 39.0,
+        "vol_6m": 60.0,
     }
     base.update(overrides)
     return base
@@ -176,7 +204,7 @@ def _features(**overrides) -> pd.DataFrame:
         "operational_activity_flag": 1.0,
         "recent_credit_active_flag": 1.0,
         "is_peak_season_flag": 0.0,
-        "agent_tier_ceiling_multiplier": 0.25,   # Silver Class: 250,000 / 1,000,000
+        "agent_tier_ceiling_multiplier": 0.25,  # Silver Class: 250,000 / 1,000,000
         # ── recent usage cap inputs ──────────────────────────────────────────
         "recent_disbursement_amount_1m": 5000.0,
         "recent_disbursement_amount_3m": 10000.0,
@@ -209,6 +237,7 @@ def _features(**overrides) -> pd.DataFrame:
 # TEST 1: prepare_transaction_capacity_features — sample data
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def test_prepare_transaction_capacity_features_sample_data():
     """
     agent_msisdn is renamed to msisdn; PRIMARY 30d/90d signals are derived;
@@ -223,12 +252,18 @@ def test_prepare_transaction_capacity_features_sample_data():
 
     # All PRIMARY 30d/90d signal columns must exist
     for col in [
-        "avg_daily_balance_30d", "avg_daily_balance_90d",
-        "avg_monthly_revenue_30d", "avg_monthly_revenue_90d",
-        "avg_monthly_txn_count_30d", "avg_monthly_txn_count_90d",
-        "avg_monthly_payments_30d", "avg_monthly_payments_90d",
-        "active_customer_count_30d", "active_customer_count_90d",
-        "avg_monthly_txn_volume_30d", "avg_monthly_txn_volume_90d",
+        "avg_daily_balance_30d",
+        "avg_daily_balance_90d",
+        "avg_monthly_revenue_30d",
+        "avg_monthly_revenue_90d",
+        "avg_monthly_txn_count_30d",
+        "avg_monthly_txn_count_90d",
+        "avg_monthly_payments_30d",
+        "avg_monthly_payments_90d",
+        "active_customer_count_30d",
+        "active_customer_count_90d",
+        "avg_monthly_txn_volume_30d",
+        "avg_monthly_txn_volume_90d",
     ]:
         assert col in result.columns, f"Missing PRIMARY signal: {col}"
 
@@ -256,6 +291,7 @@ def test_prepare_transaction_capacity_features_sample_data():
 # TEST 2a: prepare_borrower_limit_features — all-null optional fields
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def test_prepare_borrower_limit_features_all_null_optional():
     """
     Function must not raise when all optional numeric fields are NaN;
@@ -264,14 +300,25 @@ def test_prepare_borrower_limit_features_all_null_optional():
     row = _borrower_row()
     # Overwrite every nullable numeric column with None
     for col in [
-        "total_disbursed_amount", "avg_loan_size_lifetime", "max_loan_size_lifetime",
-        "lifetime_avg_hours_to_principal_cure", "lifetime_worst_hours_to_principal_cure",
-        "lifetime_cure_time_volatility", "avg_prior_hours_to_cure",
-        "worst_prior_hours_to_cure", "cure_time_volatility",
-        "recent_3_avg_cure_time", "cure_time_trend", "borrower_trend",
-        "loans_last_50_loans", "defaults_last_50_loans", "default_rate_last_50_loans",
-        "prior_on_time_streak", "prior_default_streak",
-        "loan_size_vs_avg_ratio", "loan_size_vs_max_ratio",
+        "total_disbursed_amount",
+        "avg_loan_size_lifetime",
+        "max_loan_size_lifetime",
+        "lifetime_avg_hours_to_principal_cure",
+        "lifetime_worst_hours_to_principal_cure",
+        "lifetime_cure_time_volatility",
+        "avg_prior_hours_to_cure",
+        "worst_prior_hours_to_cure",
+        "cure_time_volatility",
+        "recent_3_avg_cure_time",
+        "cure_time_trend",
+        "borrower_trend",
+        "loans_last_50_loans",
+        "defaults_last_50_loans",
+        "default_rate_last_50_loans",
+        "prior_on_time_streak",
+        "prior_default_streak",
+        "loan_size_vs_avg_ratio",
+        "loan_size_vs_max_ratio",
     ]:
         row[col] = None
 
@@ -280,8 +327,12 @@ def test_prepare_borrower_limit_features_all_null_optional():
     assert isinstance(result, pd.DataFrame)
     assert len(result) == 1
     assert "msisdn" in result.columns
-    for derived in ("exposure_tolerance_proxy", "recent_risk_proxy",
-                    "stability_proxy", "borrower_tenure_days"):
+    for derived in (
+        "exposure_tolerance_proxy",
+        "recent_risk_proxy",
+        "stability_proxy",
+        "borrower_tenure_days",
+    ):
         assert derived in result.columns, f"Missing derived column: {derived}"
     assert result.iloc[0]["msisdn"] == "256785"
 
@@ -289,6 +340,7 @@ def test_prepare_borrower_limit_features_all_null_optional():
 # ─────────────────────────────────────────────────────────────────────────────
 # TEST 2b: prepare_borrower_limit_features — new-to-credit borrower
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 def test_prepare_borrower_limit_features_new_to_credit():
     """
@@ -333,6 +385,7 @@ def test_prepare_borrower_limit_features_new_to_credit():
 # TEST 3: build_extrafloat_limit_engine_features — alias columns
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def test_build_extrafloat_limit_engine_features_alias_columns():
     """
     All alias columns required by the caps engine are present;
@@ -370,18 +423,31 @@ def test_build_extrafloat_limit_engine_features_alias_columns():
 # TEST 4: compute_risk_cap — score range [0,1], risk_cap bounded
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def test_compute_risk_cap_score_bounds():
     """
     risk_score always in [0,1] and risk_cap always in [0, 1_000_000];
     perfect borrower reaches risk_score ≈ 1.0 and risk_cap ≈ 1_000_000.
     """
     cases = [
-        dict(on_time_repayment_rate=0.0, lifetime_default_rate=1.0,
-             default_rate_last_10_loans=1.0, repayment_stability_score=0.0),
-        dict(on_time_repayment_rate=0.5, lifetime_default_rate=0.5,
-             default_rate_last_10_loans=0.5, repayment_stability_score=0.5),
-        dict(on_time_repayment_rate=1.0, lifetime_default_rate=0.0,
-             default_rate_last_10_loans=0.0, repayment_stability_score=1.0),
+        {
+            "on_time_repayment_rate": 0.0,
+            "lifetime_default_rate": 1.0,
+            "default_rate_last_10_loans": 1.0,
+            "repayment_stability_score": 0.0,
+        },
+        {
+            "on_time_repayment_rate": 0.5,
+            "lifetime_default_rate": 0.5,
+            "default_rate_last_10_loans": 0.5,
+            "repayment_stability_score": 0.5,
+        },
+        {
+            "on_time_repayment_rate": 1.0,
+            "lifetime_default_rate": 0.0,
+            "default_rate_last_10_loans": 0.0,
+            "repayment_stability_score": 1.0,
+        },
     ]
     for case in cases:
         result = compute_risk_cap(_features(**case))
@@ -406,15 +472,15 @@ def test_compute_risk_cap_score_bounds():
     assert float(result_perfect["risk_cap"].iloc[0]) == pytest.approx(1_000_000.0, abs=5000.0)
 
     # Worst borrower should score lower than mid borrower
-    assert (
-        float(compute_risk_cap(_features(**cases[0]))["risk_score"].iloc[0])
-        < float(compute_risk_cap(_features(**cases[2]))["risk_score"].iloc[0])
+    assert float(compute_risk_cap(_features(**cases[0]))["risk_score"].iloc[0]) < float(
+        compute_risk_cap(_features(**cases[2]))["risk_score"].iloc[0]
     )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # TEST 5: compute_capacity_cap — primary path and fallback path
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 def test_compute_capacity_cap_primary_and_fallback():
     """
@@ -429,18 +495,22 @@ def test_compute_capacity_cap_primary_and_fallback():
     assert float(result_primary["capacity_fallback_inputs"].iloc[0]) == 0.0
 
     # Fallback: drop all primary 30d/90d columns, add legacy fallback columns
-    fallback_df = pd.DataFrame([{
-        "average_balance": 37646.15,
-        "revenue_1m": 2868.0,
-        "vol_1m": 14.0,
-        "payment_value_1m": 42000.0,
-        "cust_1m": 14.0,
-        "total_txn_value_1m": 118000.0,
-        "operational_activity_flag": 1.0,
-        "recent_credit_active_flag": 1.0,
-        "is_peak_season_flag": 0.0,
-        "agent_tier_ceiling_multiplier": 0.25,   # Silver Class: 250,000 / 1,000,000
-    }])
+    fallback_df = pd.DataFrame(
+        [
+            {
+                "average_balance": 37646.15,
+                "revenue_1m": 2868.0,
+                "vol_1m": 14.0,
+                "payment_value_1m": 42000.0,
+                "cust_1m": 14.0,
+                "total_txn_value_1m": 118000.0,
+                "operational_activity_flag": 1.0,
+                "recent_credit_active_flag": 1.0,
+                "is_peak_season_flag": 0.0,
+                "agent_tier_ceiling_multiplier": 0.25,  # Silver Class: 250,000 / 1,000,000
+            }
+        ]
+    )
     result_fallback = compute_capacity_cap(fallback_df)
     assert float(result_fallback["capacity_cap"].iloc[0]) > 0.0
     assert float(result_fallback["capacity_fallback_inputs"].iloc[0]) > 0.0
@@ -449,6 +519,7 @@ def test_compute_capacity_cap_primary_and_fallback():
 # ─────────────────────────────────────────────────────────────────────────────
 # TEST 6: compute_recent_usage_cap — activity gate and penalty haircut
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 def test_compute_recent_usage_cap_activity_gate_and_penalty():
     """
@@ -503,13 +574,18 @@ def test_compute_recent_usage_cap_activity_gate_and_penalty():
 # TEST 7: compute_prior_exposure_cap — new-to-credit vs existing
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def test_compute_prior_exposure_cap_new_vs_existing():
     """
     New-to-credit (avg_prior=0, max_prior=0): cap = current_loan × 0.50.
     Existing borrower (avg_prior=5000, max_prior=8000): cap > new-to-credit cap.
     """
-    new_df = _features(avg_prior_loan_size=0.0, max_prior_loan_size=0.0,
-                       current_loan_size=5000.0, recent_repayment_performance=1.0)
+    new_df = _features(
+        avg_prior_loan_size=0.0,
+        max_prior_loan_size=0.0,
+        current_loan_size=5000.0,
+        recent_repayment_performance=1.0,
+    )
     result_new = compute_prior_exposure_cap(new_df)
     cap_new = float(result_new["prior_exposure_cap"].iloc[0])
 
@@ -517,8 +593,12 @@ def test_compute_prior_exposure_cap_new_vs_existing():
     assert cap_new == pytest.approx(2500.0, abs=1.0)
     assert result_new["prior_exposure_reason"].iloc[0] == "new_to_credit_proxy_cap"
 
-    existing_df = _features(avg_prior_loan_size=5000.0, max_prior_loan_size=8000.0,
-                            current_loan_size=5000.0, recent_repayment_performance=1.0)
+    existing_df = _features(
+        avg_prior_loan_size=5000.0,
+        max_prior_loan_size=8000.0,
+        current_loan_size=5000.0,
+        recent_repayment_performance=1.0,
+    )
     result_existing = compute_prior_exposure_cap(existing_df)
     cap_existing = float(result_existing["prior_exposure_cap"].iloc[0])
 
@@ -529,6 +609,7 @@ def test_compute_prior_exposure_cap_new_vs_existing():
 # ─────────────────────────────────────────────────────────────────────────────
 # TEST 8: combine_caps — thin-file vs standard weighting
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 def test_combine_caps_thin_file_vs_standard():
     """
@@ -541,8 +622,7 @@ def test_combine_caps_thin_file_vs_standard():
 
     Scenario B (risk_cap=30000, not binding): combined_reason reflects weighting type.
     """
-    base = dict(capacity_cap=10000.0, recent_usage_cap=10000.0,
-                prior_exposure_cap=10000.0, prior_limit=0.0)
+    base = {"capacity_cap": 10000.0, "recent_usage_cap": 10000.0, "prior_exposure_cap": 10000.0, "prior_limit": 0.0}
 
     # Scenario A — guardrail binds; check pre-guardrail difference
     thin_A = combine_caps(_features(is_thin_file=1.0, risk_cap=2000.0, **base))
@@ -566,6 +646,7 @@ def test_combine_caps_thin_file_vs_standard():
 # TEST 9: apply_policy_adjustments — tier classification, proven-good override
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def test_apply_policy_adjustments_tier_and_proven_good():
     """
     Tier 1 (score >= 0.85) → multiplier 1.00; tier_4 (score < 0.35) → multiplier 0.40.
@@ -573,30 +654,47 @@ def test_apply_policy_adjustments_tier_and_proven_good():
     policy_cap at 85% of combined_cap, overriding lower tier multipliers.
     """
     combined = 10000.0
-    df = pd.DataFrame([
-        # Tier 1: score >= 0.85 → multiplier 1.00 (best borrower, no penalty)
-        dict(risk_score=0.90, combined_cap=combined, risk_cap=30000.0,
-             total_loans=5.0, on_time_repayment_rate=0.70,
-             lifetime_default_rate=0.15,
-             recent_disbursement_amount_1m=5000.0,
-             recent_repayment_amount_1m=5000.0,
-             agent_tier_ceiling_multiplier=1.0),
-        # Tier 4: score < 0.35 → multiplier 0.40 (worst borrower, 60% cut)
-        dict(risk_score=0.20, combined_cap=combined, risk_cap=30000.0,
-             total_loans=5.0, on_time_repayment_rate=0.30,
-             lifetime_default_rate=0.40,
-             recent_disbursement_amount_1m=5000.0,
-             recent_repayment_amount_1m=5000.0,
-             agent_tier_ceiling_multiplier=1.0),
-        # Tier 3 (0.35 <= score < 0.60) but proven-good → floor override
-        # raw_cap = 10000 * 0.65 = 6500; proven_floor = 10000 * 0.85 = 8500
-        dict(risk_score=0.50, combined_cap=combined, risk_cap=30000.0,
-             total_loans=10.0, on_time_repayment_rate=0.95,
-             lifetime_default_rate=0.02,
-             recent_disbursement_amount_1m=5000.0,
-             recent_repayment_amount_1m=5000.0,
-             agent_tier_ceiling_multiplier=1.0),
-    ])
+    df = pd.DataFrame(
+        [
+            # Tier 1: score >= 0.85 → multiplier 1.00 (best borrower, no penalty)
+            {
+                "risk_score": 0.90,
+                "combined_cap": combined,
+                "risk_cap": 30000.0,
+                "total_loans": 5.0,
+                "on_time_repayment_rate": 0.70,
+                "lifetime_default_rate": 0.15,
+                "recent_disbursement_amount_1m": 5000.0,
+                "recent_repayment_amount_1m": 5000.0,
+                "agent_tier_ceiling_multiplier": 1.0,
+            },
+            # Tier 4: score < 0.35 → multiplier 0.40 (worst borrower, 60% cut)
+            {
+                "risk_score": 0.20,
+                "combined_cap": combined,
+                "risk_cap": 30000.0,
+                "total_loans": 5.0,
+                "on_time_repayment_rate": 0.30,
+                "lifetime_default_rate": 0.40,
+                "recent_disbursement_amount_1m": 5000.0,
+                "recent_repayment_amount_1m": 5000.0,
+                "agent_tier_ceiling_multiplier": 1.0,
+            },
+            # Tier 3 (0.35 <= score < 0.60) but proven-good → floor override
+            # raw_cap = 10000 * 0.65 = 6500; proven_floor = 10000 * 0.85 = 8500
+            {
+                "risk_score": 0.50,
+                "combined_cap": combined,
+                "risk_cap": 30000.0,
+                "total_loans": 10.0,
+                "on_time_repayment_rate": 0.95,
+                "lifetime_default_rate": 0.02,
+                "recent_disbursement_amount_1m": 5000.0,
+                "recent_repayment_amount_1m": 5000.0,
+                "agent_tier_ceiling_multiplier": 1.0,
+            },
+        ]
+    )
 
     result = apply_policy_adjustments(df)
 
@@ -619,6 +717,7 @@ def test_apply_policy_adjustments_tier_and_proven_good():
 # TEST 10: End-to-end — features → caps → assigned_limit
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def test_run_extrafloat_limit_engine_end_to_end():
     """
     Full pipeline: assigned_limit is present, in [0, 1_000_000], a multiple of 100,
@@ -640,9 +739,7 @@ def test_run_extrafloat_limit_engine_end_to_end():
     # All non-zero limits must be multiples of 100
     non_zero = assigned[assigned > 0]
     if len(non_zero) > 0:
-        assert (non_zero % 100 == 0).all(), (
-            f"assigned_limit not rounded to 100: {non_zero.values}"
-        )
+        assert (non_zero % 100 == 0).all(), f"assigned_limit not rounded to 100: {non_zero.values}"
 
     # A healthy borrower should receive a positive limit
     assert float(assigned.iloc[0]) > 0, (

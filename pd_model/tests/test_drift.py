@@ -1,7 +1,7 @@
 """Tests for pd_model.monitoring.drift."""
+
 import numpy as np
 import pandas as pd
-import pytest
 
 from pd_model.monitoring.drift import (
     compute_csi,
@@ -12,12 +12,14 @@ from pd_model.monitoring.drift import (
 
 def _make_df(seed: int, n: int = 500, shift: float = 0.0) -> pd.DataFrame:
     rng = np.random.default_rng(seed)
-    return pd.DataFrame({
-        "score": rng.normal(0.5 + shift, 0.15, n).clip(0, 1),
-        "feat_a": rng.normal(shift, 1, n),
-        "feat_b": rng.exponential(1 + shift, n),
-        "feat_c": rng.normal(0, 1, n),
-    })
+    return pd.DataFrame(
+        {
+            "score": rng.normal(0.5 + shift, 0.15, n).clip(0, 1),
+            "feat_a": rng.normal(shift, 1, n),
+            "feat_b": rng.exponential(1 + shift, n),
+            "feat_c": rng.normal(0, 1, n),
+        }
+    )
 
 
 class TestComputePsi:
@@ -29,7 +31,7 @@ class TestComputePsi:
     def test_large_shift_high_psi(self):
         rng = np.random.default_rng(1)
         ref = pd.Series(rng.normal(0, 1, 1000))
-        mon = pd.Series(rng.normal(5, 1, 1000))   # big shift
+        mon = pd.Series(rng.normal(5, 1, 1000))  # big shift
         psi = compute_psi(ref, mon)
         assert psi > 0.25
 
@@ -58,7 +60,7 @@ class TestComputeCsi:
 
     def test_sorted_descending(self):
         ref = _make_df(0)
-        mon = _make_df(1, shift=2.0)   # large shift on all features
+        mon = _make_df(1, shift=2.0)  # large shift on all features
         csi = compute_csi(ref, mon, feature_cols=["feat_a", "feat_b", "feat_c"])
         vals = csi["csi"].dropna().tolist()
         assert vals == sorted(vals, reverse=True)
@@ -72,7 +74,7 @@ class TestComputeCsi:
 
     def test_stability_labels(self):
         ref = _make_df(0, n=1000)
-        mon_stable = _make_df(0, n=1000)         # same distribution
+        mon_stable = _make_df(0, n=1000)  # same distribution
         mon_shifted = _make_df(0, n=1000, shift=3.0)  # big shift
 
         csi_stable = compute_csi(ref, mon_stable, ["feat_a"])

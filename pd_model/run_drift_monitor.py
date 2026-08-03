@@ -77,14 +77,16 @@ def run_drift_monitor(
 
     logger.info(
         "Drift monitor: reference=%d rows | monitoring=%d rows",
-        len(reference_df), len(monitoring_df),
+        len(reference_df),
+        len(monitoring_df),
     )
 
     feature_cols = _load_feature_order(artifacts_dir)
     if not feature_cols:
         # Fall back to numeric columns present in both DataFrames
         feature_cols = [
-            c for c in reference_df.select_dtypes(include="number").columns
+            c
+            for c in reference_df.select_dtypes(include="number").columns
             if c in monitoring_df.columns and c != score_col
         ]
         logger.warning(
@@ -132,31 +134,35 @@ def run_drift_monitor(
 # CLI
 # ======================================================================== #
 
+
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         description="PD Model Drift Monitor",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    p.add_argument("--reference-file",  required=True, type=Path,
-                   help="CSV of training/reference scored snapshot")
-    p.add_argument("--monitoring-file", required=True, type=Path,
-                   help="CSV of latest production scored snapshot")
-    p.add_argument("--artifacts-dir",   required=True, type=Path,
-                   help="Directory containing feature_order.json")
-    p.add_argument("--output-dir",      required=True, type=Path,
-                   help="Directory to write alert JSON and CSI table")
-    p.add_argument("--score-col",       default="xgb_raw_score",
-                   help="Score column name present in both CSVs")
-    p.add_argument("--psi-warn",        type=float, default=0.10)
-    p.add_argument("--psi-critical",    type=float, default=0.25)
-    p.add_argument("--slack-webhook",   default=os.environ.get("SLACK_WEBHOOK"),
-                   help="Slack incoming webhook URL (or set SLACK_WEBHOOK env var)")
-    p.add_argument("--report-date",     default=None,
-                   help="Override report date (YYYY-MM-DD); default: today")
-    p.add_argument("--bins",            type=int, default=10,
-                   help="Number of bins for PSI/CSI calculation")
-    p.add_argument("--log-level",       default="INFO",
-                   choices=["DEBUG", "INFO", "WARNING", "ERROR"])
+    p.add_argument(
+        "--reference-file", required=True, type=Path, help="CSV of training/reference scored snapshot"
+    )
+    p.add_argument(
+        "--monitoring-file", required=True, type=Path, help="CSV of latest production scored snapshot"
+    )
+    p.add_argument(
+        "--artifacts-dir", required=True, type=Path, help="Directory containing feature_order.json"
+    )
+    p.add_argument(
+        "--output-dir", required=True, type=Path, help="Directory to write alert JSON and CSI table"
+    )
+    p.add_argument("--score-col", default="xgb_raw_score", help="Score column name present in both CSVs")
+    p.add_argument("--psi-warn", type=float, default=0.10)
+    p.add_argument("--psi-critical", type=float, default=0.25)
+    p.add_argument(
+        "--slack-webhook",
+        default=os.environ.get("SLACK_WEBHOOK"),
+        help="Slack incoming webhook URL (or set SLACK_WEBHOOK env var)",
+    )
+    p.add_argument("--report-date", default=None, help="Override report date (YYYY-MM-DD); default: today")
+    p.add_argument("--bins", type=int, default=10, help="Number of bins for PSI/CSI calculation")
+    p.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
     return p
 
 

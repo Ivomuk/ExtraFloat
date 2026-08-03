@@ -42,9 +42,7 @@ def _read_csv(path: str | Path) -> pd.DataFrame:
     """Read CSV after confirming the file exists."""
     p = Path(path)
     if not p.exists():
-        raise FileNotFoundError(
-            f"ExtraFloat data loader: file not found — {p.resolve()}"
-        )
+        raise FileNotFoundError(f"ExtraFloat data loader: file not found — {p.resolve()}")
     df = pd.read_csv(p, sep=None, engine="python")
     logger.info("Loaded %s — %d rows, %d columns", p.name, len(df), len(df.columns))
     return df
@@ -68,6 +66,7 @@ def _parse_dates(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
 # ─────────────────────────────────────────────────────────────────────────────
 # 1. TRANSACTION CAPACITY FEATURES
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 def load_transaction_capacity_features(path: str | Path) -> pd.DataFrame:
     """
@@ -105,6 +104,7 @@ def load_transaction_capacity_features(path: str | Path) -> pd.DataFrame:
 # ─────────────────────────────────────────────────────────────────────────────
 # 2. LOAN SUMMARY RECENT FEATURES
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 def load_loan_summary_recent_features(path: str | Path) -> pd.DataFrame:
     """
@@ -153,6 +153,7 @@ def load_loan_summary_recent_features(path: str | Path) -> pd.DataFrame:
 # ─────────────────────────────────────────────────────────────────────────────
 # 3. BORROWER LIMIT FEATURES
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 def load_borrower_limit_features(path: str | Path) -> pd.DataFrame:
     """

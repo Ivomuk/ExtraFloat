@@ -4,7 +4,6 @@ import inspect
 
 import numpy as np
 import pandas as pd
-import pytest
 
 import pd_model.scoring.iv_selector as iv_mod
 from pd_model.scoring.iv_selector import (
@@ -114,7 +113,5 @@ class TestIvFilterPhase2:
 
     def test_blacklisted_col_excluded(self):
         X_raw, X_trans, y = self._make_data()
-        selected, _ = iv_filter_phase_2(
-            X_raw, X_trans, y, pd_feature_blacklist=frozenset({"x_good"})
-        )
+        selected, _ = iv_filter_phase_2(X_raw, X_trans, y, pd_feature_blacklist=frozenset({"x_good"}))
         assert "x_good" not in selected

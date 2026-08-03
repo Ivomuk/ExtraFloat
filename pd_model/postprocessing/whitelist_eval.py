@@ -35,6 +35,7 @@ logger = get_logger(__name__)
 # Loading and merging
 # ======================================================================== #
 
+
 def _normalize_msisdn(ser: pd.Series) -> pd.Series:
     """Strip .0 suffix and whitespace from MSISDN strings."""
     return ser.astype(str).str.replace(".0", "", regex=False).str.strip()
@@ -73,7 +74,9 @@ def load_and_merge_lists(
 
     logger.info(
         "load_and_merge_lists: whitelist=%d | blacklist=%d | deduped=%d",
-        len(df_wl), len(df_bl), len(deduped),
+        len(df_wl),
+        len(df_bl),
+        len(deduped),
     )
     return deduped
 
@@ -81,6 +84,7 @@ def load_and_merge_lists(
 # ======================================================================== #
 # AUC via Mann–Whitney U
 # ======================================================================== #
+
 
 def _mann_whitney_auc(scores: np.ndarray, labels: np.ndarray) -> float:
     """
@@ -99,6 +103,7 @@ def _mann_whitney_auc(scores: np.ndarray, labels: np.ndarray) -> float:
 # ======================================================================== #
 # Cutoff sweep
 # ======================================================================== #
+
 
 def cutoff_sweep(
     eval_df: pd.DataFrame,
@@ -158,18 +163,20 @@ def cutoff_sweep(
         dec_black = int(y_vals[declined_mask].sum())
         dec_white = int(n_dec - dec_black)
 
-        rows.append({
-            "approval_pct": pct,
-            "threshold_pd_like": thr,
-            "approved_n": n_app,
-            "approved_blacklist_rate": app_black / n_app if n_app > 0 else np.nan,
-            "approved_whitelist_rate": app_white / n_app if n_app > 0 else np.nan,
-            "declined_blacklist_capture": dec_black / n_black_total if n_black_total > 0 else np.nan,
-            "declined_whitelist_rate": dec_white / n_white_total if n_white_total > 0 else np.nan,
-            "improvement_vs_baseline_black_rate": (
-                baseline_black_rate - app_black / n_app
-            ) if n_app > 0 and baseline_black_rate is not np.nan else np.nan,
-        })
+        rows.append(
+            {
+                "approval_pct": pct,
+                "threshold_pd_like": thr,
+                "approved_n": n_app,
+                "approved_blacklist_rate": app_black / n_app if n_app > 0 else np.nan,
+                "approved_whitelist_rate": app_white / n_app if n_app > 0 else np.nan,
+                "declined_blacklist_capture": dec_black / n_black_total if n_black_total > 0 else np.nan,
+                "declined_whitelist_rate": dec_white / n_white_total if n_white_total > 0 else np.nan,
+                "improvement_vs_baseline_black_rate": (baseline_black_rate - app_black / n_app)
+                if n_app > 0 and baseline_black_rate is not np.nan
+                else np.nan,
+            }
+        )
 
     return pd.DataFrame(rows)
 
@@ -177,6 +184,7 @@ def cutoff_sweep(
 # ======================================================================== #
 # Full evaluation
 # ======================================================================== #
+
 
 def run_whitelist_blacklist_eval(
     ops_scored_thin: pd.DataFrame,
@@ -269,9 +277,7 @@ def run_whitelist_blacklist_eval(
         perf_rank = perf.copy()
         perf_rank["score_pct"] = perf_rank[score_num_col].rank(pct=True, method="average")
         eps_val = 1e-12
-        perf_rank["decile"] = np.ceil(
-            np.clip(perf_rank["score_pct"], eps_val, 1.0) * 10
-        ).astype(int)
+        perf_rank["decile"] = np.ceil(np.clip(perf_rank["score_pct"], eps_val, 1.0) * 10).astype(int)
         decile_tbl = (
             perf_rank.groupby("decile")
             .agg(
@@ -294,9 +300,9 @@ def run_whitelist_blacklist_eval(
         perf_bins[WL_BL_KEY] = perf_bins.index.astype(str)
 
     if perf_bins.shape[0] > 0:
-        perf_bins = perf_bins.sort_values(
-            [score_num_col, WL_BL_KEY], ascending=[True, True]
-        ).reset_index(drop=True)
+        perf_bins = perf_bins.sort_values([score_num_col, WL_BL_KEY], ascending=[True, True]).reset_index(
+            drop=True
+        )
         n_rows = perf_bins.shape[0]
         perf_bins["row_num"] = np.arange(n_rows)
         perf_bins["decile"] = (np.floor(perf_bins["row_num"] * 10.0 / n_rows).astype(int) + 1).clip(1, 10)

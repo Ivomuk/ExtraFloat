@@ -1,7 +1,7 @@
 """Tests for pd_model.modeling.evaluation."""
+
 import numpy as np
 import pandas as pd
-import pytest
 
 from pd_model.modeling.evaluation import (
     build_decile_tables,
@@ -14,8 +14,7 @@ def _scored_df(n: int = 300, seed: int = 42) -> pd.DataFrame:
     rng = np.random.default_rng(seed)
     x = rng.normal(0, 1, n)
     y = (x + rng.normal(0, 0.5, n) > 0).astype(int)
-    return pd.DataFrame({"raw_score": x, "bad_state": y,
-                         "thin_file_flag": rng.integers(0, 2, n)})
+    return pd.DataFrame({"raw_score": x, "bad_state": y, "thin_file_flag": rng.integers(0, 2, n)})
 
 
 class TestSafeAuc:

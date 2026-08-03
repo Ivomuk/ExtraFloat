@@ -1,4 +1,5 @@
 """Tests for pd_model.modeling.xgb_model."""
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -65,6 +66,7 @@ class TestTrainXgb:
 
     def test_val_auc_above_05_on_separable_data(self):
         from sklearn.metrics import roc_auc_score
+
         Xtr, ytr, Xva, yva = _make_data(600)
         _, _, val_sc = train_xgb(Xtr, ytr, Xva, yva)
         auc = roc_auc_score(val_sc["bad_state"], val_sc["raw_score"])

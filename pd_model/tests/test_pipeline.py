@@ -28,19 +28,17 @@ from pd_model.preprocessing.transformations import (
 )
 from pd_model.scoring.iv_selector import iv_filter_phase_2
 
-
 # ======================================================================== #
 # Synthetic data factory
 # ======================================================================== #
+
 
 def _make_synthetic_dataset(n: int = 120) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Return (df_pd, df_repayments) synthetic DataFrames."""
     rng = np.random.default_rng(0)
 
     n_train = 80
-    snapshots = pd.to_datetime(
-        ["2025-09-30"] * n_train + ["2025-11-15"] * (n - n_train)
-    )
+    snapshots = pd.to_datetime(["2025-09-30"] * n_train + ["2025-11-15"] * (n - n_train))
 
     df_pd = pd.DataFrame(
         {
@@ -86,6 +84,7 @@ def _make_synthetic_dataset(n: int = 120) -> tuple[pd.DataFrame, pd.DataFrame]:
 # Tests
 # ======================================================================== #
 
+
 class TestEndToEndPipeline:
     @pytest.fixture(scope="class")
     def pipeline_outputs(self):
@@ -115,10 +114,17 @@ class TestEndToEndPipeline:
 
         # Split
         (
-            X_train_raw, X_train_trans, y_train,
-            X_val_raw, X_val_trans, y_val,
-            candidate_features, thin_train, thin_val,
-            agent_train, agent_val,
+            X_train_raw,
+            X_train_trans,
+            y_train,
+            X_val_raw,
+            X_val_trans,
+            y_val,
+            candidate_features,
+            thin_train,
+            thin_val,
+            agent_train,
+            agent_val,
         ) = prepare_pd_training_and_validation_data(
             df_pd_raw=df_pd_raw,
             df_pd_transformed=df_pd_transformed,
@@ -132,9 +138,7 @@ class TestEndToEndPipeline:
         )
 
         # IV
-        selected_features, iv_table = iv_filter_phase_2(
-            X_train_raw, X_train_trans, y_train, cfg=cfg
-        )
+        selected_features, iv_table = iv_filter_phase_2(X_train_raw, X_train_trans, y_train, cfg=cfg)
 
         return {
             "df_pd": df_pd,

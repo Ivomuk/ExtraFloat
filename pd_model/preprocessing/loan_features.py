@@ -11,8 +11,6 @@ Provides:
 
 from __future__ import annotations
 
-from typing import FrozenSet, Optional, Tuple
-
 import numpy as np
 import pandas as pd
 
@@ -27,6 +25,7 @@ logger = get_logger(__name__)
 # ======================================================================== #
 # Agent classification helpers
 # ======================================================================== #
+
 
 def classify_agent_loan_status(df_pd: pd.DataFrame) -> pd.DataFrame:
     """
@@ -50,9 +49,7 @@ def classify_agent_loan_status(df_pd: pd.DataFrame) -> pd.DataFrame:
     assert set(df["has_loan_history"].unique()).issubset({0, 1}), (
         "has_loan_history contains values outside {0, 1}"
     )
-    assert not df["has_loan_history"].isna().any(), (
-        "has_loan_history contains NaNs"
-    )
+    assert not df["has_loan_history"].isna().any(), "has_loan_history contains NaNs"
 
     df["is_new_agent"] = (df["has_loan_history"] == 0).astype(int)
 
@@ -83,9 +80,7 @@ def add_thin_file_flags(
     df = df_pd.copy()
 
     df["thin_file_flag"] = (df["has_loan_history"] == 0).astype(int)
-    df["thin_file_pd_prior"] = np.where(
-        df["thin_file_flag"] == 1, cfg.thin_file_pd_prior, 0.0
-    )
+    df["thin_file_pd_prior"] = np.where(df["thin_file_flag"] == 1, cfg.thin_file_pd_prior, 0.0)
 
     n_thin = int(df["thin_file_flag"].sum())
     logger.info(
@@ -99,6 +94,7 @@ def add_thin_file_flags(
 # ======================================================================== #
 # Label computation
 # ======================================================================== #
+
 
 def compute_bad_flags(df_pd: pd.DataFrame) -> pd.DataFrame:
     """
@@ -125,9 +121,7 @@ def compute_bad_flags(df_pd: pd.DataFrame) -> pd.DataFrame:
     repayment_val_1M = df.get("repayment_val_1M", pd.Series(1, index=df.index))
 
     df["hard_bad_flag"] = (
-        (repayment_coverage_1M < 0.3)
-        & (penalties_1M > 0)
-        & (repayment_val_1M == 0)
+        (repayment_coverage_1M < 0.3) & (penalties_1M > 0) & (repayment_val_1M == 0)
     ).astype(int)
 
     # PD target — forward-looking 30-day
@@ -139,9 +133,7 @@ def compute_bad_flags(df_pd: pd.DataFrame) -> pd.DataFrame:
 
     df["bad_state"] = (df["bad_state_30D"].fillna(0) > 0).astype(int)
 
-    assert set(df["bad_state"].unique()).issubset({0, 1}), (
-        "bad_state contains values outside {0, 1}"
-    )
+    assert set(df["bad_state"].unique()).issubset({0, 1}), "bad_state contains values outside {0, 1}"
     assert not df["bad_state"].isna().any(), "bad_state contains NaNs"
 
     logger.info(
@@ -158,17 +150,16 @@ def compute_bad_flags(df_pd: pd.DataFrame) -> pd.DataFrame:
 # Leakage audit
 # ======================================================================== #
 
+
 def leakage_audit_phase_2_2(
     df_pd: pd.DataFrame,
     snapshot_col: str = "snapshot_dt",
     txn_max_col: str = "max_txn_dt",
-    label_cols: Tuple[str, ...] = (
-        "bad_state", "current_dpd", "ever_written_off", "ever_in_collections"
-    ),
+    label_cols: tuple[str, ...] = ("bad_state", "current_dpd", "ever_written_off", "ever_in_collections"),
     hard_fail: bool = True,
     cfg: ModelConfig = DEFAULT_CONFIG,
     verbose: bool = True,
-    pd_feature_blacklist: Optional[FrozenSet[str]] = None,
+    pd_feature_blacklist: frozenset[str] | None = None,
 ) -> pd.DataFrame:
     """
     Run four leakage checks on the modelling DataFrame:
@@ -246,9 +237,7 @@ def leakage_audit_phase_2_2(
         y = pd.to_numeric(df_pd["bad_state"], errors="coerce")
         if y.notna().sum() > 0:
             numeric_cols = [
-                c
-                for c in df_pd.columns
-                if c != "bad_state" and pd.api.types.is_numeric_dtype(df_pd[c])
+                c for c in df_pd.columns if c != "bad_state" and pd.api.types.is_numeric_dtype(df_pd[c])
             ]
             if len(numeric_cols) > cfg.max_corr_cols:
                 logger.warning(
@@ -314,10 +303,7 @@ def leakage_audit_phase_2_2(
                             "check": "BINARY_DOMINANCE",
                             "column": col_name,
                             "severity": "HIGH",
-                            "message": (
-                                f"Bad rate jump {jump:.3f} between "
-                                f"{v0} and {v1}"
-                            ),
+                            "message": (f"Bad rate jump {jump:.3f} between {v0} and {v1}"),
                         }
                     )
 
@@ -365,12 +351,13 @@ def leakage_audit_phase_2_2(
 # Repayment feature pipeline
 # ======================================================================== #
 
+
 def run_phase_2_2_repayment_pd_features(
     df_pd: pd.DataFrame,
     df_repayments: pd.DataFrame,
     cfg: ModelConfig = DEFAULT_CONFIG,
     verbose: bool = False,
-) -> Tuple[pd.DataFrame, pd.DataFrame]:
+) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
     Merge repayment features into the PD modelling table and compute labels.
 
@@ -420,7 +407,7 @@ def run_phase_2_2_repayment_pd_features(
     # ------------------------------------------------------------------ #
     # Internal helpers
     # ------------------------------------------------------------------ #
-    def _pick_col(df_in: pd.DataFrame, candidates: list) -> Optional[str]:
+    def _pick_col(df_in: pd.DataFrame, candidates: list) -> str | None:
         for c in candidates:
             if c in df_in.columns:
                 return c
@@ -440,15 +427,14 @@ def run_phase_2_2_repayment_pd_features(
     # ------------------------------------------------------------------ #
     # Snapshot date parsing
     # ------------------------------------------------------------------ #
-    snapshot_col: Optional[str] = None
+    snapshot_col: str | None = None
     if "snapshot_dt" in df_repayments.columns:
         snapshot_col = "snapshot_dt"
     elif "tbl_dt" in df_repayments.columns:
         snapshot_col = "tbl_dt"
 
     assert snapshot_col is not None, (
-        "[run_phase_2_2] No snapshot column found in df_repayments "
-        "(expected snapshot_dt or tbl_dt)"
+        "[run_phase_2_2] No snapshot column found in df_repayments (expected snapshot_dt or tbl_dt)"
     )
 
     if not pd.api.types.is_datetime64_any_dtype(df_repayments[snapshot_col]):
@@ -459,9 +445,7 @@ def run_phase_2_2_repayment_pd_features(
         # "20251115" as string) — generic pd.to_datetime treats integers as
         # nanoseconds since epoch producing 1970-era dates, so check this first.
         looks_yyyymmdd = (
-            pd.to_numeric(raw, errors="coerce")
-            .between(20000101, 21001231, inclusive="both")
-            .fillna(False)
+            pd.to_numeric(raw, errors="coerce").between(20000101, 21001231, inclusive="both").fillna(False)
         )
         if looks_yyyymmdd.any():
             snap_dt = pd.to_datetime(raw.astype(str), format="%Y%m%d", errors="coerce")
@@ -483,8 +467,7 @@ def run_phase_2_2_repayment_pd_features(
 
         if parse_rate < 0.99:
             logger.warning(
-                "run_phase_2_2: snapshot_dt parse rate %.1f%% (format: %s) — "
-                "%d/%d rows unparsed",
+                "run_phase_2_2: snapshot_dt parse rate %.1f%% (format: %s) — %d/%d rows unparsed",
                 parse_rate * 100,
                 parsed_fmt,
                 total - parsed_count,
@@ -492,8 +475,7 @@ def run_phase_2_2_repayment_pd_features(
             )
         else:
             logger.info(
-                "run_phase_2_2: parsed snapshot_dt using format '%s' "
-                "(%d/%d rows)",
+                "run_phase_2_2: parsed snapshot_dt using format '%s' (%d/%d rows)",
                 parsed_fmt,
                 parsed_count,
                 total,
@@ -504,16 +486,18 @@ def run_phase_2_2_repayment_pd_features(
     assert df_repayments[snapshot_col].notna().any(), (
         "[run_phase_2_2] Snapshot dates could not be parsed in df_repayments"
     )
-    assert (
-        df_repayments[snapshot_col].dropna() > pd.Timestamp("2000-01-01")
-    ).all(), "[run_phase_2_2] Invalid snapshot_dt values detected"
+    assert (df_repayments[snapshot_col].dropna() > pd.Timestamp("2000-01-01")).all(), (
+        "[run_phase_2_2] Invalid snapshot_dt values detected"
+    )
 
     # ------------------------------------------------------------------ #
     # Date anchor columns
     # ------------------------------------------------------------------ #
     anchor_cols = [
-        "Last_disbursement_date", "last_disbursement_date",
-        "Last_repayment_date", "last_repayment_date",
+        "Last_disbursement_date",
+        "last_disbursement_date",
+        "Last_repayment_date",
+        "last_repayment_date",
     ]
     for c in anchor_cols:
         if c not in df_repayments.columns:
@@ -544,14 +528,16 @@ def run_phase_2_2_repayment_pd_features(
     # Penalty features
     # ------------------------------------------------------------------ #
     pen_candidates = [
-        "penalties_1M", "penalties_3M", "penalties_6M",
-        "penalties_1m", "penalties_3m", "penalties_6m",
+        "penalties_1M",
+        "penalties_3M",
+        "penalties_6M",
+        "penalties_1m",
+        "penalties_3m",
+        "penalties_6m",
     ]
     penalty_cols = [c for c in pen_candidates if c in df_repayments.columns]
     if penalty_cols:
-        df_repayments["ever_penalized"] = (
-            df_repayments[penalty_cols].fillna(0).sum(axis=1) > 0
-        ).astype(int)
+        df_repayments["ever_penalized"] = (df_repayments[penalty_cols].fillna(0).sum(axis=1) > 0).astype(int)
 
     pen_6m_col = _pick_col(df_repayments, ["penalties_6M", "penalties_6m"])
     if pen_6m_col is not None:
@@ -605,9 +591,7 @@ def run_phase_2_2_repayment_pd_features(
         df_repayments["repayment_coverage_ratio_6M"] = rep_val / (disb_val + eps)
 
     if "ever_penalized" in df_repayments.columns:
-        df_repayments["ever_delinquent_flag"] = (
-            _to_num(df_repayments["ever_penalized"]).fillna(0).astype(int)
-        )
+        df_repayments["ever_delinquent_flag"] = _to_num(df_repayments["ever_penalized"]).fillna(0).astype(int)
 
     rep_val_m1_col = _pick_col(df_repayments, ["Repayment_val_M1", "repayment_val_m1"])
     rep_val_m2_col = _pick_col(df_repayments, ["Repayment_val_M2", "repayment_val_m2"])
@@ -622,9 +606,7 @@ def run_phase_2_2_repayment_pd_features(
         disb6 = _to_num(df_repayments[disb_6m_col])
         rep6 = _to_num(df_repayments[rep_6m_col]).abs()
         df_repayments["net_exposure_6M"] = disb6 - rep6
-        df_repayments["currently_outstanding_flag"] = (
-            df_repayments["net_exposure_6M"] > 0
-        ).astype(int)
+        df_repayments["currently_outstanding_flag"] = (df_repayments["net_exposure_6M"] > 0).astype(int)
 
     if all(c in df_repayments.columns for c in ["dpd_30_plus", "dpd_60_plus"]):
         df_repayments["chronic_delinquency_flag"] = (
@@ -651,7 +633,7 @@ def run_phase_2_2_repayment_pd_features(
     df_repayments_out["agent_msisdn"] = df_repayments_out["agent_msisdn"].astype(str)
     df_pd_out["agent_msisdn"] = df_pd_out["agent_msisdn"].astype(str)
 
-    snapshot_key: Optional[str] = None
+    snapshot_key: str | None = None
     if "snapshot_dt" in df_pd_out.columns and "snapshot_dt" in df_repayments_out.columns:
         snapshot_key = "snapshot_dt"
     elif "tbl_dt" in df_pd_out.columns and "tbl_dt" in df_repayments_out.columns:
@@ -669,9 +651,7 @@ def run_phase_2_2_repayment_pd_features(
     df_pd_out["snapshot_dt"] = _coerce_dt(df_pd_out["snapshot_dt"])
     df_repayments_out["snapshot_dt"] = _coerce_dt(df_repayments_out["snapshot_dt"])
 
-    assert df_pd_out["snapshot_dt"].notna().any(), (
-        "[run_phase_2_2] df_pd snapshot_dt could not be parsed"
-    )
+    assert df_pd_out["snapshot_dt"].notna().any(), "[run_phase_2_2] df_pd snapshot_dt could not be parsed"
     assert df_repayments_out["snapshot_dt"].notna().any(), (
         "[run_phase_2_2] df_repayments snapshot_dt could not be parsed"
     )
@@ -680,9 +660,7 @@ def run_phase_2_2_repayment_pd_features(
     # Identify repayment numeric behavioural features
     # ------------------------------------------------------------------ #
     repayment_date_cols = [
-        c
-        for c in df_repayments_out.columns
-        if pd.api.types.is_datetime64_any_dtype(df_repayments_out[c])
+        c for c in df_repayments_out.columns if pd.api.types.is_datetime64_any_dtype(df_repayments_out[c])
     ]
 
     non_behav_lower = {c.strip().lower() for c in NON_BEHAVIOURAL_COLS}
@@ -714,25 +692,21 @@ def run_phase_2_2_repayment_pd_features(
         + ", ".join(leaked_pattern)
     )
 
-    assert repayment_numeric_features, (
-        "[run_phase_2_2] No numeric repayment behavioural features detected"
-    )
+    assert repayment_numeric_features, "[run_phase_2_2] No numeric repayment behavioural features detected"
 
     # ------------------------------------------------------------------ #
     # Label merge (separate from behavioural features)
     # ------------------------------------------------------------------ #
-    label_col: Optional[str] = None
+    label_col: str | None = None
     for cand in ["bad_state_30D", "bad_state_30d", "bad_state"]:
         if cand in df_repayments_out.columns:
             label_col = cand
             break
 
     if label_col is not None and "bad_state_30D" not in df_pd_out.columns:
-        df_labels = (
-            df_repayments_out.groupby(["agent_msisdn", "snapshot_dt"], as_index=False)[
-                label_col
-            ].max()
-        )
+        df_labels = df_repayments_out.groupby(["agent_msisdn", "snapshot_dt"], as_index=False)[
+            label_col
+        ].max()
         if label_col != "bad_state_30D":
             df_labels = df_labels.rename(columns={label_col: "bad_state_30D"})
         df_pd_out = df_pd_out.merge(
@@ -749,17 +723,13 @@ def run_phase_2_2_repayment_pd_features(
         ["agent_msisdn", "snapshot_dt"] + repayment_numeric_features
     ].copy()
 
-    dup_rep = df_repayments_numeric.duplicated(
-        subset=["agent_msisdn", "snapshot_dt"], keep=False
-    ).sum()
+    dup_rep = df_repayments_numeric.duplicated(subset=["agent_msisdn", "snapshot_dt"], keep=False).sum()
     assert int(dup_rep) == 0, (
         "[run_phase_2_2] Repayment feature table is not unique per "
         "(agent_msisdn, snapshot_dt). Aggregate/dedupe before merge."
     )
 
-    dup_pd_pre = df_pd_out.duplicated(
-        subset=["agent_msisdn", "snapshot_dt"], keep=False
-    ).sum()
+    dup_pd_pre = df_pd_out.duplicated(subset=["agent_msisdn", "snapshot_dt"], keep=False).sum()
     assert int(dup_pd_pre) == 0, (
         "[run_phase_2_2] df_pd is not unique per (agent_msisdn, snapshot_dt) before merge"
     )
@@ -772,17 +742,14 @@ def run_phase_2_2_repayment_pd_features(
         suffixes=("", "_repay"),
     )
 
-    dup_pd_post = df_pd_out.duplicated(
-        subset=["agent_msisdn", "snapshot_dt"], keep=False
-    ).sum()
-    assert int(dup_pd_post) == 0, (
-        "[run_phase_2_2] PD duplicated after merge — merge keys not unique"
-    )
+    dup_pd_post = df_pd_out.duplicated(subset=["agent_msisdn", "snapshot_dt"], keep=False).sum()
+    assert int(dup_pd_post) == 0, "[run_phase_2_2] PD duplicated after merge — merge keys not unique"
 
     # Derive has_ever_loan: agent has loan history if any disbursement volume
     # column is non-zero. Falls back to 0 (thin-file) if no disbursement cols exist.
     disb_vol_cols = [
-        c for c in repayment_numeric_features
+        c
+        for c in repayment_numeric_features
         if "disbursement_vol" in c.lower() or "disbursement_val" in c.lower()
     ]
     if disb_vol_cols:
@@ -806,26 +773,18 @@ def run_phase_2_2_repayment_pd_features(
     # ------------------------------------------------------------------ #
     # Schema guards
     # ------------------------------------------------------------------ #
-    missing_required = [
-        c for c in ["agent_msisdn", "snapshot_dt"] if c not in df_pd_out.columns
-    ]
-    assert not missing_required, (
-        f"[run_phase_2_2] Columns lost during repayment merge: {missing_required}"
-    )
+    missing_required = [c for c in ["agent_msisdn", "snapshot_dt"] if c not in df_pd_out.columns]
+    assert not missing_required, f"[run_phase_2_2] Columns lost during repayment merge: {missing_required}"
     assert pd.api.types.is_datetime64_any_dtype(df_pd_out["snapshot_dt"]), (
         "[run_phase_2_2] snapshot_dt corrupted during repayment merge"
     )
     if "bad_state" in df_pd_out.columns:
-        assert "bad_state" in df_pd_out.columns, (
-            "[run_phase_2_2] bad_state missing after compute_bad_flags"
-        )
+        assert "bad_state" in df_pd_out.columns, "[run_phase_2_2] bad_state missing after compute_bad_flags"
 
     # ------------------------------------------------------------------ #
     # Thin-file guardrail
     # ------------------------------------------------------------------ #
-    repayment_behavioural_features = [
-        c for c in repayment_numeric_features if c in df_pd_out.columns
-    ]
+    repayment_behavioural_features = [c for c in repayment_numeric_features if c in df_pd_out.columns]
     assert repayment_behavioural_features, (
         "[run_phase_2_2] No repayment features available for thin-file guardrail"
     )
@@ -844,9 +803,7 @@ def run_phase_2_2_repayment_pd_features(
     df_pd_out["thin_file_flag"] = df_pd_out["thin_file_flag"].fillna(0).astype(int)
 
     missing_mask = df_pd_out[repayment_behavioural_features].isna().all(axis=1)
-    df_pd_out["thin_file_flag"] = (
-        df_pd_out["thin_file_flag"] | missing_mask.astype(int)
-    ).astype(int)
+    df_pd_out["thin_file_flag"] = (df_pd_out["thin_file_flag"] | missing_mask.astype(int)).astype(int)
 
     thin_mask = df_pd_out["thin_file_flag"] == 1
     df_pd_out.loc[thin_mask, repayment_behavioural_features] = np.nan
@@ -857,13 +814,11 @@ def run_phase_2_2_repayment_pd_features(
         .tolist()
     )
     if failed_cols:
-        raise AssertionError(
-            f"[run_phase_2_2] Thin-file nullification failed for columns: {failed_cols}"
-        )
+        raise AssertionError(f"[run_phase_2_2] Thin-file nullification failed for columns: {failed_cols}")
 
-    assert (
-        df_pd_out.loc[thin_mask, repayment_behavioural_features].isna().all().all()
-    ), "[run_phase_2_2] Leakage risk: repayment behaviour present for thin-file agents"
+    assert df_pd_out.loc[thin_mask, repayment_behavioural_features].isna().all().all(), (
+        "[run_phase_2_2] Leakage risk: repayment behaviour present for thin-file agents"
+    )
 
     # ------------------------------------------------------------------ #
     # Date integrity guard
@@ -876,16 +831,13 @@ def run_phase_2_2_repayment_pd_features(
             continue
         parsed = pd.to_datetime(ser, errors="coerce")
         if ser.notna().any() and parsed.notna().sum() == 0:
-            raise AssertionError(
-                f"[run_phase_2_2] Column '{c}' is not parseable as datetime"
-            )
+            raise AssertionError(f"[run_phase_2_2] Column '{c}' is not parseable as datetime")
         if parsed.notna().sum() > 0:
             df_pd_out[c] = parsed
 
     if verbose:
         logger.info(
-            "run_phase_2_2: added %d repayment behavioural features; "
-            "thin-file agents: %d",
+            "run_phase_2_2: added %d repayment behavioural features; thin-file agents: %d",
             len(repayment_behavioural_features),
             int(df_pd_out["thin_file_flag"].fillna(0).astype(int).sum()),
         )

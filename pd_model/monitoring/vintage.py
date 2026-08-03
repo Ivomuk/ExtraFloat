@@ -27,7 +27,6 @@ Usage
 
 from __future__ import annotations
 
-import numpy as np
 import pandas as pd
 
 from pd_model.logging_config import get_logger
@@ -38,6 +37,7 @@ logger = get_logger(__name__)
 # ======================================================================== #
 # Long-format vintage table
 # ======================================================================== #
+
 
 def build_vintage_table(
     loans_df: pd.DataFrame,
@@ -122,6 +122,7 @@ def build_vintage_table(
 # Cohort × MOB pivot matrix
 # ======================================================================== #
 
+
 def build_cohort_matrix(
     vintage_tbl: pd.DataFrame,
     value_col: str = "cumulative_bad_rate",
@@ -153,6 +154,7 @@ def build_cohort_matrix(
 # ======================================================================== #
 # Cohort summary
 # ======================================================================== #
+
 
 def build_vintage_summary(
     vintage_tbl: pd.DataFrame,
@@ -192,8 +194,7 @@ def build_vintage_summary(
     summary = totals.merge(mature_rows, on="cohort_month", how="left")
 
     logger.info(
-        "build_vintage_summary: %d cohorts | avg overall_bad_rate=%.4f | "
-        "cohorts at MOB%d=%d",
+        "build_vintage_summary: %d cohorts | avg overall_bad_rate=%.4f | cohorts at MOB%d=%d",
         len(summary),
         float(summary["overall_bad_rate"].mean()),
         mature_mob,

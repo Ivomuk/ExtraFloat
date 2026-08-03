@@ -52,9 +52,7 @@ def add_never_loan_scorecard_from_phase_2_1(
 
     # Ensure thin_file_flag exists
     if "thin_file_flag" not in df_sc.columns:
-        has_loan_num = pd.to_numeric(
-            df_sc.get("has_loan_history", np.nan), errors="coerce"
-        ).fillna(0)
+        has_loan_num = pd.to_numeric(df_sc.get("has_loan_history", np.nan), errors="coerce").fillna(0)
         df_sc["thin_file_flag"] = (has_loan_num.eq(0)).astype(int)
 
     thin_mask = df_sc["thin_file_flag"].eq(1)
@@ -106,15 +104,13 @@ def add_never_loan_scorecard_from_phase_2_1(
     pts += weights.consecutively_inactive * _s_flag("is_consecutively_inactive")
 
     if "num_inactive_horizons" in df_sc.columns:
-        inh = _s_num("num_inactive_horizons").fillna(0).clip(
-            0, weights.inactive_horizon_cap
-        )
+        inh = _s_num("num_inactive_horizons").fillna(0).clip(0, weights.inactive_horizon_cap)
         pts += weights.inactive_horizon_per_unit * inh
 
     # Volume trajectory
     pts += weights.sharp_volume_drop * _s_flag("sharp_volume_drop_flag")
     pts += weights.consistent_volume_decline * _s_flag("consistent_volume_decline_flag")
-    pts += weights.activity_restart * _s_flag("activity_restart_flag")          # negative
+    pts += weights.activity_restart * _s_flag("activity_restart_flag")  # negative
     pts += weights.consistent_volume_growth * _s_flag("consistent_volume_growth_flag")  # negative
 
     # Balance / liquidity
@@ -172,8 +168,7 @@ def add_never_loan_scorecard_from_phase_2_1(
 
     if n_valid < 2:
         logger.warning(
-            "Scorecard: fewer than 2 valid thin-file point values (%d) — "
-            "skipping 0-100 normalisation",
+            "Scorecard: fewer than 2 valid thin-file point values (%d) — skipping 0-100 normalisation",
             n_valid,
         )
         df_sc["never_loan_score_0_100"] = np.nan
@@ -183,8 +178,8 @@ def add_never_loan_scorecard_from_phase_2_1(
         denom = (p99 - p1) + eps
         df_sc["never_loan_score_0_100"] = np.nan
         df_sc.loc[thin_mask, "never_loan_score_0_100"] = (
-            ((df_sc.loc[thin_mask, "never_loan_points"] - p1) / denom).clip(0, 1) * 100.0
-        )
+            (df_sc.loc[thin_mask, "never_loan_points"] - p1) / denom
+        ).clip(0, 1) * 100.0
 
     # ------------------------------------------------------------------ #
     # Sigmoid PD-like probability

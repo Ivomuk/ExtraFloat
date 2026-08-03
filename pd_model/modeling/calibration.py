@@ -32,6 +32,7 @@ logger = get_logger(__name__)
 # Internal helpers
 # ======================================================================== #
 
+
 def _standardize_scored_df(
     scored_df: pd.DataFrame,
     model_key: str,
@@ -77,6 +78,7 @@ def _standardize_scored_df(
 # ======================================================================== #
 # Calibration map
 # ======================================================================== #
+
 
 def build_pd_calibration_map(
     scored_df: pd.DataFrame,
@@ -170,8 +172,11 @@ def build_pd_calibration_map(
 
     logger.info(
         "build_pd_calibration_map: model=%s | bins=%d | ascending_risk=%s | pd range=[%.4f, %.4f]",
-        model_key, len(map_tbl), ascending_risk,
-        float(map_tbl["pd"].min()), float(map_tbl["pd"].max()),
+        model_key,
+        len(map_tbl),
+        ascending_risk,
+        float(map_tbl["pd"].min()),
+        float(map_tbl["pd"].max()),
     )
     return map_tbl
 
@@ -179,6 +184,7 @@ def build_pd_calibration_map(
 # ======================================================================== #
 # Attach calibrated PD
 # ======================================================================== #
+
 
 def attach_cal_pd(
     scored_df: pd.DataFrame,
@@ -199,9 +205,7 @@ def attach_cal_pd(
 
     cal_sub = cal_map_tbl[cal_map_tbl["model"].astype(str) == str(model_key)].copy()
     if cal_sub.shape[0] == 0:
-        raise ValueError(
-            f"[attach_cal_pd] Fail-closed: no calibration mapping for model '{model_key}'"
-        )
+        raise ValueError(f"[attach_cal_pd] Fail-closed: no calibration mapping for model '{model_key}'")
 
     for col in ("score_min", "score_max", "pd"):
         cal_sub[col] = pd.to_numeric(cal_sub[col], errors="coerce")
@@ -232,8 +236,11 @@ def attach_cal_pd(
 
     logger.info(
         "attach_cal_pd: model=%s | rows=%d | coverage=%.4f | pd range=[%.4f, %.4f]",
-        model_key, df.shape[0], coverage,
-        float(np.nanmin(assigned_pd)), float(np.nanmax(assigned_pd)),
+        model_key,
+        df.shape[0],
+        coverage,
+        float(np.nanmin(assigned_pd)),
+        float(np.nanmax(assigned_pd)),
     )
     return df
 
@@ -241,6 +248,7 @@ def attach_cal_pd(
 # ======================================================================== #
 # Policy tables
 # ======================================================================== #
+
 
 def build_policy_tables(
     scored_df_with_pd: pd.DataFrame,
@@ -265,9 +273,7 @@ def build_policy_tables(
 
     if prefer_pd:
         if feature_config.CAL_PD_COL not in df.columns:
-            raise ValueError(
-                "[build_policy_tables] Fail-closed: cal_pd missing but prefer_pd=True"
-            )
+            raise ValueError("[build_policy_tables] Fail-closed: cal_pd missing but prefer_pd=True")
         sort_var = feature_config.CAL_PD_COL
         sort_ascending = True
     else:
@@ -321,6 +327,7 @@ def build_policy_tables(
 # Policy flags
 # ======================================================================== #
 
+
 def add_policy_flags(
     agent_df: pd.DataFrame,
     policy_threshold_tbl: pd.DataFrame,
@@ -371,6 +378,7 @@ def make_policy_bucket(
 # Bootstrap comparison
 # ======================================================================== #
 
+
 def run_bootstrap_comparison(
     xgb_scored: pd.DataFrame,
     lgb_scored: pd.DataFrame,
@@ -387,28 +395,31 @@ def run_bootstrap_comparison(
     DataFrame with one row per metric (align_mode, n_rows, point estimates, CIs).
     """
     id_candidates = [feature_config.AGENT_KEY, "msisdn", "agent_id", "agent_key"]
-    join_key = next((c for c in id_candidates
-                     if c in xgb_scored.columns and c in lgb_scored.columns), None)
+    join_key = next((c for c in id_candidates if c in xgb_scored.columns and c in lgb_scored.columns), None)
 
     if join_key is not None:
         xgb_small = xgb_scored[[join_key, "bad_state", "raw_score"]].drop_duplicates(join_key)
         lgb_small = lgb_scored[[join_key, "bad_state", "raw_score"]].drop_duplicates(join_key)
         merged = xgb_small.merge(lgb_small, on=join_key, how="inner", suffixes=("_xgb", "_lgb"))
-        cmp_df = pd.DataFrame({
-            "y_xgb": pd.to_numeric(merged["bad_state_xgb"], errors="coerce"),
-            "xgb": pd.to_numeric(merged["raw_score_xgb"], errors="coerce"),
-            "y_lgb": pd.to_numeric(merged["bad_state_lgb"], errors="coerce"),
-            "lgb": pd.to_numeric(merged["raw_score_lgb"], errors="coerce"),
-        }).dropna()
+        cmp_df = pd.DataFrame(
+            {
+                "y_xgb": pd.to_numeric(merged["bad_state_xgb"], errors="coerce"),
+                "xgb": pd.to_numeric(merged["raw_score_xgb"], errors="coerce"),
+                "y_lgb": pd.to_numeric(merged["bad_state_lgb"], errors="coerce"),
+                "lgb": pd.to_numeric(merged["raw_score_lgb"], errors="coerce"),
+            }
+        ).dropna()
         align_mode = f"join_on_{join_key}"
     else:
         common_idx = xgb_scored.index.intersection(lgb_scored.index)
-        cmp_df = pd.DataFrame({
-            "y_xgb": pd.to_numeric(xgb_scored.loc[common_idx, "bad_state"], errors="coerce"),
-            "xgb": pd.to_numeric(xgb_scored.loc[common_idx, "raw_score"], errors="coerce"),
-            "y_lgb": pd.to_numeric(lgb_scored.loc[common_idx, "bad_state"], errors="coerce"),
-            "lgb": pd.to_numeric(lgb_scored.loc[common_idx, "raw_score"], errors="coerce"),
-        }).dropna()
+        cmp_df = pd.DataFrame(
+            {
+                "y_xgb": pd.to_numeric(xgb_scored.loc[common_idx, "bad_state"], errors="coerce"),
+                "xgb": pd.to_numeric(xgb_scored.loc[common_idx, "raw_score"], errors="coerce"),
+                "y_lgb": pd.to_numeric(lgb_scored.loc[common_idx, "bad_state"], errors="coerce"),
+                "lgb": pd.to_numeric(lgb_scored.loc[common_idx, "raw_score"], errors="coerce"),
+            }
+        ).dropna()
         align_mode = "index_intersection"
 
     cmp_df["y_xgb"] = cmp_df["y_xgb"].astype(int)
@@ -418,7 +429,9 @@ def run_bootstrap_comparison(
 
     logger.info(
         "bootstrap: align_mode=%s | aligned_rows=%d | y_mismatch=%d",
-        align_mode, cmp_df.shape[0], y_mismatch,
+        align_mode,
+        cmp_df.shape[0],
+        y_mismatch,
     )
 
     xgb_point = lgb_point = diff_point = np.nan
@@ -449,28 +462,36 @@ def run_bootstrap_comparison(
     xgb_ser = pd.Series(xgb_auc_boot).dropna()
     diff_ser = pd.Series(diff_auc_boot).dropna()
 
-    out_tbl = pd.DataFrame({
-        "metric": [
-            "align_mode", "n_rows_aligned", "y_mismatch",
-            "xgb_point_auc", "xgb_ci95_lo", "xgb_ci95_hi",
-            "lgb_point_auc",
-            "diff_point_lgb_minus_xgb", "diff_ci95_lo", "diff_ci95_hi",
-            "p_lgb_better",
-        ],
-        "value": [
-            align_mode,
-            float(n_rows),
-            float(y_mismatch),
-            xgb_point,
-            float(xgb_ser.quantile(0.025)) if xgb_ser.shape[0] > 0 else np.nan,
-            float(xgb_ser.quantile(0.975)) if xgb_ser.shape[0] > 0 else np.nan,
-            lgb_point,
-            diff_point,
-            float(diff_ser.quantile(0.025)) if diff_ser.shape[0] > 0 else np.nan,
-            float(diff_ser.quantile(0.975)) if diff_ser.shape[0] > 0 else np.nan,
-            float((diff_ser > 0).mean()) if diff_ser.shape[0] > 0 else np.nan,
-        ],
-    })
+    out_tbl = pd.DataFrame(
+        {
+            "metric": [
+                "align_mode",
+                "n_rows_aligned",
+                "y_mismatch",
+                "xgb_point_auc",
+                "xgb_ci95_lo",
+                "xgb_ci95_hi",
+                "lgb_point_auc",
+                "diff_point_lgb_minus_xgb",
+                "diff_ci95_lo",
+                "diff_ci95_hi",
+                "p_lgb_better",
+            ],
+            "value": [
+                align_mode,
+                float(n_rows),
+                float(y_mismatch),
+                xgb_point,
+                float(xgb_ser.quantile(0.025)) if xgb_ser.shape[0] > 0 else np.nan,
+                float(xgb_ser.quantile(0.975)) if xgb_ser.shape[0] > 0 else np.nan,
+                lgb_point,
+                diff_point,
+                float(diff_ser.quantile(0.025)) if diff_ser.shape[0] > 0 else np.nan,
+                float(diff_ser.quantile(0.975)) if diff_ser.shape[0] > 0 else np.nan,
+                float((diff_ser > 0).mean()) if diff_ser.shape[0] > 0 else np.nan,
+            ],
+        }
+    )
 
     logger.info(
         "bootstrap complete: XGB AUC=%.4f [%.4f, %.4f] | LGB-XGB diff=%.4f",
@@ -485,6 +506,7 @@ def run_bootstrap_comparison(
 # ======================================================================== #
 # Full locked policy pipeline
 # ======================================================================== #
+
 
 def run_locked_policy_pipeline(
     xgb_scored: pd.DataFrame,

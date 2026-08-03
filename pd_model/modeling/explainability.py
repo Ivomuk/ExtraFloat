@@ -29,6 +29,7 @@ logger = get_logger(__name__)
 # SHAP value computation
 # ======================================================================== #
 
+
 def compute_shap_values(model, X: pd.DataFrame, model_key: str) -> np.ndarray:
     """
     Compute SHAP values for a fitted XGBoost or LightGBM classifier.
@@ -51,9 +52,7 @@ def compute_shap_values(model, X: pd.DataFrame, model_key: str) -> np.ndarray:
     try:
         import shap
     except ImportError as exc:
-        raise ImportError(
-            "shap is required for explainability. Install with: pip install shap"
-        ) from exc
+        raise ImportError("shap is required for explainability. Install with: pip install shap") from exc
 
     explainer = shap.TreeExplainer(model)
     raw = explainer.shap_values(X)
@@ -66,9 +65,10 @@ def compute_shap_values(model, X: pd.DataFrame, model_key: str) -> np.ndarray:
         shap_arr = raw
 
     logger.info(
-        "compute_shap_values: model=%s | agents=%d | features=%d | "
-        "mean_abs_shap=%.4f",
-        model_key, shap_arr.shape[0], shap_arr.shape[1],
+        "compute_shap_values: model=%s | agents=%d | features=%d | mean_abs_shap=%.4f",
+        model_key,
+        shap_arr.shape[0],
+        shap_arr.shape[1],
         float(np.abs(shap_arr).mean()),
     )
     return shap_arr.astype(np.float32)
@@ -77,6 +77,7 @@ def compute_shap_values(model, X: pd.DataFrame, model_key: str) -> np.ndarray:
 # ======================================================================== #
 # Adverse action reasons
 # ======================================================================== #
+
 
 def build_adverse_action_df(
     shap_values: np.ndarray,
@@ -112,9 +113,9 @@ def build_adverse_action_df(
     top_idx = np.argsort(-shap_values, axis=1)[:, :n_reasons]  # (n, n_reasons)
 
     # Gather top SHAP values and corresponding feature names
-    row_idx = np.arange(n)[:, None]                             # (n, 1) broadcast
-    top_shap = shap_values[row_idx, top_idx]                    # (n, n_reasons)
-    top_names = feat_arr[top_idx]                               # (n, n_reasons)
+    row_idx = np.arange(n)[:, None]  # (n, 1) broadcast
+    top_shap = shap_values[row_idx, top_idx]  # (n, n_reasons)
+    top_names = feat_arr[top_idx]  # (n, n_reasons)
 
     # Mask out entries that don't clear min_shap
     adverse_mask = top_shap > min_shap
@@ -134,6 +135,7 @@ def build_adverse_action_df(
 # Feature importance summary (global)
 # ======================================================================== #
 
+
 def shap_feature_importance(
     shap_values: np.ndarray,
     feature_names: list[str],
@@ -148,9 +150,15 @@ def shap_feature_importance(
     """
     mean_abs = np.abs(shap_values).mean(axis=0)
     mean_signed = shap_values.mean(axis=0)
-    df = pd.DataFrame({
-        "feature": feature_names,
-        "mean_abs_shap": mean_abs.round(5),
-        "mean_shap": mean_signed.round(5),
-    }).sort_values("mean_abs_shap", ascending=False).reset_index(drop=True)
+    df = (
+        pd.DataFrame(
+            {
+                "feature": feature_names,
+                "mean_abs_shap": mean_abs.round(5),
+                "mean_shap": mean_signed.round(5),
+            }
+        )
+        .sort_values("mean_abs_shap", ascending=False)
+        .reset_index(drop=True)
+    )
     return df

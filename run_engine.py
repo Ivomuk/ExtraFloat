@@ -20,15 +20,15 @@ from pathlib import Path
 
 import pandas as pd
 
-from extrafloat.io.extrafloat_data_loaders import (
-    load_transaction_capacity_features,
-    load_borrower_limit_features,
-    load_loan_summary_recent_features,
-)
 from extrafloat.engine.extrafloat_limit_engine_features import (
     build_extrafloat_limit_engine_features,
 )
 from extrafloat.engine.run_extrafloat_limit_engine import run_extrafloat_limit_engine
+from extrafloat.io.extrafloat_data_loaders import (
+    load_borrower_limit_features,
+    load_loan_summary_recent_features,
+    load_transaction_capacity_features,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -36,26 +36,34 @@ logging.basicConfig(
 )
 logger = logging.getLogger("run_engine")
 
-DEFAULT_TRANSACTION  = "data/transaction_capacity.csv"
-DEFAULT_BORROWER     = "data/borrower_history.csv"
+DEFAULT_TRANSACTION = "data/transaction_capacity.csv"
+DEFAULT_BORROWER = "data/borrower_history.csv"
 DEFAULT_LOAN_SUMMARY = "data/loan_summary.csv"
-DEFAULT_OUTPUT       = "data/engine_output.csv"
+DEFAULT_OUTPUT = "data/engine_output.csv"
 
 
 def parse_args():
     p = argparse.ArgumentParser(description="Run the ExtraFloat limit engine.")
-    p.add_argument("--transaction",  default=DEFAULT_TRANSACTION)
-    p.add_argument("--borrower",     default=DEFAULT_BORROWER)
+    p.add_argument("--transaction", default=DEFAULT_TRANSACTION)
+    p.add_argument("--borrower", default=DEFAULT_BORROWER)
     p.add_argument("--loan-summary", default=DEFAULT_LOAN_SUMMARY, dest="loan_summary")
-    p.add_argument("--output",       default=DEFAULT_OUTPUT)
+    p.add_argument("--output", default=DEFAULT_OUTPUT)
     return p.parse_args()
 
 
 _LOAN_SUMMARY_EMPTY_COLS = [
-    "msisdn", "snapshot_dt", "last_disbursement_date", "last_repayment_date",
-    "disbursement_vol_1m", "disbursement_val_1m",
-    "repayment_vol_1m", "repayment_val_1m", "penalties_1m",
-    "disbursement_val_3m", "repayment_val_3m", "penalties_3m",
+    "msisdn",
+    "snapshot_dt",
+    "last_disbursement_date",
+    "last_repayment_date",
+    "disbursement_vol_1m",
+    "disbursement_val_1m",
+    "repayment_vol_1m",
+    "repayment_val_1m",
+    "penalties_1m",
+    "disbursement_val_3m",
+    "repayment_val_3m",
+    "penalties_3m",
 ]
 
 
@@ -83,11 +91,13 @@ def main():
     logger.info("Loading loan summary features from %s", args.loan_summary)
     loan_summary_df = _load_loan_summary(args.loan_summary)
 
-    logger.info("Building engine features (%d borrower rows, %d transaction rows, %d loan rows)",
-                len(borrower_df), len(transaction_df), len(loan_summary_df))
-    features_df = build_extrafloat_limit_engine_features(
-        borrower_df, transaction_df, loan_summary_df
+    logger.info(
+        "Building engine features (%d borrower rows, %d transaction rows, %d loan rows)",
+        len(borrower_df),
+        len(transaction_df),
+        len(loan_summary_df),
     )
+    features_df = build_extrafloat_limit_engine_features(borrower_df, transaction_df, loan_summary_df)
 
     logger.info("Running limit engine on %d rows", len(features_df))
     result_df = run_extrafloat_limit_engine(features_df)
@@ -95,7 +105,9 @@ def main():
     out_path = Path(args.output)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     result_df.to_csv(out_path, index=False)
-    logger.info("Output written to %s  (%d rows, %d columns)", out_path, len(result_df), len(result_df.columns))
+    logger.info(
+        "Output written to %s  (%d rows, %d columns)", out_path, len(result_df), len(result_df.columns)
+    )
 
 
 if __name__ == "__main__":

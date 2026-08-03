@@ -1,7 +1,7 @@
 """Tests for pd_model.postprocessing.ops_scored."""
+
 import numpy as np
 import pandas as pd
-import pytest
 
 from pd_model.config import feature_config
 from pd_model.postprocessing.ops_scored import (
@@ -12,24 +12,28 @@ from pd_model.postprocessing.ops_scored import (
 
 def _thick_placement(n: int = 200) -> pd.DataFrame:
     rng = np.random.default_rng(1)
-    return pd.DataFrame({
-        feature_config.AGENT_KEY: [f"msisdn_{i}" for i in range(n)],
-        feature_config.THIN_FILE_COL: 0,
-        "bad_state": rng.integers(0, 2, n),
-        "cal_pd_xgb": rng.uniform(0, 1, n),
-        "final_approved": rng.integers(0, 2, n),
-        feature_config.POLICY_BUCKET_COL: "APPROVE_50",
-    })
+    return pd.DataFrame(
+        {
+            feature_config.AGENT_KEY: [f"msisdn_{i}" for i in range(n)],
+            feature_config.THIN_FILE_COL: 0,
+            "bad_state": rng.integers(0, 2, n),
+            "cal_pd_xgb": rng.uniform(0, 1, n),
+            "final_approved": rng.integers(0, 2, n),
+            feature_config.POLICY_BUCKET_COL: "APPROVE_50",
+        }
+    )
 
 
 def _thin_scorecard(n: int = 80) -> pd.DataFrame:
     rng = np.random.default_rng(2)
-    return pd.DataFrame({
-        feature_config.AGENT_KEY: [f"msisdn_{i + 200}" for i in range(n)],
-        "never_loan_pd_like": rng.uniform(0, 1, n),
-        "never_loan_score_0_100": rng.uniform(0, 100, n),
-        "never_loan_points": rng.uniform(0, 20, n),
-    })
+    return pd.DataFrame(
+        {
+            feature_config.AGENT_KEY: [f"msisdn_{i + 200}" for i in range(n)],
+            "never_loan_pd_like": rng.uniform(0, 1, n),
+            "never_loan_score_0_100": rng.uniform(0, 100, n),
+            "never_loan_points": rng.uniform(0, 20, n),
+        }
+    )
 
 
 class TestBuildOpsScoredTable:

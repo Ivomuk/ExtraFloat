@@ -12,8 +12,6 @@ Provides:
 
 from __future__ import annotations
 
-from typing import FrozenSet, List, Optional, Tuple
-
 import numpy as np
 import pandas as pd
 
@@ -40,11 +38,12 @@ logger = get_logger(__name__)
 # Feature classification
 # ======================================================================== #
 
+
 def get_and_classify_pd_features(
     df_pd: pd.DataFrame,
-    blacklist: FrozenSet[str] = PD_FEATURE_BLACKLIST,
+    blacklist: frozenset[str] = PD_FEATURE_BLACKLIST,
     debug: bool = False,
-) -> Tuple[List[str], List[str], List[str], List[str], List[str], pd.DataFrame]:
+) -> tuple[list[str], list[str], list[str], list[str], list[str], pd.DataFrame]:
     """
     Extract numeric PD candidate features and classify them into transformation
     buckets.
@@ -74,8 +73,8 @@ def get_and_classify_pd_features(
     """
     blacklist_lower = {str(c).strip().lower() for c in blacklist}
 
-    pd_features: List[str] = []
-    excluded: List[Tuple[str, str]] = []
+    pd_features: list[str] = []
+    excluded: list[tuple[str, str]] = []
 
     for c in df_pd.select_dtypes(include=["number"]).columns:
         c_clean = str(c).strip()
@@ -109,14 +108,10 @@ def get_and_classify_pd_features(
 
     # Hard DPD guard
     leaked_dpd = [
-        c
-        for c in pd_features
-        if "dpd" in c.lower()
-        and not any(p in c.lower() for p in DPD_ALLOW_PATTERNS)
+        c for c in pd_features if "dpd" in c.lower() and not any(p in c.lower() for p in DPD_ALLOW_PATTERNS)
     ]
-    assert not leaked_dpd, (
-        "[get_and_classify_pd_features] DPD-like columns in PD candidates: "
-        + str(sorted(leaked_dpd))
+    assert not leaked_dpd, "[get_and_classify_pd_features] DPD-like columns in PD candidates: " + str(
+        sorted(leaked_dpd)
     )
 
     # ------------------------------------------------------------------ #
@@ -180,16 +175,17 @@ def get_and_classify_pd_features(
 # Transformations
 # ======================================================================== #
 
+
 def apply_pd_transformations(
     df: pd.DataFrame,
-    pd_features: List[str],
-    log_cols: List[str],
-    cap_cols: List[str],
-    signed_log_cols: Optional[List[str]] = None,
+    pd_features: list[str],
+    log_cols: list[str],
+    cap_cols: list[str],
+    signed_log_cols: list[str] | None = None,
     cfg: ModelConfig = DEFAULT_CONFIG,
     neg_policy: str = "signed_log1p",
-    fitted_params: Optional[dict] = None,
-) -> Tuple[pd.DataFrame, List[str], pd.DataFrame]:
+    fitted_params: dict | None = None,
+) -> tuple[pd.DataFrame, list[str], pd.DataFrame]:
     """
     Apply PD-safe feature transformations with automatic reversion on failure.
 
@@ -233,38 +229,30 @@ def apply_pd_transformations(
     df_out = df.copy()
     pd_features_use = [c for c in pd_features if c in df_out.columns]
 
-    signed_log_cols_use: List[str] = []
+    signed_log_cols_use: list[str] = []
     if signed_log_cols:
-        signed_log_cols_use = [
-            c for c in signed_log_cols if c in df_out.columns and c in pd_features_use
-        ]
+        signed_log_cols_use = [c for c in signed_log_cols if c in df_out.columns and c in pd_features_use]
 
-    log_cols_use = [
-        c for c in log_cols if c in df_out.columns and c in pd_features_use
-    ]
-    cap_cols_use = [
-        c for c in cap_cols if c in df_out.columns and c in pd_features_use
-    ]
+    log_cols_use = [c for c in log_cols if c in df_out.columns and c in pd_features_use]
+    cap_cols_use = [c for c in cap_cols if c in df_out.columns and c in pd_features_use]
 
     # Ensure disjoint processing order
     signed_set = set(signed_log_cols_use)
     log_cols_use = [c for c in log_cols_use if c not in signed_set]
-    cap_cols_use = [
-        c for c in cap_cols_use if c not in set(log_cols_use) and c not in signed_set
-    ]
+    cap_cols_use = [c for c in cap_cols_use if c not in set(log_cols_use) and c not in signed_set]
 
-    report_rows: List[dict] = []
+    report_rows: list[dict] = []
 
     # ------------------------------------------------------------------ #
     # Internal helpers
     # ------------------------------------------------------------------ #
-    def _winsorize(s: pd.Series) -> Tuple[pd.Series, bool, float, float]:
+    def _winsorize(s: pd.Series) -> tuple[pd.Series, bool, float, float]:
         lo_val, hi_val = s.quantile([q_low, q_high])
         if pd.isna(lo_val) or pd.isna(hi_val) or float(hi_val) <= float(lo_val):
             return s, True, float(lo_val), float(hi_val)
         return s.clip(lo_val, hi_val), False, float(lo_val), float(hi_val)
 
-    def _is_broken(s: pd.Series) -> Tuple[bool, str]:
+    def _is_broken(s: pd.Series) -> tuple[bool, str]:
         vals = pd.to_numeric(s, errors="coerce")
         finite_frac = float(np.isfinite(vals.to_numpy()).mean())
         nun = int(vals.dropna().nunique())
@@ -301,9 +289,7 @@ def apply_pd_transformations(
             s_work = s_raw.copy()
 
         valid_bounds = (
-            lo is not None and hi is not None
-            and not (pd.isna(lo) or pd.isna(hi))
-            and float(hi) > float(lo)
+            lo is not None and hi is not None and not (pd.isna(lo) or pd.isna(hi)) and float(hi) > float(lo)
         )
         if valid_bounds:
             s_work = s_work.clip(float(lo), float(hi))
@@ -336,11 +322,22 @@ def apply_pd_transformations(
             s_fb, _sk, lo_fb, hi_fb = _winsorize(s_raw)
             df_out[col] = s_fb.astype("float32")
             logger.warning("Feature '%s' forced-signed-log FAILED (%s); reverted to raw cap", col, why)
-            report_rows.append({"feature": col, "action": "forced_signed_log_reverted_raw_cap", "reason": why, "neg_frac": neg_frac, "lo": lo_fb, "hi": hi_fb})
+            report_rows.append(
+                {
+                    "feature": col,
+                    "action": "forced_signed_log_reverted_raw_cap",
+                    "reason": why,
+                    "neg_frac": neg_frac,
+                    "lo": lo_fb,
+                    "hi": hi_fb,
+                }
+            )
             continue
 
         df_out[col] = s_work.astype("float32")
-        report_rows.append({"feature": col, "action": "forced_signed_log_ok", "neg_frac": neg_frac, "lo": lo, "hi": hi})
+        report_rows.append(
+            {"feature": col, "action": "forced_signed_log_ok", "neg_frac": neg_frac, "lo": lo, "hi": hi}
+        )
 
     # ------------------------------------------------------------------ #
     # 1) LOG + CAP
@@ -363,7 +360,15 @@ def apply_pd_transformations(
             if neg_policy == "cap_only":
                 s_work, skipped, lo, hi = _winsorize(s_raw)
                 df_out[col] = s_work.astype("float32")
-                report_rows.append({"feature": col, "action": "cap_only_due_to_negatives", "neg_frac": neg_frac, "lo": lo, "hi": hi})
+                report_rows.append(
+                    {
+                        "feature": col,
+                        "action": "cap_only_due_to_negatives",
+                        "neg_frac": neg_frac,
+                        "lo": lo,
+                        "hi": hi,
+                    }
+                )
                 continue
 
             s_work = _signed_log1p(s_raw)
@@ -373,11 +378,22 @@ def apply_pd_transformations(
                 s_fb, _sk, lo_fb, hi_fb = _winsorize(s_raw)
                 df_out[col] = s_fb.astype("float32")
                 logger.warning("Feature '%s' signed-log FAILED (%s); reverted to raw cap", col, why)
-                report_rows.append({"feature": col, "action": "signed_log_reverted_raw_cap", "reason": why, "neg_frac": neg_frac, "lo": lo_fb, "hi": hi_fb})
+                report_rows.append(
+                    {
+                        "feature": col,
+                        "action": "signed_log_reverted_raw_cap",
+                        "reason": why,
+                        "neg_frac": neg_frac,
+                        "lo": lo_fb,
+                        "hi": hi_fb,
+                    }
+                )
                 continue
 
             df_out[col] = s_work.astype("float32")
-            report_rows.append({"feature": col, "action": "signed_log_ok", "neg_frac": neg_frac, "lo": lo, "hi": hi})
+            report_rows.append(
+                {"feature": col, "action": "signed_log_ok", "neg_frac": neg_frac, "lo": lo, "hi": hi}
+            )
             continue
 
         s_work = np.log1p(s_raw.clip(lower=0))
@@ -387,7 +403,16 @@ def apply_pd_transformations(
             s_fb, _sk, lo_fb, hi_fb = _winsorize(s_raw)
             df_out[col] = s_fb.astype("float32")
             logger.warning("Feature '%s' log-cap FAILED (%s); reverted to raw cap", col, why)
-            report_rows.append({"feature": col, "action": "log_cap_reverted_raw_cap", "reason": why, "neg_frac": neg_frac, "lo": lo_fb, "hi": hi_fb})
+            report_rows.append(
+                {
+                    "feature": col,
+                    "action": "log_cap_reverted_raw_cap",
+                    "reason": why,
+                    "neg_frac": neg_frac,
+                    "lo": lo_fb,
+                    "hi": hi_fb,
+                }
+            )
             continue
 
         df_out[col] = s_work.astype("float32")
@@ -423,8 +448,7 @@ def apply_pd_transformations(
     transform_report = pd.DataFrame(report_rows)
 
     logger.info(
-        "apply_pd_transformations: %d features processed "
-        "(signed_log=%d, log=%d, cap=%d, unclassified=%d)",
+        "apply_pd_transformations: %d features processed (signed_log=%d, log=%d, cap=%d, unclassified=%d)",
         len(pd_features_use),
         len(signed_log_cols_use),
         len(log_cols_use),
@@ -435,9 +459,7 @@ def apply_pd_transformations(
         action_counts = transform_report["action"].value_counts(dropna=False)
         reverted = action_counts[action_counts.index.str.contains("reverted", na=False)].sum()
         if reverted > 0:
-            logger.warning(
-                "apply_pd_transformations: %d feature(s) reverted to raw cap", reverted
-            )
+            logger.warning("apply_pd_transformations: %d feature(s) reverted to raw cap", reverted)
 
     return df_out, unclassified, transform_report
 
@@ -446,12 +468,13 @@ def apply_pd_transformations(
 # Post-transform pruning
 # ======================================================================== #
 
+
 def prune_post_transform_features(
     df: pd.DataFrame,
-    pd_features: List[str],
+    pd_features: list[str],
     cfg: ModelConfig = DEFAULT_CONFIG,
     drop_all_nan: bool = True,
-) -> Tuple[pd.DataFrame, List[str], List[str]]:
+) -> tuple[pd.DataFrame, list[str], list[str]]:
     """
     Drop degenerate features after transformation.
 
@@ -472,7 +495,7 @@ def prune_post_transform_features(
         - ``drop_cols`` list
     """
     present = [c for c in pd_features if c in df.columns]
-    drop_cols: List[str] = []
+    drop_cols: list[str] = []
 
     for c in present:
         s = df[c]
@@ -488,8 +511,7 @@ def prune_post_transform_features(
     kept_features = [c for c in pd_features if c in df.columns]
 
     logger.info(
-        "prune_post_transform_features: dropped %d degenerate features, "
-        "kept %d",
+        "prune_post_transform_features: dropped %d degenerate features, kept %d",
         len(drop_cols),
         len(kept_features),
     )
@@ -500,16 +522,17 @@ def prune_post_transform_features(
 # Full transformation pipeline (orchestration helper)
 # ======================================================================== #
 
+
 def build_transformed_dataframe(
     df_pd: pd.DataFrame,
-    pd_features: List[str],
-    log_cols: List[str],
-    cap_cols: List[str],
-    signed_log_cols: List[str],
+    pd_features: list[str],
+    log_cols: list[str],
+    cap_cols: list[str],
+    signed_log_cols: list[str],
     cfg: ModelConfig = DEFAULT_CONFIG,
     neg_policy: str = "signed_log1p",
-    fitted_params: Optional[dict] = None,
-) -> Tuple[pd.DataFrame, List[str], pd.DataFrame]:
+    fitted_params: dict | None = None,
+) -> tuple[pd.DataFrame, list[str], pd.DataFrame]:
     """
     Orchestrate the full numeric transformation + pruning pipeline.
 
@@ -540,7 +563,8 @@ def build_transformed_dataframe(
 
     # 2) Apply transformations
     df_numeric_transformed, _unclassified, transform_report = apply_pd_transformations(
-        df_pd[pd_features].copy() if all(c in df_pd.columns for c in pd_features)
+        df_pd[pd_features].copy()
+        if all(c in df_pd.columns for c in pd_features)
         else df_pd[[c for c in pd_features if c in df_pd.columns]].copy(),
         pd_features=pd_features,
         log_cols=log_cols,
@@ -555,7 +579,7 @@ def build_transformed_dataframe(
     #    is the authoritative list; pruning against the scoring batch would be batch-dependent.
     if fitted_params is not None:
         pd_features_pruned = [c for c in pd_features if c in df_numeric_transformed.columns]
-        dropped_cols: List[str] = []
+        dropped_cols: list[str] = []
     else:
         df_numeric_transformed, pd_features_pruned, dropped_cols = prune_post_transform_features(
             df_numeric_transformed, pd_features, cfg=cfg
@@ -579,16 +603,11 @@ def build_transformed_dataframe(
     leaked = sorted(set(dropped_cols) & set(df_pd_transformed.columns))
     if leaked:
         raise RuntimeError(
-            "[build_transformed_dataframe] Dropped numeric cols leaked into output: "
-            + ", ".join(leaked[:20])
+            "[build_transformed_dataframe] Dropped numeric cols leaked into output: " + ", ".join(leaked[:20])
         )
     if "agent_msisdn" not in df_pd_transformed.columns:
-        raise RuntimeError(
-            "[build_transformed_dataframe] agent_msisdn missing after transform join"
-        )
+        raise RuntimeError("[build_transformed_dataframe] agent_msisdn missing after transform join")
     if not df_pd_transformed["agent_msisdn"].notna().all():
-        raise RuntimeError(
-            "[build_transformed_dataframe] agent_msisdn has nulls after transform join"
-        )
+        raise RuntimeError("[build_transformed_dataframe] agent_msisdn has nulls after transform join")
 
     return df_pd_transformed, pd_features_pruned, transform_report

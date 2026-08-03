@@ -8,8 +8,6 @@ the entry and exit points of each pipeline step.
 
 from __future__ import annotations
 
-from typing import List
-
 import pandas as pd
 
 from pd_model.logging_config import get_logger
@@ -17,7 +15,7 @@ from pd_model.logging_config import get_logger
 logger = get_logger(__name__)
 
 
-def require_columns(df: pd.DataFrame, required: List[str], context: str = "") -> None:
+def require_columns(df: pd.DataFrame, required: list[str], context: str = "") -> None:
     """
     Assert that *df* contains every column in *required*.
 
@@ -31,14 +29,12 @@ def require_columns(df: pd.DataFrame, required: List[str], context: str = "") ->
     """
     missing = [c for c in required if c not in df.columns]
     if missing:
-        raise ValueError(
-            f"[{context}] Missing required columns: {missing}"
-        )
+        raise ValueError(f"[{context}] Missing required columns: {missing}")
 
 
 def check_missing_rates(
     df: pd.DataFrame,
-    cols: List[str],
+    cols: list[str],
     max_rate: float = 0.95,
     context: str = "",
 ) -> None:
@@ -59,10 +55,7 @@ def check_missing_rates(
             continue
         rate = df[col].isna().mean()
         if rate > max_rate:
-            raise ValueError(
-                f"[{context}] Column '{col}' has {rate:.1%} missing "
-                f"(threshold {max_rate:.0%})"
-            )
+            raise ValueError(f"[{context}] Column '{col}' has {rate:.1%} missing (threshold {max_rate:.0%})")
 
 
 def assert_output_not_empty(df: pd.DataFrame, context: str = "") -> None:
@@ -97,9 +90,7 @@ def assert_binary_column(df: pd.DataFrame, col: str, context: str = "") -> None:
         raise ValueError(f"[{context}] Column '{col}' contains NaN values")
     bad_vals = set(df[col].unique()) - {0, 1}
     if bad_vals:
-        raise ValueError(
-            f"[{context}] Column '{col}' contains values outside {{0, 1}}: {bad_vals}"
-        )
+        raise ValueError(f"[{context}] Column '{col}' contains values outside {{0, 1}}: {bad_vals}")
 
 
 def assert_index_aligned(

@@ -10,8 +10,6 @@ Provides:
 
 from __future__ import annotations
 
-from typing import FrozenSet, List, Optional, Tuple
-
 import pandas as pd
 
 from pd_model.config import feature_config
@@ -25,25 +23,25 @@ def prepare_pd_training_and_validation_data(
     df_pd_transformed: pd.DataFrame,
     target_col: str,
     train_cutoff: pd.Timestamp,
-    id_cols: List[str],
-    protected_cols: List[str],
-    pd_feature_blacklist: FrozenSet[str],
-    forbidden_feature_patterns: Tuple[str, ...],
-    date_cols: List[str],
+    id_cols: list[str],
+    protected_cols: list[str],
+    pd_feature_blacklist: frozenset[str],
+    forbidden_feature_patterns: tuple[str, ...],
+    date_cols: list[str],
     split_date_col: str = "snapshot_dt",
-    allowed_features: Optional[List[str]] = None,
-) -> Tuple[
+    allowed_features: list[str] | None = None,
+) -> tuple[
     pd.DataFrame,  # X_train_raw
     pd.DataFrame,  # X_train_trans
-    pd.Series,     # y_train
+    pd.Series,  # y_train
     pd.DataFrame,  # X_val_raw
     pd.DataFrame,  # X_val_trans
-    pd.Series,     # y_val
-    List[str],     # candidate_features
-    pd.Series,     # thin_train
-    pd.Series,     # thin_val
-    pd.Series,     # agent_train
-    pd.Series,     # agent_val
+    pd.Series,  # y_val
+    list[str],  # candidate_features
+    pd.Series,  # thin_train
+    pd.Series,  # thin_val
+    pd.Series,  # agent_train
+    pd.Series,  # agent_val
 ]:
     """
     Split the modelling DataFrame into aligned train / validation feature matrices.
@@ -94,24 +92,18 @@ def prepare_pd_training_and_validation_data(
     # ------------------------------------------------------------------ #
     # 2) Split date validation
     # ------------------------------------------------------------------ #
-    assert (split_date_col in df_pd_raw.columns) or (
-        split_date_col in df_pd_transformed.columns
-    ), f"[prepare_pd_data] split_date_col '{split_date_col}' missing from both DataFrames"
+    assert (split_date_col in df_pd_raw.columns) or (split_date_col in df_pd_transformed.columns), (
+        f"[prepare_pd_data] split_date_col '{split_date_col}' missing from both DataFrames"
+    )
 
     if split_date_col in df_pd_raw.columns:
-        df_pd_raw[split_date_col] = pd.to_datetime(
-            df_pd_raw[split_date_col], errors="coerce"
-        )
+        df_pd_raw[split_date_col] = pd.to_datetime(df_pd_raw[split_date_col], errors="coerce")
         split_series = df_pd_raw[split_date_col]
     else:
-        df_pd_transformed[split_date_col] = pd.to_datetime(
-            df_pd_transformed[split_date_col], errors="coerce"
-        )
+        df_pd_transformed[split_date_col] = pd.to_datetime(df_pd_transformed[split_date_col], errors="coerce")
         split_series = df_pd_transformed[split_date_col]
 
-    assert split_series.notna().all(), (
-        f"[prepare_pd_data] split_date_col '{split_date_col}' has NaT values"
-    )
+    assert split_series.notna().all(), f"[prepare_pd_data] split_date_col '{split_date_col}' has NaT values"
 
     # Coerce optional date columns if present
     for c in date_cols:
@@ -128,7 +120,7 @@ def prepare_pd_training_and_validation_data(
     protected_low = {str(c).lower() for c in protected_cols}
 
     base_cols = allowed_features if allowed_features is not None else df_pd_transformed.columns
-    candidate_features: List[str] = []
+    candidate_features: list[str] = []
 
     for c in base_cols:
         if c not in df_pd_transformed.columns:
@@ -154,11 +146,7 @@ def prepare_pd_training_and_validation_data(
     # ------------------------------------------------------------------ #
     # 4) Pattern-based leakage guard
     # ------------------------------------------------------------------ #
-    leakage_hits = [
-        c
-        for c in candidate_features
-        if any(p in c.lower() for p in forbidden_patterns_low)
-    ]
+    leakage_hits = [c for c in candidate_features if any(p in c.lower() for p in forbidden_patterns_low)]
     assert not leakage_hits, (
         "[prepare_pd_data] Pattern-based leakage detected. "
         "Add to PD_FEATURE_BLACKLIST explicitly:\n" + ", ".join(leakage_hits)
@@ -220,9 +208,7 @@ def prepare_pd_training_and_validation_data(
         f"[prepare_pd_data] Candidate features missing in train transformed: {missing_train}"
     )
     missing_val = [c for c in candidate_features if c not in df_val_trans.columns]
-    assert not missing_val, (
-        f"[prepare_pd_data] Candidate features missing in val transformed: {missing_val}"
-    )
+    assert not missing_val, f"[prepare_pd_data] Candidate features missing in val transformed: {missing_val}"
 
     X_train_raw = df_train_raw[candidate_features]
     X_train_trans = df_train_trans[candidate_features]
@@ -232,17 +218,17 @@ def prepare_pd_training_and_validation_data(
     X_val_trans = df_val_trans[candidate_features]
     y_val = df_val_trans[target_col]
 
-    assert X_train_raw.shape == X_train_trans.shape, (
-        "[prepare_pd_data] Train raw/trans shapes differ"
-    )
-    assert X_val_raw.shape == X_val_trans.shape, (
-        "[prepare_pd_data] Val raw/trans shapes differ"
-    )
+    assert X_train_raw.shape == X_train_trans.shape, "[prepare_pd_data] Train raw/trans shapes differ"
+    assert X_val_raw.shape == X_val_trans.shape, "[prepare_pd_data] Val raw/trans shapes differ"
     assert y_train.notna().all(), "[prepare_pd_data] Training target contains NaNs"
     assert y_val.notna().all(), "[prepare_pd_data] Validation target contains NaNs"
 
-    thin_train = df_train_raw[thin_col] if thin_col in df_train_raw.columns else pd.Series(0, index=df_train_raw.index)
-    thin_val = df_val_raw[thin_col] if thin_col in df_val_raw.columns else pd.Series(0, index=df_val_raw.index)
+    thin_train = (
+        df_train_raw[thin_col] if thin_col in df_train_raw.columns else pd.Series(0, index=df_train_raw.index)
+    )
+    thin_val = (
+        df_val_raw[thin_col] if thin_col in df_val_raw.columns else pd.Series(0, index=df_val_raw.index)
+    )
 
     logger.info(
         "prepare_pd_data: Train=%d rows | Val=%d rows | Features=%d",

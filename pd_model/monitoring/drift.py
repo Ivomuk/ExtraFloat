@@ -46,6 +46,7 @@ _PSI_MODERATE = 0.25
 # Core PSI formula
 # ======================================================================== #
 
+
 def _psi_single(
     reference: np.ndarray,
     monitoring: np.ndarray,
@@ -99,6 +100,7 @@ def _stability_label(psi: float) -> str:
 # Score PSI
 # ======================================================================== #
 
+
 def compute_psi(
     reference_scores: pd.Series,
     monitoring_scores: pd.Series,
@@ -127,6 +129,7 @@ def compute_psi(
 # ======================================================================== #
 # Feature CSI
 # ======================================================================== #
+
 
 def compute_csi(
     reference_df: pd.DataFrame,
@@ -161,11 +164,13 @@ def compute_csi(
         ref = pd.to_numeric(reference_df[feat], errors="coerce").to_numpy()
         mon = pd.to_numeric(monitoring_df[feat], errors="coerce").to_numpy()
         csi_val = _psi_single(ref, mon, bins=bins)
-        rows.append({
-            "feature": feat,
-            "csi": round(csi_val, 5) if not np.isnan(csi_val) else np.nan,
-            "stability": _stability_label(csi_val),
-        })
+        rows.append(
+            {
+                "feature": feat,
+                "csi": round(csi_val, 5) if not np.isnan(csi_val) else np.nan,
+                "stability": _stability_label(csi_val),
+            }
+        )
 
     df = pd.DataFrame(rows)
     return df.sort_values("csi", ascending=False, na_position="last").reset_index(drop=True)
@@ -174,6 +179,7 @@ def compute_csi(
 # ======================================================================== #
 # Full drift report
 # ======================================================================== #
+
 
 def run_drift_report(
     reference_df: pd.DataFrame,
@@ -207,9 +213,7 @@ def run_drift_report(
     # Score PSI
     score_psi = np.nan
     if score_col in reference_df.columns and score_col in monitoring_df.columns:
-        score_psi = compute_psi(
-            reference_df[score_col], monitoring_df[score_col], bins=bins
-        )
+        score_psi = compute_psi(reference_df[score_col], monitoring_df[score_col], bins=bins)
 
     # Feature CSI
     csi_tbl = compute_csi(reference_df, monitoring_df, feature_cols, bins=bins)

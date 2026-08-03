@@ -42,6 +42,7 @@ _CRITICAL_THRESHOLD = 0.25
 # Alert checking
 # ======================================================================== #
 
+
 def check_drift_alerts(
     drift_report: dict[str, Any],
     report_date: str | None = None,
@@ -98,11 +99,13 @@ def check_drift_alerts(
         top_rows = csi_table.head(top_n_features)
         for _, row in top_rows.iterrows():
             csi_val = row.get("csi", np.nan)
-            top_drifted.append({
-                "feature": str(row.get("feature", "")),
-                "csi": round(float(csi_val), 4) if not np.isnan(csi_val) else None,
-                "stability": str(row.get("stability", "unknown")),
-            })
+            top_drifted.append(
+                {
+                    "feature": str(row.get("feature", "")),
+                    "csi": round(float(csi_val), 4) if not np.isnan(csi_val) else None,
+                    "stability": str(row.get("stability", "unknown")),
+                }
+            )
 
     has_warning = score_level in ("warning", "critical") or n_feat_warning > 0 or n_feat_critical > 0
     has_critical = score_level == "critical" or n_feat_critical > 0
@@ -119,9 +122,14 @@ def check_drift_alerts(
     )
 
     level_log = logger.warning if has_critical else (logger.info if has_warning else logger.info)
-    level_log("drift_alert [%s]: score_psi=%.4f (%s) | feat_critical=%d | feat_warning=%d",
-              report_date, score_psi if not np.isnan(score_psi) else -1,
-              score_level, n_feat_critical, n_feat_warning)
+    level_log(
+        "drift_alert [%s]: score_psi=%.4f (%s) | feat_critical=%d | feat_warning=%d",
+        report_date,
+        score_psi if not np.isnan(score_psi) else -1,
+        score_level,
+        n_feat_critical,
+        n_feat_warning,
+    )
 
     return {
         "report_date": report_date,
@@ -140,6 +148,7 @@ def check_drift_alerts(
 # ======================================================================== #
 # Output sinks
 # ======================================================================== #
+
 
 def write_alert_report(
     alerts: dict[str, Any],
@@ -176,6 +185,7 @@ def send_slack_alert(message: str, webhook_url: str) -> bool:
     """
     try:
         import urllib.request
+
         payload = json.dumps({"text": message}).encode()
         req = urllib.request.Request(
             webhook_url,
@@ -198,6 +208,7 @@ def send_slack_alert(message: str, webhook_url: str) -> bool:
 # ======================================================================== #
 # Helpers
 # ======================================================================== #
+
 
 def _classify(value: float, warn: float, critical: float) -> str:
     if np.isnan(value):
@@ -226,8 +237,7 @@ def _format_message(
     lines = [
         header,
         f"  Score PSI : {psi_str} ({score_level.upper()})",
-        f"  Features  : {n_feat_monitored} monitored | "
-        f"{n_feat_critical} critical | {n_feat_warning} warning",
+        f"  Features  : {n_feat_monitored} monitored | {n_feat_critical} critical | {n_feat_warning} warning",
     ]
 
     if top_drifted:

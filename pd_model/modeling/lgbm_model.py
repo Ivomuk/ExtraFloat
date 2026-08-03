@@ -9,9 +9,9 @@ from __future__ import annotations
 
 from typing import Any
 
+import lightgbm as lgb
 import numpy as np
 import pandas as pd
-import lightgbm as lgb
 from sklearn.metrics import roc_auc_score
 
 from pd_model.config import feature_config
@@ -26,6 +26,7 @@ logger = get_logger(__name__)
 # ======================================================================== #
 # Training
 # ======================================================================== #
+
 
 def train_lgbm(
     X_train: pd.DataFrame,
@@ -57,16 +58,16 @@ def train_lgbm(
 
     scored_df columns: bad_state, raw_score
     """
-    assert X_train.columns.tolist() == X_val.columns.tolist(), \
-        "[FATAL] Train/val column order mismatch"
+    assert X_train.columns.tolist() == X_val.columns.tolist(), "[FATAL] Train/val column order mismatch"
 
     feature_cols = X_train.columns.tolist()
 
     if monotone_constraints is None:
         monotone_constraints = build_monotone_constraints(feature_cols, X_train, y_train)
 
-    assert len(monotone_constraints) == len(feature_cols), \
+    assert len(monotone_constraints) == len(feature_cols), (
         f"[FATAL] constraints length {len(monotone_constraints)} != features {len(feature_cols)}"
+    )
 
     y_train_arr = pd.Series(y_train, index=X_train.index).astype(int).values
     y_val_arr = pd.Series(y_val, index=X_val.index).astype(int).values
@@ -87,7 +88,9 @@ def train_lgbm(
 
     logger.info(
         "LightGBM fit: train=%d rows | val=%d rows | features=%d",
-        X_train.shape[0], X_val.shape[0], len(feature_cols),
+        X_train.shape[0],
+        X_val.shape[0],
+        len(feature_cols),
     )
     model.fit(
         X_train,
@@ -119,6 +122,7 @@ def train_lgbm(
 # Evaluation
 # ======================================================================== #
 
+
 def evaluate_lgbm(
     model: lgb.LGBMClassifier,
     train_scored: pd.DataFrame,
@@ -135,14 +139,11 @@ def evaluate_lgbm(
         feature_importance : pd.Series (gain, sorted descending)
         val_deciles   : dict from build_decile_tables on val_scored
     """
-    train_auc, train_why = safe_auc_with_reason(
-        train_scored["bad_state"], train_scored["raw_score"]
+    train_auc, train_why = safe_auc_with_reason(train_scored["bad_state"], train_scored["raw_score"])
+    val_auc, val_why = safe_auc_with_reason(val_scored["bad_state"], val_scored["raw_score"])
+    logger.info(
+        "LightGBM overall train AUC=%.4f (%s) | val AUC=%.4f (%s)", train_auc, train_why, val_auc, val_why
     )
-    val_auc, val_why = safe_auc_with_reason(
-        val_scored["bad_state"], val_scored["raw_score"]
-    )
-    logger.info("LightGBM overall train AUC=%.4f (%s) | val AUC=%.4f (%s)",
-                train_auc, train_why, val_auc, val_why)
 
     seg_aucs = []
     for split_name, scored_df in [("train", train_scored), ("val", val_scored)]:
@@ -156,8 +157,11 @@ def evaluate_lgbm(
                 scored_df.loc[mask, "raw_score"],
             )
             logger.info(
-                "LightGBM %s thin=%d AUC=%.4f (%s)", split_name, thin_value,
-                auc_val if not np.isnan(auc_val) else -1, why,
+                "LightGBM %s thin=%d AUC=%.4f (%s)",
+                split_name,
+                thin_value,
+                auc_val if not np.isnan(auc_val) else -1,
+                why,
             )
             seg_aucs.append({"split": split_name, "thin": thin_value, "auc": auc_val, "reason": why})
 

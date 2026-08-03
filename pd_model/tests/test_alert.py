@@ -1,20 +1,21 @@
 """Tests for pd_model.monitoring.alert."""
+
 import json
-from pathlib import Path
 
 import numpy as np
 import pandas as pd
-import pytest
 
-from pd_model.monitoring.alert import check_drift_alerts, write_alert_report, _classify
+from pd_model.monitoring.alert import _classify, check_drift_alerts, write_alert_report
 
 
 def _make_drift_report(score_psi: float = 0.05, feat_csi: float = 0.05):
-    csi_table = pd.DataFrame({
-        "feature": ["feat_a", "feat_b"],
-        "csi": [feat_csi, feat_csi * 0.5],
-        "stability": ["stable", "stable"],
-    })
+    csi_table = pd.DataFrame(
+        {
+            "feature": ["feat_a", "feat_b"],
+            "csi": [feat_csi, feat_csi * 0.5],
+            "stability": ["stable", "stable"],
+        }
+    )
     return {
         "score_psi": score_psi,
         "score_stability": "stable",
@@ -79,7 +80,7 @@ class TestCheckDriftAlerts:
         report = _make_drift_report()
         alerts = check_drift_alerts(report)
         assert alerts["report_date"] is not None
-        assert len(alerts["report_date"]) == 10   # YYYY-MM-DD
+        assert len(alerts["report_date"]) == 10  # YYYY-MM-DD
 
 
 class TestWriteAlertReport:

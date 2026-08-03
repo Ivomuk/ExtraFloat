@@ -15,8 +15,6 @@ file5.txt has been removed; only one canonical definition is kept here.
 
 from __future__ import annotations
 
-from typing import FrozenSet, List, Optional, Tuple
-
 import numpy as np
 import pandas as pd
 
@@ -31,14 +29,15 @@ logger = get_logger(__name__)
 # Core IV computation
 # ======================================================================== #
 
+
 def compute_iv(
     x: pd.Series,
     y: pd.Series,
     n_bins: int = 10,
-    bins: Optional[np.ndarray] = None,
+    bins: np.ndarray | None = None,
     return_bins: bool = False,
     eps: float = DEFAULT_CONFIG.eps,
-) -> float | Tuple[float, Optional[np.ndarray]]:
+) -> float | tuple[float, np.ndarray | None]:
     """
     Compute Information Value for a single feature vs a binary target.
 
@@ -71,9 +70,7 @@ def compute_iv(
         try:
             binned, bin_edges = pd.qcut(x_nn, q=max_bins, retbins=True, duplicates="drop")
         except ValueError:
-            binned, bin_edges = pd.cut(
-                x_nn, bins=max_bins, retbins=True, include_lowest=True
-            )
+            binned, bin_edges = pd.cut(x_nn, bins=max_bins, retbins=True, include_lowest=True)
     else:
         bin_edges = np.unique(np.asarray(bins))
         if bin_edges.shape[0] < 2:
@@ -100,7 +97,7 @@ def compute_iv_fixed_bins(
     binning: str = "quantile",
     return_bins: bool = False,
     eps: float = DEFAULT_CONFIG.eps,
-) -> float | Tuple[float, Optional[np.ndarray]]:
+) -> float | tuple[float, np.ndarray | None]:
     """
     Compute IV by first learning bin edges from *x*, then applying those fixed
     edges to compute WOE/IV.
@@ -166,7 +163,7 @@ def compute_iv_with_bins(
     bins: np.ndarray,
     return_bins: bool = False,
     eps: float = DEFAULT_CONFIG.eps,
-) -> float | Tuple[float, Optional[np.ndarray]]:
+) -> float | tuple[float, np.ndarray | None]:
     """
     Compute IV for *x* using externally provided fixed bin edges.
 
@@ -219,15 +216,16 @@ def compute_iv_with_bins(
 # IV-based feature selection
 # ======================================================================== #
 
+
 def iv_filter_phase_2(
     X_train_raw: pd.DataFrame,
     X_train_transformed: pd.DataFrame,
     y_train: pd.Series,
     cfg: ModelConfig = DEFAULT_CONFIG,
-    pd_feature_blacklist: FrozenSet[str] = PD_FEATURE_BLACKLIST,
-    forbidden_feature_patterns: Tuple[str, ...] = LEAKAGE_PATTERNS,
+    pd_feature_blacklist: frozenset[str] = PD_FEATURE_BLACKLIST,
+    forbidden_feature_patterns: tuple[str, ...] = LEAKAGE_PATTERNS,
     target_col: str = "bad_state",
-) -> Tuple[List[str], pd.DataFrame]:
+) -> tuple[list[str], pd.DataFrame]:
     """
     Select features by Information Value computed on the **training set only**.
 
@@ -252,22 +250,18 @@ def iv_filter_phase_2(
     target_low = str(target_col).lower()
     raw_cols = set(X_train_raw.columns) if X_train_raw is not None else set()
 
-    iv_records: List[dict] = []
+    iv_records: list[dict] = []
 
     for col in X_train_transformed.columns:
         col_low = str(col).lower()
-        if col_low == target_low or col_low in blacklist_low or any(
-            p in col_low for p in patterns_low
-        ):
+        if col_low == target_low or col_low in blacklist_low or any(p in col_low for p in patterns_low):
             continue
 
         x_after = X_train_transformed[col]
         iv_after = compute_iv(x_after, y_train, n_bins=cfg.iv_n_bins, eps=cfg.eps)
 
         if X_train_raw is not None and col in raw_cols:
-            iv_before = compute_iv(
-                X_train_raw[col], y_train, n_bins=cfg.iv_n_bins, eps=cfg.eps
-            )
+            iv_before = compute_iv(X_train_raw[col], y_train, n_bins=cfg.iv_n_bins, eps=cfg.eps)
             iv_uplift = iv_after - iv_before
         else:
             iv_before = np.nan
@@ -282,11 +276,7 @@ def iv_filter_phase_2(
             }
         )
 
-    iv_table = (
-        pd.DataFrame(iv_records)
-        .sort_values("iv_after", ascending=False)
-        .reset_index(drop=True)
-    )
+    iv_table = pd.DataFrame(iv_records).sort_values("iv_after", ascending=False).reset_index(drop=True)
 
     selected_mask = (iv_table["iv_after"] >= cfg.iv_min) & (
         iv_table["iv_uplift"].fillna(cfg.iv_min_uplift) >= cfg.iv_min_uplift
@@ -308,11 +298,11 @@ def iv_filter_phase_2_separability_sensitive(
     X_train_transformed: pd.DataFrame,
     y_train: pd.Series,
     cfg: ModelConfig = DEFAULT_CONFIG,
-    pd_feature_blacklist: FrozenSet[str] = PD_FEATURE_BLACKLIST,
-    forbidden_feature_patterns: Tuple[str, ...] = LEAKAGE_PATTERNS,
+    pd_feature_blacklist: frozenset[str] = PD_FEATURE_BLACKLIST,
+    forbidden_feature_patterns: tuple[str, ...] = LEAKAGE_PATTERNS,
     target_col: str = "bad_state",
     binning: str = "quantile",
-) -> Tuple[List[str], pd.DataFrame]:
+) -> tuple[list[str], pd.DataFrame]:
     """
     Enhanced IV selection with three diagnostic IV variants:
 
@@ -346,13 +336,11 @@ def iv_filter_phase_2_separability_sensitive(
         y_vec = y_vec.iloc[:, 0]
     y_arr = y_vec.to_numpy() if isinstance(y_vec, (pd.Series, pd.Index)) else np.asarray(y_vec)
 
-    iv_records: List[dict] = []
+    iv_records: list[dict] = []
 
     for col in X_train_transformed.columns:
         col_low = str(col).lower()
-        if col_low == target_low or col_low in blacklist_low or any(
-            p in col_low for p in patterns_low
-        ):
+        if col_low == target_low or col_low in blacklist_low or any(p in col_low for p in patterns_low):
             continue
 
         x_after = X_train_transformed[col]
@@ -372,8 +360,7 @@ def iv_filter_phase_2_separability_sensitive(
 
             # Fixed-edges diagnostic
             iv_b_fe, iv_a_fe, iv_up_fe = _fixed_edges_uplift(
-                x_before, x_after, y_arr, n_bins=cfg.iv_n_bins,
-                binning=binning, eps=cfg.eps
+                x_before, x_after, y_arr, n_bins=cfg.iv_n_bins, binning=binning, eps=cfg.eps
             )
         else:
             iv_before = np.nan
@@ -418,11 +405,12 @@ def iv_filter_phase_2_separability_sensitive(
 # Leakage audit on IV table
 # ======================================================================== #
 
+
 def iv_audit(
     iv_table: pd.DataFrame,
-    X_train: Optional[pd.DataFrame] = None,
-    X_train_transformed: Optional[pd.DataFrame] = None,
-    y_train: Optional[pd.Series] = None,
+    X_train: pd.DataFrame | None = None,
+    X_train_transformed: pd.DataFrame | None = None,
+    y_train: pd.Series | None = None,
     cfg: ModelConfig = DEFAULT_CONFIG,
     hard_fail_on_leakage: bool = True,
 ) -> pd.DataFrame:
@@ -450,18 +438,16 @@ def iv_audit(
     """
     iv_aug = iv_table.copy()
     iv_aug["flag_high_iv"] = iv_aug["iv_after"] > cfg.iv_high_flag
-    iv_aug["flag_label_name"] = iv_aug["feature"].str.lower().str.contains(
-        "target|label|bad_state|default|dpd|penalty", na=False
+    iv_aug["flag_label_name"] = (
+        iv_aug["feature"].str.lower().str.contains("target|label|bad_state|default|dpd|penalty", na=False)
     )
-    iv_aug["flag_id_name"] = iv_aug["feature"].str.lower().str.contains(
-        "_id|customer_id|account_id|msisdn", na=False
+    iv_aug["flag_id_name"] = (
+        iv_aug["feature"].str.lower().str.contains("_id|customer_id|account_id|msisdn", na=False)
     )
-    iv_aug["flag_date_name"] = iv_aug["feature"].str.lower().str.contains(
-        "_dt|_timestamp|date", na=False
-    )
+    iv_aug["flag_date_name"] = iv_aug["feature"].str.lower().str.contains("_dt|_timestamp|date", na=False)
 
     # High-correlation check
-    high_corr_features: List[str] = []
+    high_corr_features: list[str] = []
     if y_train is not None and X_train_transformed is not None:
         y = pd.to_numeric(y_train, errors="coerce")
         checked = 0
@@ -488,15 +474,11 @@ def iv_audit(
 
     if hard_fail_on_leakage and high_corr_features:
         raise RuntimeError(
-            f"[iv_audit] Features with near-perfect target correlation (>0.99): "
-            f"{sorted(high_corr_features)}"
+            f"[iv_audit] Features with near-perfect target correlation (>0.99): {sorted(high_corr_features)}"
         )
 
     n_flagged = int(
-        iv_aug[
-            ["flag_high_iv", "flag_label_name", "flag_id_name",
-             "flag_date_name", "flag_high_target_corr"]
-        ]
+        iv_aug[["flag_high_iv", "flag_label_name", "flag_id_name", "flag_date_name", "flag_high_target_corr"]]
         .any(axis=1)
         .sum()
     )
@@ -507,6 +489,7 @@ def iv_audit(
 # ======================================================================== #
 # Private helpers
 # ======================================================================== #
+
 
 def _enforce_strictly_increasing(edges: np.ndarray, eps: float = 1e-9) -> np.ndarray:
     """Ensure bin edges are strictly increasing by adding eps where needed."""
@@ -570,7 +553,7 @@ def _fixed_edges_uplift(
     n_bins: int,
     binning: str,
     eps: float,
-) -> Tuple[float, float, float]:
+) -> tuple[float, float, float]:
     """
     Diagnostic: learn bin edges in raw value space, then map transformed values
     back onto raw scale via percentile matching to compute IV without unit-mismatch

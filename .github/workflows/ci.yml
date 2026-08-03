@@ -1,0 +1,113 @@
+name: CI
+
+on:
+  push:
+    branches: ["main", "claude/**"]
+  pull_request:
+
+jobs:
+  lint:
+    name: Lint (Ruff)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Ruff
+        run: pip install "ruff>=0.4"
+
+      - name: Ruff check
+        run: ruff check .
+
+      - name: Ruff format check
+        run: ruff format --check .
+
+  test:
+    name: Test (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dependencies (pinned lockfile on 3.11, loose on others)
+        run: |
+          if [ "${{ matrix.python-version }}" = "3.11" ]; then
+            pip install uv
+            uv pip install --system -r requirements-lock.txt
+            uv pip install --system -e ".[dev,monitor]"
+          else
+            pip install -e ".[dev,monitor]"
+          fi
+
+      - name: Run tests
+        run: pytest tests/ pd_model/tests/ -v --tb=short -x
+
+  smoke:
+    name: Smoke — import + preflight
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install uv
+          uv pip install --system -r requirements-lock.txt
+          uv pip install --system -e ".[dev,monitor]"
+
+      - name: Import smoke test
+        run: |
+          python -c "
+          from extrafloat.engine.run_extrafloat_limit_engine import run_extrafloat_limit_engine
+          from pd_model.modeling.inference import load_artifacts
+          from run_credit_risk_pipeline import _check_artifacts, _REQUIRED_ARTIFACTS
+          print('All imports OK')
+          print('Required artifacts:', _REQUIRED_ARTIFACTS)
+          "
+
+      - name: Preflight smoke — placeholder metadata warns, does not crash
+        run: |
+          python -c "
+          import json, tempfile, pathlib
+          from run_credit_risk_pipeline import _check_artifacts, _REQUIRED_ARTIFACTS
+
+          with tempfile.TemporaryDirectory() as d:
+              p = pathlib.Path(d)
+              for f in _REQUIRED_ARTIFACTS:
+                  if f == 'model_metadata.json':
+                      (p / f).write_text(json.dumps({}))
+                  else:
+                      (p / f).touch()
+              _check_artifacts(p, allow_unverified=True)
+          print('Preflight smoke OK')
+          "
+
+  security:
+    name: Security scan (pip-audit)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install pip-audit
+        run: pip install pip-audit
+
+      - name: Audit dependencies
+        run: pip-audit -r requirements-lock.txt --skip-editable

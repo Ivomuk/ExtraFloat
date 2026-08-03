@@ -40,6 +40,7 @@ _DEFAULT_OPERATING_POINTS = (0.10, 0.20, 0.50, 0.80)
 # Core stress test
 # ======================================================================== #
 
+
 def run_stress_test(
     scored_df: pd.DataFrame,
     policy_threshold_tbl: pd.DataFrame,
@@ -80,9 +81,7 @@ def run_stress_test(
         el_change_pct            (vs 1× baseline)
     """
     if cal_pd_col not in scored_df.columns:
-        raise ValueError(
-            f"[run_stress_test] cal_pd column '{cal_pd_col}' not found in scored_df"
-        )
+        raise ValueError(f"[run_stress_test] cal_pd column '{cal_pd_col}' not found in scored_df")
 
     base_pds = pd.to_numeric(scored_df[cal_pd_col], errors="coerce").fillna(0.0).to_numpy()
 
@@ -94,9 +93,7 @@ def run_stress_test(
 
     # Index policy table by approximate operating point for fast lookup
     thresh_tbl = policy_threshold_tbl.copy()
-    thresh_tbl["approve_rate_target"] = pd.to_numeric(
-        thresh_tbl["approve_rate_target"], errors="coerce"
-    )
+    thresh_tbl["approve_rate_target"] = pd.to_numeric(thresh_tbl["approve_rate_target"], errors="coerce")
 
     rows = []
     baseline: dict[float, float] = {}  # operating_point → baseline approval_rate
@@ -119,16 +116,18 @@ def run_stress_test(
                 el = float(stressed_pds[approved_mask].sum())
                 el_per = float(stressed_pds[approved_mask].mean()) if n_approved > 0 else np.nan
 
-            rows.append({
-                "operating_point": op,
-                "stress_multiplier": m,
-                "locked_pd_cutoff": round(locked_cutoff, 6),
-                "n_agents": n_agents,
-                "n_approved": n_approved,
-                "approval_rate": round(approval_rate, 4),
-                "expected_loss": round(el, 4),
-                "el_per_approved": round(el_per, 6) if not np.isnan(el_per) else np.nan,
-            })
+            rows.append(
+                {
+                    "operating_point": op,
+                    "stress_multiplier": m,
+                    "locked_pd_cutoff": round(locked_cutoff, 6),
+                    "n_agents": n_agents,
+                    "n_approved": n_approved,
+                    "approval_rate": round(approval_rate, 4),
+                    "expected_loss": round(el, 4),
+                    "el_per_approved": round(el_per, 6) if not np.isnan(el_per) else np.nan,
+                }
+            )
 
             if m == 1.0:
                 baseline[op] = approval_rate
@@ -148,17 +147,19 @@ def run_stress_test(
         baseline_el[op] = float(base_row["expected_loss"].iloc[0]) if len(base_row) else np.nan
 
     df["el_change_pct"] = df.apply(
-        lambda r: round(
-            (r["expected_loss"] / baseline_el.get(r["operating_point"], np.nan) - 1) * 100, 2
-        )
-        if baseline_el.get(r["operating_point"], 0) > 0
-        else np.nan,
+        lambda r: (
+            round((r["expected_loss"] / baseline_el.get(r["operating_point"], np.nan) - 1) * 100, 2)
+            if baseline_el.get(r["operating_point"], 0) > 0
+            else np.nan
+        ),
         axis=1,
     )
 
     logger.info(
         "run_stress_test: %d agents | %d operating points | %d multipliers",
-        n_agents, len(operating_points), len(stress_multipliers),
+        n_agents,
+        len(operating_points),
+        len(stress_multipliers),
     )
     return df.sort_values(["operating_point", "stress_multiplier"]).reset_index(drop=True)
 
@@ -166,6 +167,7 @@ def run_stress_test(
 # ======================================================================== #
 # Wide-format summary
 # ======================================================================== #
+
 
 def build_stress_summary(
     stress_tbl: pd.DataFrame,

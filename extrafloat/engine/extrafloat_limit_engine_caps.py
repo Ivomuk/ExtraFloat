@@ -15,11 +15,9 @@ logger = logging.getLogger(__name__)
 DEFAULT_CAP_CONFIG = {
     "global_floor_limit": 0.0,
     "global_ceiling_limit": 1_000_000.0,
-
     "rounding": {
         "round_to_nearest": 100.0,
     },
-
     # ── Capacity cap ──────────────────────────────────────────────────────────
     "capacity": {
         # Input multipliers
@@ -29,7 +27,6 @@ DEFAULT_CAP_CONFIG = {
         "payments_multiplier": 0.30,
         "customers_multiplier": 25.0,
         "volume_multiplier": 0.20,
-
         # Weighted contribution mix
         "balance_weight": 0.22,
         "revenue_weight": 0.28,
@@ -37,63 +34,52 @@ DEFAULT_CAP_CONFIG = {
         "payments_weight": 0.14,
         "customers_weight": 0.09,
         "activity_weight": 0.15,
-
         # Operational activity attenuation
         "activity_inactive_floor": 0.35,
         "activity_active_weight": 0.65,
     },
-
     # ── Experience / trust ramp ───────────────────────────────────────────────
     "experience": {
         "min_experience_factor": 0.30,
         "minimum_total_loans_for_full_trust": 10.0,
     },
-
     # ── Recent usage cap ──────────────────────────────────────────────────────
     "recent_usage": {
         # Activity gate
         "minimum_activity_required": 100.0,
-
         # Base usage construction
         "disbursement_multiplier": 0.90,
         "repayment_multiplier": 1.00,
         "disbursement_weight": 0.45,
         "repayment_weight": 0.55,
-
         # Coverage lift
         "coverage_multiplier_floor": 0.85,
         "coverage_weight": 0.35,
         "coverage_bonus_cap": 1.20,
-
         # Penalty haircut
         "penalty_haircut_per_event": 0.10,
-
         # Repayment ratio attenuation
         "repayment_ratio_cap": 1.00,
         "repayment_ratio_floor_weight": 0.55,
     },
-
     # ── Cap combination weights ───────────────────────────────────────────────
     "combination": {
         # Standard-file weights — must sum to 1.0
         "capacity_weight": 0.40,
         "recent_usage_weight": 0.25,
-        "prior_exposure_weight": 0.15,   # was missing; caused silent fallback to 0.10
+        "prior_exposure_weight": 0.15,  # was missing; caused silent fallback to 0.10
         "risk_weight": 0.20,
-
         # Thin-file weights (fewer than thin_file_threshold lifetime loans)
         "thin_file_capacity_weight": 0.25,
         "thin_file_recent_usage_weight": 0.15,
         "thin_file_prior_exposure_weight": 0.10,
         "thin_file_risk_weight": 0.50,
         "thin_file_threshold": 3.0,
-
         # Prior-limit smoothing guard rails
         "prior_limit_weight": 0.15,
         "prior_limit_max_upside": 1.25,
         "prior_limit_max_downside": 0.75,
     },
-
     # ── Risk cap ──────────────────────────────────────────────────────────────
     "risk": {
         "base_limit": 1_000_000.0,
@@ -104,16 +90,13 @@ DEFAULT_CAP_CONFIG = {
         "cure_weight": 0.08,
         "stability_weight": 0.07,
         "volatility_weight": 0.05,
-
         "max_cure_hours": 72.0,
         "max_volatility_hours": 48.0,
         "max_recent_default_rate": 1.0,
         "max_lifetime_default_rate": 1.0,
-
         "min_score": 0.0,
         "max_score": 1.0,
     },
-
     # ── Prior exposure cap ────────────────────────────────────────────────────
     "prior_exposure": {
         "avg_weight": 0.60,
@@ -129,7 +112,6 @@ DEFAULT_CAP_CONFIG = {
         "recent_performance_floor": 0.70,
         "recent_performance_ceiling": 1.00,
     },
-
     # ── Policy adjustments ────────────────────────────────────────────────────
     "policy": {
         # Risk-tier score cutoffs (MIN thresholds — higher score = better borrower).
@@ -140,24 +122,20 @@ DEFAULT_CAP_CONFIG = {
         "risk_tier_1_score_min": 0.85,
         "risk_tier_2_score_min": 0.60,
         "risk_tier_3_score_min": 0.35,
-
         # Risk-tier limit multipliers
         "risk_tier_1_multiplier": 1.00,
         "risk_tier_2_multiplier": 0.85,
         "risk_tier_3_multiplier": 0.65,
         "risk_tier_4_multiplier": 0.40,
-
         # Proven-good borrower floor override
         "proven_good_borrower_min_loans": 3.0,
         "proven_good_borrower_min_on_time_rate": 0.90,
         "proven_good_borrower_max_lifetime_default": 0.05,
         "proven_good_borrower_floor_pct_of_combined": 0.85,
-
         # Active borrower minimum floor (UGX)
         "active_borrower_min_limit": 500.0,
         "active_borrower_min_activity_amount": 1.0,
     },
-
     # ── Agent-tier effective ceiling ──────────────────────────────────────────
     # Single source of truth for agent tier → ceiling multiplier mapping.
     # multiplier = tier_limit / global_ceiling_limit (1,000,000 UGX).
@@ -171,27 +149,25 @@ DEFAULT_CAP_CONFIG = {
     # "new bronze" before "bronze".
     "agent_tier": {
         "enabled": True,
-        "default_multiplier": 0.05,   # fallback for unrecognised profiles
+        "default_multiplier": 0.05,  # fallback for unrecognised profiles
         "tiers": {
-            "diamond":      1.00,   # 1,000,000 / 1,000,000
-            "titanium":     0.75,   #   750,000 / 1,000,000
-            "platinum":     0.50,   #   500,000 / 1,000,000
-            "gold":         0.35,   #   350,000 / 1,000,000
-            "silver class": 0.25,   #   250,000 / 1,000,000  ← before "silver"
-            "silver":       0.25,   #   250,000 / 1,000,000
-            "new bronze":   0.05,   #    50,000 / 1,000,000  ← before "bronze"
-            "bronze":       0.10,   #   100,000 / 1,000,000
-            "unknown":      0.05,   #    50,000 / 1,000,000  — conservative fallback
+            "diamond": 1.00,  # 1,000,000 / 1,000,000
+            "titanium": 0.75,  #   750,000 / 1,000,000
+            "platinum": 0.50,  #   500,000 / 1,000,000
+            "gold": 0.35,  #   350,000 / 1,000,000
+            "silver class": 0.25,  #   250,000 / 1,000,000  ← before "silver"
+            "silver": 0.25,  #   250,000 / 1,000,000
+            "new bronze": 0.05,  #    50,000 / 1,000,000  ← before "bronze"
+            "bronze": 0.10,  #   100,000 / 1,000,000
+            "unknown": 0.05,  #    50,000 / 1,000,000  — conservative fallback
         },
     },
-
     # ── Seasonality attenuation ───────────────────────────────────────────────
     # Attenuates capacity_cap during peak months (Jan, Aug, Sep, Dec) so
     # throughput spikes don't permanently inflate limits.
     "seasonality": {
         "peak_season_capacity_attenuation": 0.85,
     },
-
     # ── Regulatory cap — Bank of Uganda (BoU) ────────────────────────────────
     # Applied at finalize_limits() as the hard regulatory ceiling.
     "regulatory": {
@@ -205,6 +181,7 @@ DEFAULT_CAP_CONFIG = {
 # ─────────────────────────────────────────────────────────────────────────────
 # INTERNAL HELPERS
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 def _get_config(config):
     return config if config is not None else DEFAULT_CAP_CONFIG
@@ -240,8 +217,7 @@ def _validate_tier_config(final_cfg):
     t3 = policy_cfg["risk_tier_3_score_min"]
     if not (t1 > t2 > t3):
         raise ValueError(
-            f"Risk tier min-thresholds must be strictly decreasing: "
-            f"tier_1={t1}, tier_2={t2}, tier_3={t3}"
+            f"Risk tier min-thresholds must be strictly decreasing: tier_1={t1}, tier_2={t2}, tier_3={t3}"
         )
 
 
@@ -294,9 +270,11 @@ def _fill_missing_caps(df, cfg):
                 df[col_name] = numeric_vals.fillna(ceiling_val)
     return df
 
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 1. RISK CAP
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 def compute_risk_cap(features_df, config=None):
     cfg = _get_config(config)
@@ -323,11 +301,19 @@ def compute_risk_cap(features_df, config=None):
     else:
         # Standalone fallback: 7-signal weighted blend (used when PD model is absent).
         on_time_rate = _clip_series(_safe_series(df, "on_time_repayment_rate"), 0.0, 1.0)
-        lifetime_default = _clip_series(_safe_series(df, "lifetime_default_rate"), 0.0, risk_cfg["max_lifetime_default_rate"])
-        recent_default = _clip_series(_safe_series(df, "default_rate_last_10_loans"), 0.0, risk_cfg["max_recent_default_rate"])
-        window_default = _clip_series(_safe_series(df, "default_rate_last_50_loans"), 0.0, risk_cfg["max_recent_default_rate"])
+        lifetime_default = _clip_series(
+            _safe_series(df, "lifetime_default_rate"), 0.0, risk_cfg["max_lifetime_default_rate"]
+        )
+        recent_default = _clip_series(
+            _safe_series(df, "default_rate_last_10_loans"), 0.0, risk_cfg["max_recent_default_rate"]
+        )
+        window_default = _clip_series(
+            _safe_series(df, "default_rate_last_50_loans"), 0.0, risk_cfg["max_recent_default_rate"]
+        )
         cure_speed = _clip_series(_safe_series(df, "avg_cure_time_hours"), 0.0, risk_cfg["max_cure_hours"])
-        cure_time_vol = _clip_series(_safe_series(df, "cure_time_volatility"), 0.0, risk_cfg["max_volatility_hours"])
+        cure_time_vol = _clip_series(
+            _safe_series(df, "cure_time_volatility"), 0.0, risk_cfg["max_volatility_hours"]
+        )
         stability_score = _clip_series(_safe_series(df, "repayment_stability_score"), 0.0, 1.0)
 
         on_time_score = on_time_rate
@@ -371,9 +357,11 @@ def compute_risk_cap(features_df, config=None):
     )
     return df
 
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 2. CAPACITY CAP
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 def compute_capacity_cap(features_df, config=None):
     cfg = _get_config(config)
@@ -421,11 +409,11 @@ def compute_capacity_cap(features_df, config=None):
     # ─────────────────────────────────────────────────────────────
 
     def _blend(s30, s90, src30, src90):
-        same_source = (src30 == src90)
+        same_source = src30 == src90
         return np.where(
             same_source,
             s30,  # collapse if both signals identical (fallback case)
-            0.7 * s30 + 0.3 * s90
+            0.7 * s30 + 0.3 * s90,
         )
 
     avg_balance = _blend(bal_30, bal_90, bal_30_src, bal_90_src)
@@ -520,13 +508,9 @@ def compute_capacity_cap(features_df, config=None):
     # 5. LIGHT ACTIVITY ADJUSTMENT (SOFT POLICY)
     # ─────────────────────────────────────────────────────────────
 
-    operational_flag = _clip_series(
-        _safe_series(df, "operational_activity_flag", 0.0), 0.0, 1.0
-    )
+    operational_flag = _clip_series(_safe_series(df, "operational_activity_flag", 0.0), 0.0, 1.0)
 
-    credit_flag = _clip_series(
-        _safe_series(df, "recent_credit_active_flag", 0.0), 0.0, 1.0
-    )
+    credit_flag = _clip_series(_safe_series(df, "recent_credit_active_flag", 0.0), 0.0, 1.0)
 
     activity_score = 0.7 * operational_flag + 0.3 * credit_flag
     activity_mult = 0.5 + 0.5 * activity_score
@@ -548,9 +532,7 @@ def compute_capacity_cap(features_df, config=None):
     peak_attenuation = float(season_cfg.get("peak_season_capacity_attenuation", 1.0))
 
     if peak_attenuation < 1.0:
-        peak_flag = _clip_series(
-            _safe_series(df, "is_peak_season_flag", 0.0), 0.0, 1.0
-        )
+        peak_flag = _clip_series(_safe_series(df, "is_peak_season_flag", 0.0), 0.0, 1.0)
         season_mult = pd.Series(
             np.where(peak_flag > 0.0, peak_attenuation, 1.0),
             index=df.index,
@@ -571,12 +553,18 @@ def compute_capacity_cap(features_df, config=None):
 
     source_frame = pd.DataFrame(
         {
-            "bal30": bal_30_src, "bal90": bal_90_src,
-            "rev30": rev_30_src, "rev90": rev_90_src,
-            "txn30": txn_30_src, "txn90": txn_90_src,
-            "pay30": pay_30_src, "pay90": pay_90_src,
-            "cust30": cust_30_src, "cust90": cust_90_src,
-            "vol30": vol_30_src, "vol90": vol_90_src,
+            "bal30": bal_30_src,
+            "bal90": bal_90_src,
+            "rev30": rev_30_src,
+            "rev90": rev_90_src,
+            "txn30": txn_30_src,
+            "txn90": txn_90_src,
+            "pay30": pay_30_src,
+            "pay90": pay_90_src,
+            "cust30": cust_30_src,
+            "cust90": cust_90_src,
+            "vol30": vol_30_src,
+            "vol90": vol_90_src,
         }
     )
 
@@ -602,9 +590,7 @@ def compute_capacity_cap(features_df, config=None):
     total_signal = component_frame.sum(axis=1)
 
     df["capacity_top_driver"] = np.where(
-        total_signal > 0,
-        component_frame.idxmax(axis=1),
-        "no_capacity_signal"
+        total_signal > 0, component_frame.idxmax(axis=1), "no_capacity_signal"
     )
 
     # ─────────────────────────────────────────────────────────────
@@ -638,9 +624,12 @@ def compute_capacity_cap(features_df, config=None):
         int((df.get("is_peak_season_flag", pd.Series(0)) > 0).sum()),
     )
     return df
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 3. RECENT USAGE CAP
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 def compute_recent_usage_cap(features_df, config=None):
     cfg = _get_config(config)
@@ -654,16 +643,10 @@ def compute_recent_usage_cap(features_df, config=None):
     # 3m values are period totals; divide by 3 to convert to monthly average
     # before blending so both legs share the same UGX/month scale.
     recent_disbursement_3m = _safe_series(df, "recent_disbursement_amount_3m", 0.0) / 3.0
-    recent_repayment_3m    = _safe_series(df, "recent_repayment_amount_3m",    0.0) / 3.0
+    recent_repayment_3m = _safe_series(df, "recent_repayment_amount_3m", 0.0) / 3.0
 
-    recent_disbursement_amount = (
-        0.7 * recent_disbursement_1m_raw
-        + 0.3 * recent_disbursement_3m
-    )
-    recent_repayment_amount = (
-        0.7 * recent_repayment_1m_raw
-        + 0.3 * recent_repayment_3m
-    )
+    recent_disbursement_amount = 0.7 * recent_disbursement_1m_raw + 0.3 * recent_disbursement_3m
+    recent_repayment_amount = 0.7 * recent_repayment_1m_raw + 0.3 * recent_repayment_3m
 
     recent_coverage_1m = _clip_series(
         _safe_series(df, "recent_repayment_coverage_1m", 0.0),
@@ -672,31 +655,24 @@ def compute_recent_usage_cap(features_df, config=None):
     )
     penalty_events = _safe_series(df, "recent_penalty_events_1m", 0.0)
 
-    active_mask = (
-        recent_disbursement_amount + recent_repayment_amount
-    ) >= usage_cfg["minimum_activity_required"]
+    active_mask = (recent_disbursement_amount + recent_repayment_amount) >= usage_cfg[
+        "minimum_activity_required"
+    ]
 
-    weight_denom = (
-        usage_cfg["disbursement_weight"] + usage_cfg["repayment_weight"]
-    )
+    weight_denom = usage_cfg["disbursement_weight"] + usage_cfg["repayment_weight"]
 
     disbursement_component = (
-        recent_disbursement_amount
-        * usage_cfg["disbursement_multiplier"]
-        * usage_cfg["disbursement_weight"]
+        recent_disbursement_amount * usage_cfg["disbursement_multiplier"] * usage_cfg["disbursement_weight"]
     ) / weight_denom
 
     repayment_component = (
-        recent_repayment_amount
-        * usage_cfg["repayment_multiplier"]
-        * usage_cfg["repayment_weight"]
+        recent_repayment_amount * usage_cfg["repayment_multiplier"] * usage_cfg["repayment_weight"]
     ) / weight_denom
 
     usage_base_amount = disbursement_component + repayment_component
 
     coverage_component = (
-        usage_cfg["coverage_multiplier_floor"]
-        + recent_coverage_1m * usage_cfg["coverage_weight"]
+        usage_cfg["coverage_multiplier_floor"] + recent_coverage_1m * usage_cfg["coverage_weight"]
     )
     coverage_mult = _clip_series(
         coverage_component,
@@ -718,15 +694,11 @@ def compute_recent_usage_cap(features_df, config=None):
         usage_cfg["repayment_ratio_cap"],
     )
     floor_weight = usage_cfg["repayment_ratio_floor_weight"]
-    repayment_ratio_mult = (
-        floor_weight
-        + (1.0 - floor_weight)
-        * (repayment_ratio / usage_cfg["repayment_ratio_cap"])
+    repayment_ratio_mult = floor_weight + (1.0 - floor_weight) * (
+        repayment_ratio / usage_cfg["repayment_ratio_cap"]
     )
 
-    recent_usage_cap_pre_activity = (
-        recent_usage_cap_before_ratio * repayment_ratio_mult
-    )
+    recent_usage_cap_pre_activity = recent_usage_cap_before_ratio * repayment_ratio_mult
 
     recent_usage_cap = pd.Series(
         np.where(active_mask, recent_usage_cap_pre_activity, 0.0),
@@ -816,9 +788,11 @@ def compute_recent_usage_cap(features_df, config=None):
     )
     return df
 
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 4. PRIOR EXPOSURE CAP
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 def compute_prior_exposure_cap(features_df, config=None):
     cfg = _get_config(config)
@@ -838,16 +812,8 @@ def compute_prior_exposure_cap(features_df, config=None):
 
     is_new_to_credit = (avg_prior_loan_size <= 0.0) & (max_prior_loan_size <= 0.0)
 
-    avg_component = (
-        avg_prior_loan_size
-        * pri_cfg["avg_multiplier"]
-        * pri_cfg["avg_weight"]
-    )
-    max_component = (
-        max_prior_loan_size
-        * pri_cfg["max_multiplier"]
-        * pri_cfg["max_weight"]
-    )
+    avg_component = avg_prior_loan_size * pri_cfg["avg_multiplier"] * pri_cfg["avg_weight"]
+    max_component = max_prior_loan_size * pri_cfg["max_multiplier"] * pri_cfg["max_weight"]
 
     prior_exposure_base = avg_component + max_component
 
@@ -877,10 +843,7 @@ def compute_prior_exposure_cap(features_df, config=None):
     )
 
     prior_exposure_cap_existing = (
-        prior_exposure_base
-        * above_max_penalty_multiplier
-        * growth_penalty_multiplier
-        * recent_performance
+        prior_exposure_base * above_max_penalty_multiplier * growth_penalty_multiplier * recent_performance
     )
 
     new_to_credit_cap = current_loan_size * pri_cfg["new_to_credit_factor"]
@@ -992,9 +955,11 @@ def compute_prior_exposure_cap(features_df, config=None):
     )
     return df
 
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 5. COMBINE CAPS
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 def combine_caps(features_df, config=None):
     cfg = _get_config(config)
@@ -1082,12 +1047,7 @@ def combine_caps(features_df, config=None):
         dtype="float64",
     )
 
-    weight_sum = (
-        capacity_weight
-        + usage_weight
-        + prior_exposure_weight
-        + risk_weight
-    )
+    weight_sum = capacity_weight + usage_weight + prior_exposure_weight + risk_weight
     safe_weight_sum = pd.Series(
         np.where(weight_sum > 0.0, weight_sum, 1.0),
         index=df.index,
@@ -1096,16 +1056,11 @@ def combine_caps(features_df, config=None):
 
     capacity_component = capacity_cap * capacity_weight / safe_weight_sum
     recent_usage_component = recent_usage_cap * usage_weight / safe_weight_sum
-    prior_exposure_component = (
-        prior_exposure_cap * prior_exposure_weight / safe_weight_sum
-    )
+    prior_exposure_component = prior_exposure_cap * prior_exposure_weight / safe_weight_sum
     risk_component = risk_cap * risk_weight / safe_weight_sum
 
     weighted_combined_cap = (
-        capacity_component
-        + recent_usage_component
-        + prior_exposure_component
-        + risk_component
+        capacity_component + recent_usage_component + prior_exposure_component + risk_component
     )
 
     combined_cap_before_risk_guardrail = pd.Series(
@@ -1132,8 +1087,7 @@ def combine_caps(features_df, config=None):
     smoothed_cap_raw = pd.Series(
         np.where(
             prior_limit_available,
-            (1.0 - prior_limit_weight) * combined_cap_after_risk_guardrail
-            + prior_limit_weight * prior_limit,
+            (1.0 - prior_limit_weight) * combined_cap_after_risk_guardrail + prior_limit_weight * prior_limit,
             combined_cap_after_risk_guardrail,
         ),
         index=df.index,
@@ -1161,8 +1115,7 @@ def combine_caps(features_df, config=None):
 
     combined_cap_before_smoothing = combined_cap_after_risk_guardrail.copy()
     prior_limit_smoothing_applied = pd.Series(
-        prior_limit_available
-        & (np.abs(smoothed_cap - combined_cap_after_risk_guardrail) > 1e-9),
+        prior_limit_available & (np.abs(smoothed_cap - combined_cap_after_risk_guardrail) > 1e-9),
         index=df.index,
         dtype="bool",
     )
@@ -1293,9 +1246,12 @@ def combine_caps(features_df, config=None):
         float(combined_cap.median()),
     )
     return df
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 6. POLICY ADJUSTMENT
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 def apply_policy_adjustments(features_df, config=None):
     cfg = _get_config(config)
@@ -1316,9 +1272,7 @@ def apply_policy_adjustments(features_df, config=None):
             global_ceiling,
         )
     else:
-        effective_ceiling_policy = pd.Series(
-            global_ceiling, index=df.index, dtype="float64"
-        )
+        effective_ceiling_policy = pd.Series(global_ceiling, index=df.index, dtype="float64")
 
     risk_score = _clip_series(_safe_series(df, "risk_score", 0.0), 0.0, 1.0)
     combined_cap = _clip_series(
@@ -1326,22 +1280,20 @@ def apply_policy_adjustments(features_df, config=None):
         cfg["global_floor_limit"],
         cfg["global_ceiling_limit"],
     )
-    
+
     tier_1_mask = risk_score >= policy_cfg["risk_tier_1_score_min"]
-    tier_2_mask = (
-        (risk_score >= policy_cfg["risk_tier_2_score_min"])
-        & (risk_score < policy_cfg["risk_tier_1_score_min"])
+    tier_2_mask = (risk_score >= policy_cfg["risk_tier_2_score_min"]) & (
+        risk_score < policy_cfg["risk_tier_1_score_min"]
     )
-    tier_3_mask = (
-        (risk_score >= policy_cfg["risk_tier_3_score_min"])
-        & (risk_score < policy_cfg["risk_tier_2_score_min"])
+    tier_3_mask = (risk_score >= policy_cfg["risk_tier_3_score_min"]) & (
+        risk_score < policy_cfg["risk_tier_2_score_min"]
     )
     tier_4_mask = risk_score < policy_cfg["risk_tier_3_score_min"]
-    
+
     tier_multiplier = pd.Series(
-    policy_cfg["risk_tier_4_multiplier"],
-    index=df.index,
-    dtype="float64",
+        policy_cfg["risk_tier_4_multiplier"],
+        index=df.index,
+        dtype="float64",
     )
     tier_multiplier = pd.Series(
         np.where(tier_1_mask, policy_cfg["risk_tier_1_multiplier"], tier_multiplier),
@@ -1406,9 +1358,7 @@ def apply_policy_adjustments(features_df, config=None):
         & (lifetime_default <= policy_cfg["proven_good_borrower_max_lifetime_default"])
     )
 
-    proven_good_floor = (
-        combined_cap * policy_cfg["proven_good_borrower_floor_pct_of_combined"]
-    )
+    proven_good_floor = combined_cap * policy_cfg["proven_good_borrower_floor_pct_of_combined"]
 
     policy_cap = pd.Series(
         np.where(
@@ -1451,9 +1401,8 @@ def apply_policy_adjustments(features_df, config=None):
 
     policy_cap_before_active_floor = policy_cap.copy()
 
-    recent_activity = (
-        _safe_series(df, "recent_disbursement_amount_1m", 0.0)
-        + _safe_series(df, "recent_repayment_amount_1m", 0.0)
+    recent_activity = _safe_series(df, "recent_disbursement_amount_1m", 0.0) + _safe_series(
+        df, "recent_repayment_amount_1m", 0.0
     )
 
     active_floor = policy_cfg.get("active_borrower_min_limit", 500.0)
@@ -1474,9 +1423,7 @@ def apply_policy_adjustments(features_df, config=None):
         dtype="float64",
     )
 
-    active_floor_applied = active_floor_eligible & (
-        policy_cap > policy_cap_before_active_floor
-    )
+    active_floor_applied = active_floor_eligible & (policy_cap > policy_cap_before_active_floor)
 
     policy_reason = pd.Series(
         np.where(
@@ -1501,11 +1448,7 @@ def apply_policy_adjustments(features_df, config=None):
 
     # Rounding floor: if an active borrower is rounded to 0 but had a positive
     # pre-round cap, floor to the smallest rounding unit (e.g. 100 UGX).
-    rounding_zero_mask = (
-        active_floor_eligible
-        & (final_cap == 0.0)
-        & (policy_cap > 0.0)
-    )
+    rounding_zero_mask = active_floor_eligible & (final_cap == 0.0) & (policy_cap > 0.0)
     final_cap = pd.Series(
         np.where(rounding_zero_mask, round_to, final_cap),
         index=df.index,
@@ -1559,9 +1502,12 @@ def apply_policy_adjustments(features_df, config=None):
     df["policy_cap"] = policy_cap
 
     return df
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 7. ORCHESTRATION
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 def run_limit_caps(features_df, config=None):
     df = compute_risk_cap(features_df, config=config)

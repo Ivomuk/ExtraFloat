@@ -11,7 +11,6 @@ No calls to globals(), no hardcoded paths, no print() statements.
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -33,6 +32,7 @@ _THIN_SCORECARD_COLS = [
 # ======================================================================== #
 # Unified ops table
 # ======================================================================== #
+
 
 def build_ops_scored_table(
     agent_policy_placement: pd.DataFrame,
@@ -61,9 +61,7 @@ def build_ops_scored_table(
     thick_out[feature_config.DECISION_SOURCE_COL] = "PD_MODEL"
 
     # ---- 2) Thin-file block ----
-    thin_cols = [feature_config.AGENT_KEY] + [
-        c for c in _THIN_SCORECARD_COLS if c in df_pd_sc.columns
-    ]
+    thin_cols = [feature_config.AGENT_KEY] + [c for c in _THIN_SCORECARD_COLS if c in df_pd_sc.columns]
     thin_out = df_pd_sc[thin_cols].copy()
     thin_out[feature_config.THIN_FILE_COL] = 1
     thin_out[feature_config.DECISION_SOURCE_COL] = "SCORECARD"
@@ -89,9 +87,7 @@ def build_ops_scored_table(
     thin_mask = ops_scored[feature_config.THIN_FILE_COL].eq(1)
 
     if thin_mask.sum() > 0 and "never_loan_pd_like" in ops_scored.columns:
-        ops_scored["never_loan_pd_like"] = pd.to_numeric(
-            ops_scored["never_loan_pd_like"], errors="coerce"
-        )
+        ops_scored["never_loan_pd_like"] = pd.to_numeric(ops_scored["never_loan_pd_like"], errors="coerce")
         valid_thin_pd = ops_scored.loc[thin_mask, "never_loan_pd_like"].notna().sum()
         if valid_thin_pd > 0:
             thin_cutoff = ops_scored.loc[thin_mask, "never_loan_pd_like"].quantile(thin_op_quantile)
@@ -105,8 +101,10 @@ def build_ops_scored_table(
             logger.info(
                 "build_ops_scored_table: thin-file op_point=%.0f%% | "
                 "cutoff=%.4f | approved=%d / %d thin agents",
-                thin_op_quantile * 100, thin_cutoff,
-                int(thin_approved.sum()), int(thin_mask.sum()),
+                thin_op_quantile * 100,
+                thin_cutoff,
+                int(thin_approved.sum()),
+                int(thin_mask.sum()),
             )
 
     total = ops_scored.shape[0]
@@ -114,7 +112,9 @@ def build_ops_scored_table(
     thin_n = int(thin_mask.sum())
     logger.info(
         "build_ops_scored_table: total=%d | thick=%d | thin=%d",
-        total, thick_n, thin_n,
+        total,
+        thick_n,
+        thin_n,
     )
     return ops_scored
 
@@ -122,6 +122,7 @@ def build_ops_scored_table(
 # ======================================================================== #
 # Exec summary
 # ======================================================================== #
+
 
 def build_exec_summary(
     ops_scored: pd.DataFrame,
@@ -149,18 +150,36 @@ def build_exec_summary(
     declined_n = int(declined_mask.sum())
 
     overall_br = float(ops_scored[target_col].mean()) if target_col in ops_scored.columns else np.nan
-    approved_br = float(ops_scored.loc[approved_mask, target_col].mean()) if target_col in ops_scored.columns else np.nan
-    declined_br = float(ops_scored.loc[declined_mask, target_col].mean()) if target_col in ops_scored.columns else np.nan
-    gap_pp = (declined_br - approved_br) * 100.0 if not (np.isnan(approved_br) or np.isnan(declined_br)) else np.nan
+    approved_br = (
+        float(ops_scored.loc[approved_mask, target_col].mean())
+        if target_col in ops_scored.columns
+        else np.nan
+    )
+    declined_br = (
+        float(ops_scored.loc[declined_mask, target_col].mean())
+        if target_col in ops_scored.columns
+        else np.nan
+    )
+    gap_pp = (
+        (declined_br - approved_br) * 100.0
+        if not (np.isnan(approved_br) or np.isnan(declined_br))
+        else np.nan
+    )
 
-    exec_tbl = pd.DataFrame({
-        "segment": ["Overall", "Approved", "Declined", "Gap (Declined − Approved)"],
-        "n": [total_n, approved_n, declined_n, np.nan],
-        "share": [1.0, approved_n / total_n if total_n > 0 else np.nan,
-                  declined_n / total_n if total_n > 0 else np.nan, np.nan],
-        "obs_bad_rate": [overall_br, approved_br, declined_br, np.nan],
-        "gap_pp": [np.nan, np.nan, np.nan, gap_pp],
-    })
+    exec_tbl = pd.DataFrame(
+        {
+            "segment": ["Overall", "Approved", "Declined", "Gap (Declined − Approved)"],
+            "n": [total_n, approved_n, declined_n, np.nan],
+            "share": [
+                1.0,
+                approved_n / total_n if total_n > 0 else np.nan,
+                declined_n / total_n if total_n > 0 else np.nan,
+                np.nan,
+            ],
+            "obs_bad_rate": [overall_br, approved_br, declined_br, np.nan],
+            "gap_pp": [np.nan, np.nan, np.nan, gap_pp],
+        }
+    )
 
     logger.info(
         "build_exec_summary: approved_rate=%.1f%% | approved_bad_rate=%.2f%% | gap=%.2f pp",
@@ -174,6 +193,7 @@ def build_exec_summary(
 # ======================================================================== #
 # Bucket summary
 # ======================================================================== #
+
 
 def build_bucket_summary(
     ops_scored: pd.DataFrame,

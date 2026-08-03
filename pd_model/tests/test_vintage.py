@@ -1,7 +1,7 @@
 """Tests for pd_model.monitoring.vintage."""
+
 import numpy as np
 import pandas as pd
-import pytest
 
 from pd_model.monitoring.vintage import (
     build_cohort_matrix,
@@ -12,20 +12,17 @@ from pd_model.monitoring.vintage import (
 
 def _make_loans(n: int = 200, seed: int = 0) -> pd.DataFrame:
     rng = np.random.default_rng(seed)
-    disburse_months = rng.choice(
-        pd.date_range("2025-01-01", periods=6, freq="MS"), n
+    disburse_months = rng.choice(pd.date_range("2025-01-01", periods=6, freq="MS"), n)
+    obs_months = [d + pd.DateOffset(months=int(m)) for d, m in zip(disburse_months, rng.integers(1, 7, n), strict=False)]
+    return pd.DataFrame(
+        {
+            "agent_msisdn": [f"msisdn_{i}" for i in range(n)],
+            "disbursement_date": pd.to_datetime(disburse_months),
+            "observation_date": pd.to_datetime(obs_months),
+            "is_bad": rng.integers(0, 2, n),
+            "loan_amount": rng.uniform(100, 1000, n),
+        }
     )
-    obs_months = [
-        d + pd.DateOffset(months=int(m))
-        for d, m in zip(disburse_months, rng.integers(1, 7, n))
-    ]
-    return pd.DataFrame({
-        "agent_msisdn": [f"msisdn_{i}" for i in range(n)],
-        "disbursement_date": pd.to_datetime(disburse_months),
-        "observation_date": pd.to_datetime(obs_months),
-        "is_bad": rng.integers(0, 2, n),
-        "loan_amount": rng.uniform(100, 1000, n),
-    })
 
 
 class TestBuildVintageTable:
@@ -94,8 +91,7 @@ class TestBuildVintageSummary:
     def test_required_columns(self):
         vtbl = build_vintage_table(_make_loans())
         summary = build_vintage_summary(vtbl)
-        for col in ("cohort_month", "n_loans_total", "n_bads_total",
-                    "overall_bad_rate", "max_mob_observed"):
+        for col in ("cohort_month", "n_loans_total", "n_bads_total", "overall_bad_rate", "max_mob_observed"):
             assert col in summary.columns
 
     def test_bad_rate_bounded(self):

@@ -13,10 +13,10 @@ from extrafloat.io.extrafloat_data_loaders import (
     load_transaction_capacity_features,
 )
 
-
 # ─────────────────────────────────────────────────────────────────────────────
 # HELPERS
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 def _write_csv(tmp_path, filename, df):
     p = tmp_path / filename
@@ -32,20 +32,48 @@ def _txn_df(**extra_cols):
         "account_balance": [9403.0],
         "average_balance": [37646.15],
         "commission": [14402.80],
-        "cash_out_vol_1m": [2], "cash_out_vol_3m": [5], "cash_out_vol_6m": [9],
-        "cash_out_value_1m": [40000], "cash_out_value_3m": [100000], "cash_out_value_6m": [180000],
-        "cash_out_cust_1m": [2], "cash_out_cust_3m": [5], "cash_out_cust_6m": [9],
-        "cash_out_comm_1m": [547], "cash_out_comm_3m": [1200], "cash_out_comm_6m": [2000],
-        "cash_in_vol_1m": [3], "cash_in_vol_3m": [8], "cash_in_vol_6m": [15],
-        "cash_in_value_1m": [30000], "cash_in_value_3m": [80000], "cash_in_value_6m": [150000],
-        "cash_in_cust_1m": [3], "cash_in_cust_3m": [8], "cash_in_cust_6m": [14],
-        "cash_in_comm_1m": [400], "cash_in_comm_3m": [900], "cash_in_comm_6m": [1700],
-        "payment_vol_1m": [5], "payment_vol_3m": [12], "payment_vol_6m": [22],
-        "payment_value_1m": [25000], "payment_value_3m": [60000], "payment_value_6m": [110000],
-        "payment_cust_1m": [4], "payment_cust_3m": [10], "payment_cust_6m": [20],
-        "payment_comm_1m": [300], "payment_comm_3m": [700], "payment_comm_6m": [1300],
-        "cust_1m": [14], "cust_3m": [39], "cust_6m": [60],
-        "vol_1m": [14], "vol_3m": [39], "vol_6m": [60],
+        "cash_out_vol_1m": [2],
+        "cash_out_vol_3m": [5],
+        "cash_out_vol_6m": [9],
+        "cash_out_value_1m": [40000],
+        "cash_out_value_3m": [100000],
+        "cash_out_value_6m": [180000],
+        "cash_out_cust_1m": [2],
+        "cash_out_cust_3m": [5],
+        "cash_out_cust_6m": [9],
+        "cash_out_comm_1m": [547],
+        "cash_out_comm_3m": [1200],
+        "cash_out_comm_6m": [2000],
+        "cash_in_vol_1m": [3],
+        "cash_in_vol_3m": [8],
+        "cash_in_vol_6m": [15],
+        "cash_in_value_1m": [30000],
+        "cash_in_value_3m": [80000],
+        "cash_in_value_6m": [150000],
+        "cash_in_cust_1m": [3],
+        "cash_in_cust_3m": [8],
+        "cash_in_cust_6m": [14],
+        "cash_in_comm_1m": [400],
+        "cash_in_comm_3m": [900],
+        "cash_in_comm_6m": [1700],
+        "payment_vol_1m": [5],
+        "payment_vol_3m": [12],
+        "payment_vol_6m": [22],
+        "payment_value_1m": [25000],
+        "payment_value_3m": [60000],
+        "payment_value_6m": [110000],
+        "payment_cust_1m": [4],
+        "payment_cust_3m": [10],
+        "payment_cust_6m": [20],
+        "payment_comm_1m": [300],
+        "payment_comm_3m": [700],
+        "payment_comm_6m": [1300],
+        "cust_1m": [14],
+        "cust_3m": [39],
+        "cust_6m": [60],
+        "vol_1m": [14],
+        "vol_3m": [39],
+        "vol_6m": [60],
     }
     base.update(extra_cols)
     return pd.DataFrame(base)
@@ -83,6 +111,7 @@ def _borrower_df(**extra_cols):
 # TRANSACTION CAPACITY
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def test_load_transaction_missing_file():
     with pytest.raises(FileNotFoundError, match="file not found"):
         load_transaction_capacity_features("/no/such/file.csv")
@@ -118,8 +147,7 @@ def test_load_transaction_all_columns_preserved(tmp_path):
     df = load_transaction_capacity_features(p)
     # Every source column (after rename) must be present — no subsetting
     original_cols = {
-        "msisdn" if c == "agent_msisdn" else ("snapshot_dt" if c == "tbl_dt" else c)
-        for c in raw.columns
+        "msisdn" if c == "agent_msisdn" else ("snapshot_dt" if c == "tbl_dt" else c) for c in raw.columns
     }
     assert original_cols.issubset(set(df.columns))
 
@@ -133,6 +161,7 @@ def test_load_transaction_snapshot_dt_is_datetime(tmp_path):
 # ─────────────────────────────────────────────────────────────────────────────
 # LOAN SUMMARY
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 def test_load_loan_summary_missing_file():
     with pytest.raises(FileNotFoundError, match="file not found"):
@@ -166,6 +195,7 @@ def test_load_loan_summary_dates_parsed(tmp_path):
 # ─────────────────────────────────────────────────────────────────────────────
 # BORROWER LIMIT
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 def test_load_borrower_limit_missing_file():
     with pytest.raises(FileNotFoundError, match="file not found"):

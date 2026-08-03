@@ -10,29 +10,26 @@ import pytest
 
 import extrafloat.monitoring.extrafloat_drift_monitor as edm
 from extrafloat.monitoring.extrafloat_drift_monitor import (
-    DEFAULT_DRIFT_CONFIG,
-    CompositionDriftResult,
-    DriftReport,
-    FeatureDriftResult,
-    PolicyHealthResult,
+    _SCIPY_AVAILABLE,
     SEVERITY_ALERT,
     SEVERITY_MONITOR,
     SEVERITY_STABLE,
-    _SCIPY_AVAILABLE,
+    DriftReport,
+    FeatureDriftResult,
+    PolicyHealthResult,
     _aggregate_severity,
     _compute_psi,
     monitor_cap_driver_drift,
     monitor_composition_drift,
     monitor_input_drift,
-    monitor_output_drift,
     monitor_policy_health,
     run_drift_monitor,
 )
 
-
 # ─────────────────────────────────────────────────────────────────────────────
 # HELPERS
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 def _engine_output_df(
     n: int = 200,
@@ -51,8 +48,10 @@ def _engine_output_df(
 
     if risk_tier_dist is None:
         risk_tier_dist = {
-            "tier_1": 0.40, "tier_2": 0.30,
-            "tier_3": 0.20, "tier_4": 0.10,
+            "tier_1": 0.40,
+            "tier_2": 0.30,
+            "tier_3": 0.20,
+            "tier_4": 0.10,
         }
 
     tiers = list(risk_tier_dist.keys())
@@ -60,64 +59,68 @@ def _engine_output_df(
     tier_col = rng.choice(tiers, size=n, p=probs)
 
     reg_cap = (rng.random(n) < reg_cap_frac).astype(int)
-    thin    = (rng.random(n) < thin_file_frac).astype(int)
-    proven  = (rng.random(n) < proven_good_frac).astype(int)
+    thin = (rng.random(n) < thin_file_frac).astype(int)
+    proven = (rng.random(n) < proven_good_frac).astype(int)
 
     if combined_top_driver is None:
         driver_col = rng.choice(
-            ["capacity_component", "risk_component",
-             "recent_usage_component", "prior_exposure_component"],
-            size=n, p=[0.50, 0.25, 0.15, 0.10],
+            ["capacity_component", "risk_component", "recent_usage_component", "prior_exposure_component"],
+            size=n,
+            p=[0.50, 0.25, 0.15, 0.10],
         )
     else:
         driver_col = np.full(n, combined_top_driver, dtype=object)
 
-    return pd.DataFrame({
-        # input features
-        "avg_daily_balance_30d":        rng.normal(balance_mean, 10_000, n).clip(0),
-        "avg_monthly_revenue_30d":      rng.normal(5_000, 1_000, n).clip(0),
-        "avg_monthly_txn_count_30d":    rng.normal(20, 5, n).clip(1),
-        "avg_monthly_payments_30d":     rng.normal(30_000, 5_000, n).clip(0),
-        "active_customer_count_30d":    rng.normal(15, 4, n).clip(1),
-        "avg_monthly_txn_volume_30d":   rng.normal(100_000, 20_000, n).clip(0),
-        "on_time_repayment_rate":       rng.beta(8, 2, n),
-        "lifetime_default_rate":        rng.beta(1, 20, n),
-        "default_rate_last_10_loans":   rng.beta(1, 20, n),
-        "avg_cure_time_hours":          rng.uniform(0, 24, n),
-        "repayment_stability_score":    rng.beta(7, 3, n),
-        "recent_disbursement_amount_1m": rng.normal(5_000, 1_000, n).clip(0),
-        "recent_repayment_amount_1m":   rng.normal(5_100, 1_000, n).clip(0),
-        "recent_repayment_coverage_1m": rng.beta(8, 2, n),
-        "recent_penalty_events_1m":     rng.choice([0, 1, 2], n, p=[0.85, 0.10, 0.05]),
-        # output features
-        "assigned_limit":               rng.normal(assigned_limit_mean, 15_000, n).clip(0),
-        "risk_score":                   rng.beta(7, 3, n),
-        "capacity_cap":                 rng.normal(90_000, 20_000, n).clip(0),
-        "recent_usage_cap":             rng.normal(70_000, 15_000, n).clip(0),
-        "prior_exposure_cap":           rng.normal(75_000, 15_000, n).clip(0),
-        "risk_cap":                     rng.normal(85_000, 18_000, n).clip(0),
-        "combined_cap":                 rng.normal(80_000, 16_000, n).clip(0),
-        "policy_cap":                   rng.normal(78_000, 15_000, n).clip(0),
-        # categorical / flag columns
-        "risk_tier":                    tier_col,
-        "combined_top_driver":          driver_col,
-        "capacity_top_driver":          rng.choice(["balance", "revenue", "txn"], n),
-        "policy_reason":                rng.choice(["tier_1_policy", "tier_2_policy",
-                                                     "tier_3_policy", "tier_4_policy"], n),
-        "is_thin_file":                 thin,
-        "regulatory_cap_applied":       reg_cap,
-        "is_proven_good_borrower":      proven,
-        "active_floor_applied":         (rng.random(n) < 0.05).astype(int),
-        "is_kyc_blocked":               (rng.random(n) < 0.02).astype(int),
-        "recent_usage_active_flag":     (rng.random(n) > 0.05).astype(int),
-        "capacity_fallback_inputs":     (rng.random(n) < 0.03).astype(int),
-        "capacity_missing_inputs":      (rng.random(n) < 0.01).astype(int),
-    })
+    return pd.DataFrame(
+        {
+            # input features
+            "avg_daily_balance_30d": rng.normal(balance_mean, 10_000, n).clip(0),
+            "avg_monthly_revenue_30d": rng.normal(5_000, 1_000, n).clip(0),
+            "avg_monthly_txn_count_30d": rng.normal(20, 5, n).clip(1),
+            "avg_monthly_payments_30d": rng.normal(30_000, 5_000, n).clip(0),
+            "active_customer_count_30d": rng.normal(15, 4, n).clip(1),
+            "avg_monthly_txn_volume_30d": rng.normal(100_000, 20_000, n).clip(0),
+            "on_time_repayment_rate": rng.beta(8, 2, n),
+            "lifetime_default_rate": rng.beta(1, 20, n),
+            "default_rate_last_10_loans": rng.beta(1, 20, n),
+            "avg_cure_time_hours": rng.uniform(0, 24, n),
+            "repayment_stability_score": rng.beta(7, 3, n),
+            "recent_disbursement_amount_1m": rng.normal(5_000, 1_000, n).clip(0),
+            "recent_repayment_amount_1m": rng.normal(5_100, 1_000, n).clip(0),
+            "recent_repayment_coverage_1m": rng.beta(8, 2, n),
+            "recent_penalty_events_1m": rng.choice([0, 1, 2], n, p=[0.85, 0.10, 0.05]),
+            # output features
+            "assigned_limit": rng.normal(assigned_limit_mean, 15_000, n).clip(0),
+            "risk_score": rng.beta(7, 3, n),
+            "capacity_cap": rng.normal(90_000, 20_000, n).clip(0),
+            "recent_usage_cap": rng.normal(70_000, 15_000, n).clip(0),
+            "prior_exposure_cap": rng.normal(75_000, 15_000, n).clip(0),
+            "risk_cap": rng.normal(85_000, 18_000, n).clip(0),
+            "combined_cap": rng.normal(80_000, 16_000, n).clip(0),
+            "policy_cap": rng.normal(78_000, 15_000, n).clip(0),
+            # categorical / flag columns
+            "risk_tier": tier_col,
+            "combined_top_driver": driver_col,
+            "capacity_top_driver": rng.choice(["balance", "revenue", "txn"], n),
+            "policy_reason": rng.choice(
+                ["tier_1_policy", "tier_2_policy", "tier_3_policy", "tier_4_policy"], n
+            ),
+            "is_thin_file": thin,
+            "regulatory_cap_applied": reg_cap,
+            "is_proven_good_borrower": proven,
+            "active_floor_applied": (rng.random(n) < 0.05).astype(int),
+            "is_kyc_blocked": (rng.random(n) < 0.02).astype(int),
+            "recent_usage_active_flag": (rng.random(n) > 0.05).astype(int),
+            "capacity_fallback_inputs": (rng.random(n) < 0.03).astype(int),
+            "capacity_missing_inputs": (rng.random(n) < 0.01).astype(int),
+        }
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # TEST 1 — PSI stable population
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 def test_psi_stable_population():
     """Same distribution → PSI < 0.10 (stable)."""
@@ -133,6 +136,7 @@ def test_psi_stable_population():
 # TEST 2 — PSI moderate drift
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def test_psi_moderate_drift():
     """Mean shifted by 0.35 std → PSI in monitor zone [0.10, 0.25)."""
     rng = np.random.default_rng(99)
@@ -141,14 +145,13 @@ def test_psi_moderate_drift():
     cur = rng.normal(50_000 + 0.35 * std, std, 2000)
 
     psi = _compute_psi(ref, cur, n_bins=10)
-    assert 0.10 <= psi < 0.25, (
-        f"Expected PSI in [0.10, 0.25) for 0.35-std shift, got {psi:.4f}"
-    )
+    assert 0.10 <= psi < 0.25, f"Expected PSI in [0.10, 0.25) for 0.35-std shift, got {psi:.4f}"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # TEST 3 — PSI severe drift
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 def test_psi_severe_drift():
     """Completely different distributions → PSI > 0.25 (alert)."""
@@ -164,42 +167,33 @@ def test_psi_severe_drift():
 # TEST 4 — Population composition: no drift
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def test_population_composition_no_drift():
     """Same tier mix in ref and cur → composition result is stable."""
     rng = np.random.default_rng(42)
-    tier_mix = (
-        ["tier_1"] * 400 + ["tier_2"] * 300 +
-        ["tier_3"] * 200 + ["tier_4"] * 100
-    )
+    tier_mix = ["tier_1"] * 400 + ["tier_2"] * 300 + ["tier_3"] * 200 + ["tier_4"] * 100
     ref_df = pd.DataFrame({"risk_tier": rng.permutation(tier_mix)})
     cur_df = pd.DataFrame({"risk_tier": rng.permutation(tier_mix)})
 
     results, skipped = monitor_composition_drift(ref_df, cur_df)
     tier_r = next((r for r in results if r.feature == "risk_tier"), None)
     assert tier_r is not None, "risk_tier result missing"
-    assert tier_r.severity == SEVERITY_STABLE, (
-        f"Identical tier mix should be stable, got {tier_r.severity}"
-    )
+    assert tier_r.severity == SEVERITY_STABLE, f"Identical tier mix should be stable, got {tier_r.severity}"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # TEST 5 — Population composition: drift detected
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def test_population_composition_drift():
     """Dramatically shifted tier mix triggers monitor or alert."""
-    ref_df = pd.DataFrame({
-        "risk_tier": (
-            ["tier_1"] * 400 + ["tier_2"] * 300 +
-            ["tier_3"] * 200 + ["tier_4"] * 100
-        )
-    })
-    cur_df = pd.DataFrame({
-        "risk_tier": (
-            ["tier_1"] * 50 + ["tier_2"] * 100 +
-            ["tier_3"] * 250 + ["tier_4"] * 600
-        )
-    })
+    ref_df = pd.DataFrame(
+        {"risk_tier": (["tier_1"] * 400 + ["tier_2"] * 300 + ["tier_3"] * 200 + ["tier_4"] * 100)}
+    )
+    cur_df = pd.DataFrame(
+        {"risk_tier": (["tier_1"] * 50 + ["tier_2"] * 100 + ["tier_3"] * 250 + ["tier_4"] * 600)}
+    )
 
     results, skipped = monitor_composition_drift(ref_df, cur_df)
     tier_r = next((r for r in results if r.feature == "risk_tier"), None)
@@ -216,22 +210,17 @@ def test_population_composition_drift():
 # TEST 6 — Policy calibration: regulatory cap alert
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def test_policy_calibration_regulatory_cap_alert():
     """More than 20% of rows hitting regulatory cap → alert."""
     n = 500
     ref_df = pd.DataFrame({"regulatory_cap_applied": np.zeros(n, dtype=int)})
-    cur_df = pd.DataFrame({
-        "regulatory_cap_applied": np.array(
-            [1] * 120 + [0] * 380, dtype=int
-        )
-    })
+    cur_df = pd.DataFrame({"regulatory_cap_applied": np.array([1] * 120 + [0] * 380, dtype=int)})
 
     results = monitor_policy_health(ref_df, cur_df)
     r = next((x for x in results if x.metric == "regulatory_cap_applied_rate"), None)
     assert r is not None, "regulatory_cap_applied_rate metric missing"
-    assert r.severity == SEVERITY_ALERT, (
-        f"24% regulatory cap rate should be alert, got {r.severity}"
-    )
+    assert r.severity == SEVERITY_ALERT, f"24% regulatory cap rate should be alert, got {r.severity}"
     assert r.cur_rate == pytest.approx(0.24, abs=0.01)
 
 
@@ -239,24 +228,29 @@ def test_policy_calibration_regulatory_cap_alert():
 # TEST 7 — Cap driver composition shift detected
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def test_cap_driver_composition_shift():
     """Binding cap shifts from capacity_component → risk_component: detected."""
-    ref_df = pd.DataFrame({
-        "combined_top_driver": (
-            ["capacity_component"] * 600 +
-            ["risk_component"]     * 200 +
-            ["recent_usage_component"]  * 150 +
-            ["prior_exposure_component"] * 50
-        )
-    })
-    cur_df = pd.DataFrame({
-        "combined_top_driver": (
-            ["capacity_component"] * 200 +
-            ["risk_component"]     * 600 +
-            ["recent_usage_component"]  * 150 +
-            ["prior_exposure_component"] * 50
-        )
-    })
+    ref_df = pd.DataFrame(
+        {
+            "combined_top_driver": (
+                ["capacity_component"] * 600
+                + ["risk_component"] * 200
+                + ["recent_usage_component"] * 150
+                + ["prior_exposure_component"] * 50
+            )
+        }
+    )
+    cur_df = pd.DataFrame(
+        {
+            "combined_top_driver": (
+                ["capacity_component"] * 200
+                + ["risk_component"] * 600
+                + ["recent_usage_component"] * 150
+                + ["prior_exposure_component"] * 50
+            )
+        }
+    )
 
     results, skipped = monitor_cap_driver_drift(ref_df, cur_df)
     r = next((x for x in results if x.feature == "combined_top_driver"), None)
@@ -264,37 +258,48 @@ def test_cap_driver_composition_shift():
     assert r.severity in (SEVERITY_MONITOR, SEVERITY_ALERT), (
         f"Binding-cap shift should not be stable, got {r.severity}"
     )
-    assert r.max_absolute_shift >= 0.35, (
-        f"Expected absolute shift >= 35 pp, got {r.max_absolute_shift:.4f}"
-    )
+    assert r.max_absolute_shift >= 0.35, f"Expected absolute shift >= 35 pp, got {r.max_absolute_shift:.4f}"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # TEST 8 — DriftReport severity aggregation
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def test_drift_report_severity_aggregation():
     """overall_severity is the maximum severity across all sub-results."""
     stable_r = FeatureDriftResult(
-        feature="f1", psi=0.05, psi_severity=SEVERITY_STABLE,
-        ks_statistic=None, ks_pvalue=None, ks_significant=None,
-        percentile_shift=None, severity=SEVERITY_STABLE,
+        feature="f1",
+        psi=0.05,
+        psi_severity=SEVERITY_STABLE,
+        ks_statistic=None,
+        ks_pvalue=None,
+        ks_significant=None,
+        percentile_shift=None,
+        severity=SEVERITY_STABLE,
     )
     alert_r = FeatureDriftResult(
-        feature="f2", psi=0.30, psi_severity=SEVERITY_ALERT,
-        ks_statistic=None, ks_pvalue=None, ks_significant=None,
-        percentile_shift=None, severity=SEVERITY_ALERT,
+        feature="f2",
+        psi=0.30,
+        psi_severity=SEVERITY_ALERT,
+        ks_statistic=None,
+        ks_pvalue=None,
+        ks_significant=None,
+        percentile_shift=None,
+        severity=SEVERITY_ALERT,
     )
     monitor_r = PolicyHealthResult(
-        metric="thin_file_rate", ref_rate=0.10, cur_rate=0.17,
-        absolute_change=0.07, relative_change=0.70,
-        threshold=0.05, severity=SEVERITY_MONITOR,
+        metric="thin_file_rate",
+        ref_rate=0.10,
+        cur_rate=0.17,
+        absolute_change=0.07,
+        relative_change=0.70,
+        threshold=0.05,
+        severity=SEVERITY_MONITOR,
     )
 
     overall = _aggregate_severity([[stable_r, alert_r], [monitor_r]])
-    assert overall == SEVERITY_ALERT, (
-        f"alert > monitor > stable, expected alert got {overall}"
-    )
+    assert overall == SEVERITY_ALERT, f"alert > monitor > stable, expected alert got {overall}"
 
     report = DriftReport(
         input_drift=[stable_r, alert_r],
@@ -322,17 +327,22 @@ def test_drift_report_severity_aggregation():
 # TEST 9 — Graceful degradation without scipy
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def test_graceful_degradation_without_scipy():
     """Module works without scipy: PSI computed, KS fields are None."""
     rng = np.random.default_rng(42)
-    ref_df = pd.DataFrame({
-        "avg_daily_balance_30d":  rng.normal(50_000, 10_000, 200),
-        "on_time_repayment_rate": rng.beta(8, 2, 200),
-    })
-    cur_df = pd.DataFrame({
-        "avg_daily_balance_30d":  rng.normal(60_000, 10_000, 200),
-        "on_time_repayment_rate": rng.beta(7, 3, 200),
-    })
+    ref_df = pd.DataFrame(
+        {
+            "avg_daily_balance_30d": rng.normal(50_000, 10_000, 200),
+            "on_time_repayment_rate": rng.beta(8, 2, 200),
+        }
+    )
+    cur_df = pd.DataFrame(
+        {
+            "avg_daily_balance_30d": rng.normal(60_000, 10_000, 200),
+            "on_time_repayment_rate": rng.beta(7, 3, 200),
+        }
+    )
 
     original = edm._SCIPY_AVAILABLE
     try:
@@ -342,7 +352,7 @@ def test_graceful_degradation_without_scipy():
         for r in results:
             assert r.psi is not None, f"{r.feature}: PSI must be computed even without scipy"
             assert r.ks_statistic is None, f"{r.feature}: ks_statistic must be None without scipy"
-            assert r.ks_pvalue is None,    f"{r.feature}: ks_pvalue must be None without scipy"
+            assert r.ks_pvalue is None, f"{r.feature}: ks_pvalue must be None without scipy"
             assert r.ks_significant is None
     finally:
         edm._SCIPY_AVAILABLE = original
@@ -352,14 +362,13 @@ def test_graceful_degradation_without_scipy():
 # TEST 10 — Full drift run with engine output
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def test_full_drift_run_with_engine_output():
     """End-to-end: build two synthetic output DataFrames, run run_drift_monitor,
     verify DriftReport is fully populated and structurally valid."""
-    ref_df = _engine_output_df(n=300, rng_seed=1, balance_mean=50_000,
-                                assigned_limit_mean=80_000)
+    ref_df = _engine_output_df(n=300, rng_seed=1, balance_mean=50_000, assigned_limit_mean=80_000)
     # Cur window: slight input shift (higher balances → some output shift)
-    cur_df = _engine_output_df(n=300, rng_seed=2, balance_mean=65_000,
-                                assigned_limit_mean=90_000)
+    cur_df = _engine_output_df(n=300, rng_seed=2, balance_mean=65_000, assigned_limit_mean=90_000)
 
     report = run_drift_monitor(ref_df, cur_df, monitor_inputs=True, monitor_outputs=True)
 
@@ -368,7 +377,7 @@ def test_full_drift_run_with_engine_output():
     assert report.cur_row_count == 300
     assert report.overall_severity in (SEVERITY_STABLE, SEVERITY_MONITOR, SEVERITY_ALERT)
     assert isinstance(report.scipy_available, bool)
-    assert len(report.input_drift)  > 0, "input_drift should not be empty"
+    assert len(report.input_drift) > 0, "input_drift should not be empty"
     assert len(report.output_drift) > 0, "output_drift should not be empty"
     assert len(report.policy_health) > 0, "policy_health should not be empty"
 
@@ -398,14 +407,14 @@ def test_full_drift_run_with_engine_output():
 # TEST 11 — Policy health near-zero baseline: no spurious monitor alert
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def test_policy_health_near_zero_baseline():
     """ref_rate = 0.1% and cur_rate = 0.3% is a 200% relative change but
     both rates are below min_relative_baseline (2%), so the relative check
     must be suppressed and the result must be stable."""
-    n = 1000
     # 1 out of 1000 KYC-blocked in ref (0.1%), 3 out of 1000 in cur (0.3%)
-    ref_df = pd.DataFrame({"is_kyc_blocked": [1] * 1  + [0] * 999})
-    cur_df = pd.DataFrame({"is_kyc_blocked": [1] * 3  + [0] * 997})
+    ref_df = pd.DataFrame({"is_kyc_blocked": [1] * 1 + [0] * 999})
+    cur_df = pd.DataFrame({"is_kyc_blocked": [1] * 3 + [0] * 997})
 
     results = monitor_policy_health(ref_df, cur_df)
     kyc_r = next((r for r in results if r.metric == "kyc_block_rate"), None)
@@ -422,34 +431,28 @@ def test_policy_health_near_zero_baseline():
 # TEST 12 — PSI on low-cardinality column uses categorical path
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def test_psi_low_cardinality_column():
     """A binary flag column with a 40 pp distribution shift should produce
     a meaningful PSI via the categorical path (not collapse to ~0)."""
     rng = np.random.default_rng(42)
     # ref: 90% zeros (rare penalty events); cur: 50% zeros (penalty surge)
-    ref_df = pd.DataFrame({
-        "recent_penalty_events_1m": rng.choice(
-            [0, 1], p=[0.90, 0.10], size=500
-        ).astype(float)
-    })
-    cur_df = pd.DataFrame({
-        "recent_penalty_events_1m": rng.choice(
-            [0, 1], p=[0.50, 0.50], size=500
-        ).astype(float)
-    })
+    ref_df = pd.DataFrame(
+        {"recent_penalty_events_1m": rng.choice([0, 1], p=[0.90, 0.10], size=500).astype(float)}
+    )
+    cur_df = pd.DataFrame(
+        {"recent_penalty_events_1m": rng.choice([0, 1], p=[0.50, 0.50], size=500).astype(float)}
+    )
 
     results, skipped = monitor_input_drift(ref_df, cur_df)
-    penalty_r = next(
-        (r for r in results if r.feature == "recent_penalty_events_1m"), None
-    )
+    penalty_r = next((r for r in results if r.feature == "recent_penalty_events_1m"), None)
     assert penalty_r is not None, "recent_penalty_events_1m should be monitored"
     assert "recent_penalty_events_1m" not in skipped
 
     # A 40 pp shift on a binary column must produce PSI >> 0.25 (alert)
     assert penalty_r.psi is not None
     assert penalty_r.psi > 0.25, (
-        f"40 pp binary shift should give PSI > 0.25 via categorical PSI, "
-        f"got {penalty_r.psi:.4f}"
+        f"40 pp binary shift should give PSI > 0.25 via categorical PSI, got {penalty_r.psi:.4f}"
     )
     assert penalty_r.severity == SEVERITY_ALERT
 
@@ -457,6 +460,7 @@ def test_psi_low_cardinality_column():
 # ─────────────────────────────────────────────────────────────────────────────
 # TEST 13 — Cramér's V: significant chi-sq with tiny effect size → MONITOR
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 def test_composition_cramer_v_small_effect_is_stable():
     """Large n + statistically significant chi-sq but V ≈ 0.016 → STABLE, not ALERT.
@@ -468,18 +472,12 @@ def test_composition_cramer_v_small_effect_is_stable():
     Validates the 3-tier Cramér's V logic: sig + V < monitor_threshold → STABLE,
     preventing alert noise at large n where 1 pp shifts become detectable.
     """
-    ref_df = pd.DataFrame({
-        "risk_tier": (
-            ["tier_1"] * 12000 + ["tier_2"] * 9000 +
-            ["tier_3"] * 6000  + ["tier_4"] * 3000
-        )
-    })
-    cur_df = pd.DataFrame({
-        "risk_tier": (
-            ["tier_1"] * 11700 + ["tier_2"] * 9000 +
-            ["tier_3"] * 6000  + ["tier_4"] * 3300
-        )
-    })
+    ref_df = pd.DataFrame(
+        {"risk_tier": (["tier_1"] * 12000 + ["tier_2"] * 9000 + ["tier_3"] * 6000 + ["tier_4"] * 3000)}
+    )
+    cur_df = pd.DataFrame(
+        {"risk_tier": (["tier_1"] * 11700 + ["tier_2"] * 9000 + ["tier_3"] * 6000 + ["tier_4"] * 3300)}
+    )
 
     results, _ = monitor_composition_drift(ref_df, cur_df)
     tier_r = next((r for r in results if r.feature == "risk_tier"), None)
@@ -487,9 +485,7 @@ def test_composition_cramer_v_small_effect_is_stable():
 
     if _SCIPY_AVAILABLE:
         # chi-sq should be significant at large n
-        assert tier_r.chi2_significant is True, (
-            "Expected chi-sq significant for this dataset"
-        )
+        assert tier_r.chi2_significant is True, "Expected chi-sq significant for this dataset"
         assert tier_r.cramers_v is not None, "cramers_v should be populated when scipy available"
         assert tier_r.cramers_v < 0.10, (
             f"Expected tiny Cramér's V (< cramers_v_monitor_threshold=0.10), got {tier_r.cramers_v:.4f}"

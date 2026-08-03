@@ -68,7 +68,7 @@ from extrafloat.io.extrafloat_data_loaders import (
     load_loan_summary_recent_features,
     load_transaction_capacity_features,
 )
-from pd_model.modeling.inference import load_artifacts, run_inference_pipeline
+from pd_model.modeling.inference import run_inference_pipeline
 
 logging.basicConfig(
     level=logging.INFO,
@@ -90,7 +90,7 @@ _REQUIRED_ARTIFACTS = [
 ]
 
 
-def _check_artifacts(artifacts_dir: Path) -> None:
+def _check_artifacts(artifacts_dir: Path, allow_unverified: bool = False) -> None:
     """
     Raise FileNotFoundError early if any required PD model artifact is missing,
     then verify sha256 checksums against the values stored in model_metadata.json.
@@ -99,16 +99,18 @@ def _check_artifacts(artifacts_dir: Path) -> None:
     message and the exact training command, rather than crashing deep inside
     load_artifacts() with a generic FileNotFoundError.
 
-    When model_metadata.json contains no artifact_sha256 entries (e.g. the
-    placeholder committed pre-training), checksum verification is skipped with
-    a warning rather than a hard failure — this allows the test suite and fresh
-    clones to proceed without trained artifacts.
+    Parameters
+    ----------
+    artifacts_dir    : directory to inspect
+    allow_unverified : if True, missing or incomplete checksums produce a warning
+                       instead of a RuntimeError.  Use ONLY for development or
+                       testing with placeholder metadata.  Production inference
+                       must never pass True here.
     """
     missing = [f for f in _REQUIRED_ARTIFACTS if not (artifacts_dir / f).exists()]
     if missing:
         raise FileNotFoundError(
-            f"Missing PD model artifacts in {artifacts_dir}:\n"
-            + "  " + ", ".join(missing) + "\n\n"
+            f"Missing PD model artifacts in {artifacts_dir}:\n" + "  " + ", ".join(missing) + "\n\n"
             "Train the model first:\n"
             "  python -m pd_model.run_pipeline \\\n"
             "      --train-file  <agent_snapshot_train.csv> \\\n"
@@ -117,7 +119,7 @@ def _check_artifacts(artifacts_dir: Path) -> None:
             "Or run:  make train"
         )
 
-    # Verify sha256 checksums if model_metadata.json contains them.
+    # Verify sha256 checksums against model_metadata.json.
     meta_path = artifacts_dir / "model_metadata.json"
     try:
         meta = json.loads(meta_path.read_text())
@@ -129,9 +131,11 @@ def _check_artifacts(artifacts_dir: Path) -> None:
 
     stored_hashes = meta.get("artifact_sha256", {})
     if not stored_hashes:
-        logger.warning(
-            "[preflight] model_metadata.json contains no artifact_sha256 checksums — "
-            "skipping integrity verification. Re-train to generate checksums."
+        _unverified_warn_or_raise(
+            allow_unverified,
+            "[preflight] model_metadata.json contains no artifact_sha256 checksums.\n"
+            "Re-train to generate checksums, or run with --allow-unverified-artifacts "
+            "(development / testing only).",
         )
         return
 
@@ -140,7 +144,12 @@ def _check_artifacts(artifacts_dir: Path) -> None:
         if fname == "model_metadata.json":
             continue
         if fname not in stored_hashes:
-            logger.warning("[preflight] No stored checksum for %s — skipping", fname)
+            _unverified_warn_or_raise(
+                allow_unverified,
+                f"[preflight] No stored checksum for {fname} in model_metadata.json.\n"
+                "Re-train to generate checksums, or run with --allow-unverified-artifacts "
+                "(development / testing only).",
+            )
             continue
         actual = hashlib.sha256((artifacts_dir / fname).read_bytes()).hexdigest()
         if actual != stored_hashes[fname]:
@@ -152,6 +161,14 @@ def _check_artifacts(artifacts_dir: Path) -> None:
             "Artifacts may be corrupted, partially copied, or from a different training run.\n"
             "Re-train or restore from backup."
         )
+
+
+def _unverified_warn_or_raise(allow_unverified: bool, message: str) -> None:
+    """Emit a warning when allow_unverified=True; raise RuntimeError otherwise."""
+    if allow_unverified:
+        logger.warning("%s", message)
+    else:
+        raise RuntimeError(message)
 
 
 def _norm_msisdn(s: pd.Series) -> pd.Series:
@@ -170,6 +187,7 @@ def _norm_msisdn(s: pd.Series) -> pd.Series:
 # Pipeline
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def run_credit_risk_pipeline(
     transaction_file: str | Path,
     loan_file: str | Path,
@@ -179,30 +197,34 @@ def run_credit_risk_pipeline(
     champion: str = "xgb",
     keep_intermediate: bool = False,
     engine_config: dict | None = None,
+    allow_unverified_artifacts: bool = False,
 ) -> pd.DataFrame:
     """
     Run the full PD model → credit limit engine pipeline.
 
     Parameters
     ----------
-    transaction_file : Agent profile snapshot CSV — MTN MoMo behavioural features
-                       (commission, account_balance, cash_in/out, customer counts, …).
-                       Read twice from the same path:
-                         - raw (agent_msisdn key) → PD model Phase 2.1 feature engineering
-                         - via capacity loader (msisdn key) → engine capacity cap
-    loan_file        : XtraFloat loan summary CSV — disbursement/repayment
-                       volumes and penalty counts over 1m/3m windows.
-                       Fed to the engine recent usage cap.
-    borrower_file    : Borrower credit history CSV — on_time_repayment_rate,
-                       lifetime_default_rate, prior loan sizes, etc.
-                       Fed to the engine prior exposure cap.
-    artifacts_dir    : directory containing trained PD model artifacts
-                       (xgb_model.joblib, lgbm_model.joblib, pd_calibration_map.csv, …)
-    repayment_file   : optional repayment history CSV for Phase 2.2 PD features.
-                       Agents without repayment rows are treated as thin-file.
-    champion         : "xgb" or "lgb" — which model's cal_pd feeds into the engine
-    keep_intermediate: if True, all engine intermediate columns are retained
-    engine_config    : optional dict to override DEFAULT_CAP_CONFIG values
+    transaction_file           : Agent profile snapshot CSV — MTN MoMo behavioural features
+                                 (commission, account_balance, cash_in/out, customer counts, …).
+                                 Read twice from the same path:
+                                   - raw (agent_msisdn key) → PD model Phase 2.1 feature engineering
+                                   - via capacity loader (msisdn key) → engine capacity cap
+    loan_file                  : XtraFloat loan summary CSV — disbursement/repayment
+                                 volumes and penalty counts over 1m/3m windows.
+                                 Fed to the engine recent usage cap.
+    borrower_file              : Borrower credit history CSV — on_time_repayment_rate,
+                                 lifetime_default_rate, prior loan sizes, etc.
+                                 Fed to the engine prior exposure cap.
+    artifacts_dir              : directory containing trained PD model artifacts
+                                 (xgb_model.joblib, lgbm_model.joblib, pd_calibration_map.csv, …)
+    repayment_file             : optional repayment history CSV for Phase 2.2 PD features.
+                                 Agents without repayment rows are treated as thin-file.
+    champion                   : "xgb" or "lgb" — which model's cal_pd feeds into the engine
+    keep_intermediate          : if True, all engine intermediate columns are retained
+    engine_config              : optional dict to override DEFAULT_CAP_CONFIG values
+    allow_unverified_artifacts : if True, missing or incomplete artifact checksums produce a
+                                 warning instead of a RuntimeError.  Use ONLY for development
+                                 or testing.  Never set True in production.
 
     Returns
     -------
@@ -215,14 +237,17 @@ def run_credit_risk_pipeline(
     # ── Stage 1: Load raw data ──────────────────────────────────────────────
     logger.info("Stage 1: loading raw data")
     # Raw read preserves agent_msisdn — required by PD model Phase 2.1
-    df_agent    = pd.read_csv(transaction_file, sep=None, engine="python")
+    df_agent = pd.read_csv(transaction_file, sep=None, engine="python")
     # Loader renames agent_msisdn → msisdn for the engine
-    df_txn      = load_transaction_capacity_features(transaction_file)
-    df_loan     = load_loan_summary_recent_features(loan_file)
+    df_txn = load_transaction_capacity_features(transaction_file)
+    df_loan = load_loan_summary_recent_features(loan_file)
     df_borrower = load_borrower_limit_features(borrower_file)
     logger.info(
         "Loaded — agents: %d rows | txn: %d rows | loan: %d rows | borrower: %d rows",
-        len(df_agent), len(df_txn), len(df_loan), len(df_borrower),
+        len(df_agent),
+        len(df_txn),
+        len(df_loan),
+        len(df_borrower),
     )
 
     repayment_df = None
@@ -232,7 +257,7 @@ def run_credit_risk_pipeline(
 
     # ── Stage 2: PD model scoring ───────────────────────────────────────────
     logger.info("Stage 2: running PD model inference (champion=%s)", champion)
-    _check_artifacts(artifacts_dir)
+    _check_artifacts(artifacts_dir, allow_unverified=allow_unverified_artifacts)
     pd_scored = run_inference_pipeline(
         df_raw=df_agent,
         artifacts_dir=artifacts_dir,
@@ -274,9 +299,7 @@ def run_credit_risk_pipeline(
         )
     null_pd = pd_join["msisdn"].isna().sum()
     if null_pd > 0:
-        logger.warning(
-            "PD output contains %d null agent_msisdn rows — dropping before join", null_pd
-        )
+        logger.warning("PD output contains %d null agent_msisdn rows — dropping before join", null_pd)
         pd_join = pd_join.dropna(subset=["msisdn"])
 
     # Guard: duplicates on either side would silently expand rows (many-to-many).
@@ -305,9 +328,9 @@ def run_credit_risk_pipeline(
 
     covered = features_df["cal_pd"].notna().sum()
     logger.info(
-        "PD join: %d / %d agents have cal_pd (%.1f%% coverage); "
-        "%d will use the 7-signal fallback",
-        covered, pre_join,
+        "PD join: %d / %d agents have cal_pd (%.1f%% coverage); %d will use the 7-signal fallback",
+        covered,
+        pre_join,
         100.0 * covered / max(pre_join, 1),
         pre_join - covered,
     )
@@ -330,9 +353,7 @@ def run_credit_risk_pipeline(
     # score_source distinguishes legitimate population misses (agents not in
     # PD output → "7_signal_fallback") from calibration failures that now
     # propagate as exceptions rather than silent NaN.
-    result_df["score_source"] = np.where(
-        result_df["cal_pd"].notna(), "pd_model", "7_signal_fallback"
-    )
+    result_df["score_source"] = np.where(result_df["cal_pd"].notna(), "pd_model", "7_signal_fallback")
     result_df["scored_at"] = _dt.datetime.utcnow().isoformat() + "Z"
 
     return result_df
@@ -342,26 +363,41 @@ def run_credit_risk_pipeline(
 # CLI
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def _parse_args(argv=None):
     p = argparse.ArgumentParser(
         description="CreditRisk pipeline: PD model → credit limit engine",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    p.add_argument("--transaction-file",  required=True,
-                   help="Agent profile snapshot CSV — read raw for PD model, via loader for engine capacity cap")
-    p.add_argument("--loan-file",         required=True,
-                   help="XtraFloat loan summary CSV (engine recent usage cap)")
-    p.add_argument("--borrower-file",     required=True,
-                   help="Borrower credit history CSV (engine prior exposure cap)")
-    p.add_argument("--artifacts-dir",     required=True,
-                   help="Trained PD model artifacts directory")
-    p.add_argument("--repayment-file",    default=None,
-                   help="Optional repayment history CSV for PD model Phase 2.2 features")
-    p.add_argument("--output",            default=None,
-                   help="Output CSV path (omit to print summary only)")
-    p.add_argument("--champion",          default="xgb", choices=["xgb", "lgb"])
-    p.add_argument("--keep-intermediate", action="store_true",
-                   help="Retain all intermediate engine columns in output")
+    p.add_argument(
+        "--transaction-file",
+        required=True,
+        help="Agent profile snapshot CSV — read raw for PD model, via loader for engine capacity cap",
+    )
+    p.add_argument("--loan-file", required=True, help="XtraFloat loan summary CSV (engine recent usage cap)")
+    p.add_argument(
+        "--borrower-file", required=True, help="Borrower credit history CSV (engine prior exposure cap)"
+    )
+    p.add_argument("--artifacts-dir", required=True, help="Trained PD model artifacts directory")
+    p.add_argument(
+        "--repayment-file",
+        default=None,
+        help="Optional repayment history CSV for PD model Phase 2.2 features",
+    )
+    p.add_argument("--output", default=None, help="Output CSV path (omit to print summary only)")
+    p.add_argument("--champion", default="xgb", choices=["xgb", "lgb"])
+    p.add_argument(
+        "--keep-intermediate", action="store_true", help="Retain all intermediate engine columns in output"
+    )
+    p.add_argument(
+        "--allow-unverified-artifacts",
+        action="store_true",
+        help=(
+            "Skip sha256 checksum enforcement when model_metadata.json has no "
+            "stored hashes.  Use ONLY for development or testing with placeholder "
+            "artifacts.  Never use in production."
+        ),
+    )
     return p.parse_args(argv)
 
 
@@ -376,6 +412,7 @@ def main(argv=None):
         repayment_file=args.repayment_file,
         champion=args.champion,
         keep_intermediate=args.keep_intermediate,
+        allow_unverified_artifacts=args.allow_unverified_artifacts,
     )
 
     if args.output:
@@ -384,8 +421,11 @@ def main(argv=None):
         result.to_csv(out_path, index=False)
         logger.info("Output written to %s (%d rows, %d columns)", out_path, len(result), len(result.columns))
     else:
-        print(result[["msisdn", "assigned_limit", "risk_tier", "cal_pd",
-                       "final_decision_reason"]].to_string(index=False))
+        print(
+            result[["msisdn", "assigned_limit", "risk_tier", "cal_pd", "final_decision_reason"]].to_string(
+                index=False
+            )
+        )
 
     return 0
 

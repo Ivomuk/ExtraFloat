@@ -78,6 +78,7 @@ logger = get_logger(__name__)
 # Data loading helpers
 # ======================================================================== #
 
+
 def _load_snapshot(path: str, snapshot_date_int: int, split_label: str) -> pd.DataFrame:
     """Load a single snapshot CSV and tag it with snapshot_dt and split."""
     df = pd.read_csv(path)
@@ -95,13 +96,7 @@ def _parse_dates(df: pd.DataFrame) -> pd.DataFrame:
     if "snapshot_dt" in df.columns:
         df["snapshot_dt"] = pd.to_datetime(df["snapshot_dt"].astype(str), errors="coerce")
     if "activation_dt" in df.columns:
-        df["activation_dt"] = (
-            df["activation_dt"]
-            .astype(str)
-            .str.split(".")
-            .str[0]
-            .replace("", pd.NA)
-        )
+        df["activation_dt"] = df["activation_dt"].astype(str).str.split(".").str[0].replace("", pd.NA)
         df["activation_dt"] = pd.to_datetime(df["activation_dt"], format="%Y%m%d", errors="coerce")
     for c in ["date_of_birth", "payment_last", "cash_in_last", "cash_out_last"]:
         if c in df.columns:
@@ -112,6 +107,7 @@ def _parse_dates(df: pd.DataFrame) -> pd.DataFrame:
 # ======================================================================== #
 # Pipeline
 # ======================================================================== #
+
 
 def run_pipeline(args: argparse.Namespace) -> None:
     cfg = DEFAULT_CONFIG
@@ -182,10 +178,12 @@ def run_pipeline(args: argparse.Namespace) -> None:
     train_cutoff = pd.Timestamp(args.train_cutoff)
     split_mask = pd.to_datetime(df_pd["snapshot_dt"], errors="coerce") <= train_cutoff
     df_train_raw = df_pd[split_mask].copy()
-    df_val_raw   = df_pd[~split_mask].copy()
+    df_val_raw = df_pd[~split_mask].copy()
     logger.info(
         "Pre-transform split: %d train rows / %d val rows (cutoff=%s)",
-        len(df_train_raw), len(df_val_raw), train_cutoff.date(),
+        len(df_train_raw),
+        len(df_val_raw),
+        train_cutoff.date(),
     )
 
     (
@@ -244,11 +242,17 @@ def run_pipeline(args: argparse.Namespace) -> None:
     # train_cutoff already defined above
 
     (
-        X_train_raw, X_train_trans, y_train,
-        X_val_raw, X_val_trans, y_val,
+        X_train_raw,
+        X_train_trans,
+        y_train,
+        X_val_raw,
+        X_val_trans,
+        y_val,
         candidate_features,
-        thin_train, thin_val,
-        agent_train, agent_val,
+        thin_train,
+        thin_val,
+        agent_train,
+        agent_val,
     ) = prepare_pd_training_and_validation_data(
         df_pd_raw=df_pd_raw,
         df_pd_transformed=df_pd_transformed,
@@ -279,18 +283,11 @@ def run_pipeline(args: argparse.Namespace) -> None:
     # 9) Train XGBoost
     # ------------------------------------------------------------------ #
     logger.info("=== Step 9: Train XGBoost ===")
-    # Build pure feature matrices (no meta cols)
-    meta_drop = [c for c in [
-        feature_config.AGENT_KEY, feature_config.THIN_FILE_COL,
-        feature_config.TARGET_COL,
-    ] if c in X_train_trans.columns]
     Xtr = X_train_trans[selected_features].copy()
     Xva = X_val_trans[selected_features].copy()
 
     # Attach meta cols to scored frames after training
-    xgb_model, xgb_train_scored, xgb_val_scored = train_xgb(
-        Xtr, y_train, Xva, y_val, cfg=cfg
-    )
+    xgb_model, xgb_train_scored, xgb_val_scored = train_xgb(Xtr, y_train, Xva, y_val, cfg=cfg)
     # Attach agent meta
     for scored_df, agent_ids, thin_flags in [
         (xgb_train_scored, agent_train, thin_train),
@@ -303,9 +300,7 @@ def run_pipeline(args: argparse.Namespace) -> None:
     # 10) Train LightGBM
     # ------------------------------------------------------------------ #
     logger.info("=== Step 10: Train LightGBM ===")
-    lgb_model, lgb_train_scored, lgb_val_scored = train_lgbm(
-        Xtr, y_train, Xva, y_val, cfg=cfg
-    )
+    lgb_model, lgb_train_scored, lgb_val_scored = train_lgbm(Xtr, y_train, Xva, y_val, cfg=cfg)
     for scored_df, agent_ids, thin_flags in [
         (lgb_train_scored, agent_train, thin_train),
         (lgb_val_scored, agent_val, thin_val),
@@ -324,18 +319,17 @@ def run_pipeline(args: argparse.Namespace) -> None:
 
     _val_idx = np.arange(len(xgb_val_scored))
     _bad_states = xgb_val_scored["bad_state"].fillna(0).astype(int).values
-    _idx_sel, _idx_cal = _tts(
-        _val_idx, test_size=0.5, stratify=_bad_states, random_state=cfg.random_state
-    )
+    _idx_sel, _idx_cal = _tts(_val_idx, test_size=0.5, stratify=_bad_states, random_state=cfg.random_state)
 
     xgb_val_select = xgb_val_scored.iloc[_idx_sel].reset_index(drop=True)
     lgb_val_select = lgb_val_scored.iloc[_idx_sel].reset_index(drop=True)
-    xgb_val_cal    = xgb_val_scored.iloc[_idx_cal].reset_index(drop=True)
-    lgb_val_cal    = lgb_val_scored.iloc[_idx_cal].reset_index(drop=True)
+    xgb_val_cal = xgb_val_scored.iloc[_idx_cal].reset_index(drop=True)
+    lgb_val_cal = lgb_val_scored.iloc[_idx_cal].reset_index(drop=True)
 
     logger.info(
         "Val split: selection=%d rows | calibration=%d rows | bad_rate_sel=%.4f | bad_rate_cal=%.4f",
-        len(xgb_val_select), len(xgb_val_cal),
+        len(xgb_val_select),
+        len(xgb_val_cal),
         float(xgb_val_select["bad_state"].mean()),
         float(xgb_val_cal["bad_state"].mean()),
     )
@@ -361,9 +355,7 @@ def run_pipeline(args: argparse.Namespace) -> None:
     # 12) Calibration + policy pipeline  (calibration half only)
     # ------------------------------------------------------------------ #
     logger.info("=== Step 12: Calibration + policy pipeline ===")
-    locked_artifacts = run_locked_policy_pipeline(
-        xgb_val_cal, lgb_val_cal, cfg=cfg, output_dir=output_dir
-    )
+    locked_artifacts = run_locked_policy_pipeline(xgb_val_cal, lgb_val_cal, cfg=cfg, output_dir=output_dir)
 
     # ------------------------------------------------------------------ #
     # 13) Build unified ops_scored table
@@ -394,15 +386,11 @@ def run_pipeline(args: argparse.Namespace) -> None:
         lgb_merge_cols = [feature_config.AGENT_KEY, "lgb_cal_pd"] + [
             c for c in lgb_sorted.columns if c.startswith("lgb_approved")
         ]
-        thick_df = xgb_sorted.merge(
-            lgb_sorted[lgb_merge_cols], on=feature_config.AGENT_KEY, how="left"
-        )
+        thick_df = xgb_sorted.merge(lgb_sorted[lgb_merge_cols], on=feature_config.AGENT_KEY, how="left")
 
         # Promote champion's cal_pd to shared cal_pd column
         thick_df[feature_config.CAL_PD_COL] = thick_df[f"{champion}_cal_pd"]
-        thick_df[feature_config.POLICY_BUCKET_COL] = make_policy_bucket(
-            thick_df, prefix=champion, cfg=cfg
-        )
+        thick_df[feature_config.POLICY_BUCKET_COL] = make_policy_bucket(thick_df, prefix=champion, cfg=cfg)
         thick_df["final_approved"] = thick_df.get(f"{champion}_approved_at_50", 0)
 
         # thin-file scorecard rows
@@ -449,9 +437,7 @@ def run_pipeline(args: argparse.Namespace) -> None:
 
     # feature_order.json
     feature_order_path = output_dir / "feature_order.json"
-    feature_order_path.write_text(
-        json.dumps({"selected_features": selected_features}, indent=2)
-    )
+    feature_order_path.write_text(json.dumps({"selected_features": selected_features}, indent=2))
     logger.info("Wrote %s (%d features)", feature_order_path, len(selected_features))
 
     # Lineage helpers
@@ -461,8 +447,10 @@ def run_pipeline(args: argparse.Namespace) -> None:
     def _git_commit() -> str:
         try:
             return subprocess.check_output(
-                ["git", "rev-parse", "HEAD"], text=True,
-                cwd=str(output_dir.parent), stderr=subprocess.DEVNULL,
+                ["git", "rev-parse", "HEAD"],
+                text=True,
+                cwd=str(output_dir.parent),
+                stderr=subprocess.DEVNULL,
             ).strip()
         except Exception:
             return "unknown"
@@ -488,9 +476,11 @@ def run_pipeline(args: argparse.Namespace) -> None:
         "thin_file_val": int(thin_val.sum()),
         "champion": champion,
         "xgb_val_auc": float(cmp_summary.loc[cmp_summary["model"] == "xgb", "auc"].iloc[0])
-            if "xgb" in cmp_summary["model"].values else None,
+        if "xgb" in cmp_summary["model"].values
+        else None,
         "lgb_val_auc": float(cmp_summary.loc[cmp_summary["model"] == "lgb", "auc"].iloc[0])
-            if "lgb" in cmp_summary["model"].values else None,
+        if "lgb" in cmp_summary["model"].values
+        else None,
         "iv_table": iv_table.to_dict(orient="records"),
         "transform_report": transform_report.to_dict(orient="records"),
         "bootstrap": bootstrap_tbl.to_dict(orient="records") if not bootstrap_tbl.empty else [],
@@ -515,6 +505,7 @@ def run_pipeline(args: argparse.Namespace) -> None:
 # ======================================================================== #
 # CLI
 # ======================================================================== #
+
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(

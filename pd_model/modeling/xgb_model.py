@@ -18,7 +18,7 @@ from sklearn.metrics import roc_auc_score
 from pd_model.config import feature_config
 from pd_model.config.model_config import DEFAULT_CONFIG, ModelConfig
 from pd_model.logging_config import get_logger
-from pd_model.modeling.evaluation import build_decile_tables, safe_auc_with_reason
+from pd_model.modeling.evaluation import safe_auc_with_reason
 
 logger = get_logger(__name__)
 
@@ -28,6 +28,7 @@ _META_COLS = {feature_config.AGENT_KEY, feature_config.THIN_FILE_COL, feature_co
 # ======================================================================== #
 # Monotone constraint builder
 # ======================================================================== #
+
 
 def build_monotone_constraints(
     feature_names: list[str],
@@ -80,6 +81,7 @@ def build_monotone_constraints(
 # Training
 # ======================================================================== #
 
+
 def train_xgb(
     X_train: pd.DataFrame,
     y_train: pd.Series,
@@ -114,18 +116,19 @@ def train_xgb(
     (* only present if those columns exist in the original X_train/X_val)
     """
     # Hard alignment checks (preserved from file7)
-    assert X_train.columns.tolist() == X_val.columns.tolist(), \
-        "[FATAL] Train/val column order mismatch"
-    assert feature_config.THIN_FILE_COL not in X_train.columns.tolist(), \
+    assert X_train.columns.tolist() == X_val.columns.tolist(), "[FATAL] Train/val column order mismatch"
+    assert feature_config.THIN_FILE_COL not in X_train.columns.tolist(), (
         f"[FATAL] {feature_config.THIN_FILE_COL} leaked into model matrix"
+    )
 
     feature_cols = X_train.columns.tolist()
 
     if monotone_constraints is None:
         monotone_constraints = build_monotone_constraints(feature_cols, X_train, y_train)
 
-    assert len(monotone_constraints) == len(feature_cols), \
+    assert len(monotone_constraints) == len(feature_cols), (
         f"[FATAL] constraints length {len(monotone_constraints)} != features {len(feature_cols)}"
+    )
 
     constraints_str = "(" + ",".join(str(int(v)) for v in monotone_constraints) + ")"
 
@@ -148,7 +151,9 @@ def train_xgb(
 
     logger.info(
         "XGBoost fit: train=%d rows | val=%d rows | features=%d",
-        X_train.shape[0], X_val.shape[0], len(feature_cols),
+        X_train.shape[0],
+        X_val.shape[0],
+        len(feature_cols),
     )
     model.fit(
         X_train,
@@ -161,10 +166,10 @@ def train_xgb(
     val_raw = model.predict_proba(X_val)[:, 1]
 
     # Hard row alignment checks (preserved from file7)
-    assert len(train_raw) == X_train.shape[0] == len(y_train_arr), \
+    assert len(train_raw) == X_train.shape[0] == len(y_train_arr), (
         "[FATAL] Train rows misaligned at scoring time"
-    assert len(val_raw) == X_val.shape[0] == len(y_val_arr), \
-        "[FATAL] Val rows misaligned at scoring time"
+    )
+    assert len(val_raw) == X_val.shape[0] == len(y_val_arr), "[FATAL] Val rows misaligned at scoring time"
 
     train_scored = pd.DataFrame(
         {"bad_state": y_train_arr, "raw_score": train_raw},
@@ -186,6 +191,7 @@ def train_xgb(
 # Evaluation
 # ======================================================================== #
 
+
 def evaluate_xgb(
     model: xgb.XGBClassifier,
     train_scored: pd.DataFrame,
@@ -201,14 +207,11 @@ def evaluate_xgb(
         segment_aucs  : list of dicts {split, thin, auc, reason}
         feature_importance : pd.Series (gain, sorted descending)
     """
-    train_auc, train_why = safe_auc_with_reason(
-        train_scored["bad_state"], train_scored["raw_score"]
+    train_auc, train_why = safe_auc_with_reason(train_scored["bad_state"], train_scored["raw_score"])
+    val_auc, val_why = safe_auc_with_reason(val_scored["bad_state"], val_scored["raw_score"])
+    logger.info(
+        "XGBoost overall train AUC=%.4f (%s) | val AUC=%.4f (%s)", train_auc, train_why, val_auc, val_why
     )
-    val_auc, val_why = safe_auc_with_reason(
-        val_scored["bad_state"], val_scored["raw_score"]
-    )
-    logger.info("XGBoost overall train AUC=%.4f (%s) | val AUC=%.4f (%s)",
-                train_auc, train_why, val_auc, val_why)
 
     seg_aucs = []
     for split_name, scored_df in [("train", train_scored), ("val", val_scored)]:
@@ -222,8 +225,11 @@ def evaluate_xgb(
                 scored_df.loc[mask, "raw_score"],
             )
             logger.info(
-                "XGBoost %s thin=%d AUC=%.4f (%s)", split_name, thin_value,
-                auc_val if not np.isnan(auc_val) else -1, why,
+                "XGBoost %s thin=%d AUC=%.4f (%s)",
+                split_name,
+                thin_value,
+                auc_val if not np.isnan(auc_val) else -1,
+                why,
             )
             seg_aucs.append({"split": split_name, "thin": thin_value, "auc": auc_val, "reason": why})
 
@@ -243,6 +249,7 @@ def evaluate_xgb(
 # Segment diagnostics (validation)
 # ======================================================================== #
 
+
 def segment_performance_table(val_scored: pd.DataFrame) -> pd.DataFrame:
     """
     Build a thin / non-thin / missing segment performance summary for validation.
@@ -254,9 +261,7 @@ def segment_performance_table(val_scored: pd.DataFrame) -> pd.DataFrame:
 
     if feature_config.THIN_FILE_COL in df.columns:
         thin_num = pd.to_numeric(df[feature_config.THIN_FILE_COL], errors="coerce")
-        df["thin_file_flag_bin"] = np.where(
-            pd.isna(thin_num), np.nan, (thin_num >= 0.5).astype(int)
-        )
+        df["thin_file_flag_bin"] = np.where(pd.isna(thin_num), np.nan, (thin_num >= 0.5).astype(int))
         df["thin_segment"] = (
             pd.Series(df["thin_file_flag_bin"]).map({0: "non_thin", 1: "thin"}).fillna("missing_flag")
         )
@@ -271,17 +276,17 @@ def segment_performance_table(val_scored: pd.DataFrame) -> pd.DataFrame:
         y_vals = seg_df["bad_state"].values
         p_vals = seg_df["raw_score"].values
         ok_mask = ~pd.isna(p_vals)
-        auc_val, _ = safe_auc_with_reason(
-            pd.Series(y_vals[ok_mask]), pd.Series(p_vals[ok_mask])
+        auc_val, _ = safe_auc_with_reason(pd.Series(y_vals[ok_mask]), pd.Series(p_vals[ok_mask]))
+        rows.append(
+            {
+                "segment": seg_name,
+                "n": int(seg_df.shape[0]),
+                "bad_rate": float(np.mean(y_vals)),
+                "avg_raw_score": float(np.nanmean(p_vals)),
+                "auc": auc_val,
+                "score_null_rate": float(np.mean(pd.isna(df["raw_score"]))),
+            }
         )
-        rows.append({
-            "segment": seg_name,
-            "n": int(seg_df.shape[0]),
-            "bad_rate": float(np.mean(y_vals)),
-            "avg_raw_score": float(np.nanmean(p_vals)),
-            "auc": auc_val,
-            "score_null_rate": float(np.mean(pd.isna(df["raw_score"]))),
-        })
 
     seg_tbl = pd.DataFrame(rows)
     if seg_tbl.shape[0] > 0:

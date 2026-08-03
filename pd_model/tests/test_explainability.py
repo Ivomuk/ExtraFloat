@@ -1,7 +1,7 @@
 """Tests for pd_model.modeling.explainability."""
+
 import numpy as np
 import pandas as pd
-import pytest
 
 from pd_model.modeling.explainability import (
     build_adverse_action_df,
@@ -11,8 +11,8 @@ from pd_model.modeling.explainability import (
 
 
 def _make_xgb_model(n_features: int = 5):
-    from pd_model.modeling.xgb_model import train_xgb
     from pd_model.config.model_config import ModelConfig
+    from pd_model.modeling.xgb_model import train_xgb
 
     rng = np.random.default_rng(42)
     n = 400
@@ -65,7 +65,7 @@ class TestBuildAdverseActionDf:
         shap_vals = -np.abs(np.random.default_rng(1).normal(0.1, 0.05, (10, 4)))
         feat_names = [f"f{i}" for i in range(4)]
         df = build_adverse_action_df(shap_vals, feat_names, n_reasons=2, min_shap=0.0)
-        assert df["adverse_reason_1"].isna().all() or (df["adverse_reason_1"] == None).all()
+        assert df["adverse_reason_1"].isna().all() or (df["adverse_reason_1"].isna()).all()
 
     def test_n_reasons_respected(self):
         shap_vals = self._shap()
