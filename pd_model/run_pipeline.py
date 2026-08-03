@@ -36,8 +36,11 @@ The pipeline:
 from __future__ import annotations
 
 import argparse
+import datetime
+import hashlib
 import json
 import logging
+import subprocess
 import sys
 from pathlib import Path
 
@@ -409,8 +412,27 @@ def run_pipeline(args: argparse.Namespace) -> None:
     )
     logger.info("Wrote %s (%d features)", feature_order_path, len(selected_features))
 
+    # Lineage helpers
+    def _sha256_file(p: Path) -> str:
+        return hashlib.sha256(p.read_bytes()).hexdigest()
+
+    def _git_commit() -> str:
+        try:
+            return subprocess.check_output(
+                ["git", "rev-parse", "HEAD"], text=True,
+                cwd=str(output_dir.parent), stderr=subprocess.DEVNULL,
+            ).strip()
+        except Exception:
+            return "unknown"
+
     # Full metadata
     metadata = {
+        # Lineage
+        "training_completed_at": datetime.datetime.utcnow().isoformat() + "Z",
+        "git_commit": _git_commit(),
+        "feature_schema_version": 1,
+        "preprocessor_version": 1,
+        # Training stats
         "train_rows": len(X_train_raw),
         "val_rows": len(X_val_raw),
         "val_select_rows": len(xgb_val_select),
@@ -434,7 +456,16 @@ def run_pipeline(args: argparse.Namespace) -> None:
 
     metadata_path = output_dir / "model_metadata.json"
     metadata_path.write_text(json.dumps(metadata, indent=2, default=str))
-    logger.info("Wrote %s", metadata_path)
+
+    # Artifact checksums (computed after all files are written, excluding metadata itself)
+    artifact_sha256 = {
+        f.name: _sha256_file(f)
+        for f in sorted(output_dir.iterdir())
+        if f.suffix in {".joblib", ".csv", ".json"} and f.name != "model_metadata.json"
+    }
+    metadata["artifact_sha256"] = artifact_sha256
+    metadata_path.write_text(json.dumps(metadata, indent=2, default=str))
+    logger.info("Wrote %s (sha256 of %d artifacts)", metadata_path, len(artifact_sha256))
 
     logger.info("Pipeline complete.")
 

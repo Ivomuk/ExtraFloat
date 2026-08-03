@@ -188,6 +188,7 @@ def apply_pd_transformations(
     signed_log_cols: Optional[List[str]] = None,
     cfg: ModelConfig = DEFAULT_CONFIG,
     neg_policy: str = "signed_log1p",
+    fitted_params: Optional[dict] = None,
 ) -> Tuple[pd.DataFrame, List[str], pd.DataFrame]:
     """
     Apply PD-safe feature transformations with automatic reversion on failure.
@@ -277,11 +278,48 @@ def apply_pd_transformations(
         s_num = pd.to_numeric(s, errors="coerce")
         return np.sign(s_num) * np.log1p(np.abs(s_num))
 
+    def _use_fitted(col: str, s_raw: pd.Series) -> bool:
+        """Replay saved training-time transformation. Returns True if applied."""
+        if fitted_params is None or col not in fitted_params:
+            return False
+        fp = fitted_params[col]
+        action = fp.get("action", "")
+        lo = fp.get("lo")
+        hi = fp.get("hi")
+
+        if "skip_all_nan" in action:
+            df_out[col] = s_raw.astype("float32")
+            report_rows.append({"feature": col, "action": action})
+            return True
+
+        if action in ("forced_signed_log_ok", "signed_log_ok"):
+            s_work = _signed_log1p(s_raw)
+        elif action == "log_cap_ok":
+            s_work = np.log1p(s_raw.clip(lower=0))
+        else:
+            # cap_ok, cap_only_due_to_negatives, *_reverted_*, cap_reverted_raw
+            s_work = s_raw.copy()
+
+        valid_bounds = (
+            lo is not None and hi is not None
+            and not (pd.isna(lo) or pd.isna(hi))
+            and float(hi) > float(lo)
+        )
+        if valid_bounds:
+            s_work = s_work.clip(float(lo), float(hi))
+
+        df_out[col] = s_work.astype("float32")
+        report_rows.append({"feature": col, "action": action, "lo": lo, "hi": hi})
+        return True
+
     # ------------------------------------------------------------------ #
     # 0) FORCED SIGNED LOG + CAP
     # ------------------------------------------------------------------ #
     for col in signed_log_cols_use:
         s_raw = pd.to_numeric(df_out[col], errors="coerce")
+        if _use_fitted(col, s_raw):
+            continue
+
         n_nonnull = int(s_raw.notna().sum())
         if n_nonnull == 0:
             df_out[col] = s_raw.astype("float32")
@@ -295,20 +333,23 @@ def apply_pd_transformations(
         s_work, skipped, lo, hi = _winsorize(s_work)
         broken, why = _is_broken(s_work)
         if broken:
-            s_fb, _, _, _ = _winsorize(s_raw)
+            s_fb, _sk, lo_fb, hi_fb = _winsorize(s_raw)
             df_out[col] = s_fb.astype("float32")
             logger.warning("Feature '%s' forced-signed-log FAILED (%s); reverted to raw cap", col, why)
-            report_rows.append({"feature": col, "action": "forced_signed_log_reverted_raw_cap", "reason": why, "neg_frac": neg_frac})
+            report_rows.append({"feature": col, "action": "forced_signed_log_reverted_raw_cap", "reason": why, "neg_frac": neg_frac, "lo": lo_fb, "hi": hi_fb})
             continue
 
         df_out[col] = s_work.astype("float32")
-        report_rows.append({"feature": col, "action": "forced_signed_log_ok", "neg_frac": neg_frac})
+        report_rows.append({"feature": col, "action": "forced_signed_log_ok", "neg_frac": neg_frac, "lo": lo, "hi": hi})
 
     # ------------------------------------------------------------------ #
     # 1) LOG + CAP
     # ------------------------------------------------------------------ #
     for col in log_cols_use:
         s_raw = pd.to_numeric(df_out[col], errors="coerce")
+        if _use_fitted(col, s_raw):
+            continue
+
         n_nonnull = int(s_raw.notna().sum())
         if n_nonnull == 0:
             df_out[col] = s_raw.astype("float32")
@@ -322,41 +363,44 @@ def apply_pd_transformations(
             if neg_policy == "cap_only":
                 s_work, skipped, lo, hi = _winsorize(s_raw)
                 df_out[col] = s_work.astype("float32")
-                report_rows.append({"feature": col, "action": "cap_only_due_to_negatives", "neg_frac": neg_frac})
+                report_rows.append({"feature": col, "action": "cap_only_due_to_negatives", "neg_frac": neg_frac, "lo": lo, "hi": hi})
                 continue
 
             s_work = _signed_log1p(s_raw)
             s_work, skipped, lo, hi = _winsorize(s_work)
             broken, why = _is_broken(s_work)
             if broken:
-                s_fb, _, _, _ = _winsorize(s_raw)
+                s_fb, _sk, lo_fb, hi_fb = _winsorize(s_raw)
                 df_out[col] = s_fb.astype("float32")
                 logger.warning("Feature '%s' signed-log FAILED (%s); reverted to raw cap", col, why)
-                report_rows.append({"feature": col, "action": "signed_log_reverted_raw_cap", "reason": why, "neg_frac": neg_frac})
+                report_rows.append({"feature": col, "action": "signed_log_reverted_raw_cap", "reason": why, "neg_frac": neg_frac, "lo": lo_fb, "hi": hi_fb})
                 continue
 
             df_out[col] = s_work.astype("float32")
-            report_rows.append({"feature": col, "action": "signed_log_ok", "neg_frac": neg_frac})
+            report_rows.append({"feature": col, "action": "signed_log_ok", "neg_frac": neg_frac, "lo": lo, "hi": hi})
             continue
 
         s_work = np.log1p(s_raw.clip(lower=0))
         s_work, skipped, lo, hi = _winsorize(s_work)
         broken, why = _is_broken(s_work)
         if broken:
-            s_fb, _, _, _ = _winsorize(s_raw)
+            s_fb, _sk, lo_fb, hi_fb = _winsorize(s_raw)
             df_out[col] = s_fb.astype("float32")
             logger.warning("Feature '%s' log-cap FAILED (%s); reverted to raw cap", col, why)
-            report_rows.append({"feature": col, "action": "log_cap_reverted_raw_cap", "reason": why, "neg_frac": neg_frac})
+            report_rows.append({"feature": col, "action": "log_cap_reverted_raw_cap", "reason": why, "neg_frac": neg_frac, "lo": lo_fb, "hi": hi_fb})
             continue
 
         df_out[col] = s_work.astype("float32")
-        report_rows.append({"feature": col, "action": "log_cap_ok", "neg_frac": neg_frac})
+        report_rows.append({"feature": col, "action": "log_cap_ok", "neg_frac": neg_frac, "lo": lo, "hi": hi})
 
     # ------------------------------------------------------------------ #
     # 2) CAP ONLY
     # ------------------------------------------------------------------ #
     for col in cap_cols_use:
         s_raw = pd.to_numeric(df_out[col], errors="coerce")
+        if _use_fitted(col, s_raw):
+            continue
+
         n_nonnull = int(s_raw.notna().sum())
         if n_nonnull == 0:
             df_out[col] = s_raw.astype("float32")
@@ -372,7 +416,7 @@ def apply_pd_transformations(
             continue
 
         df_out[col] = s_work.astype("float32")
-        report_rows.append({"feature": col, "action": "cap_ok"})
+        report_rows.append({"feature": col, "action": "cap_ok", "lo": lo, "hi": hi})
 
     classified = signed_set | set(log_cols_use) | set(cap_cols_use)
     unclassified = [c for c in pd_features_use if c not in classified]
@@ -464,6 +508,7 @@ def build_transformed_dataframe(
     signed_log_cols: List[str],
     cfg: ModelConfig = DEFAULT_CONFIG,
     neg_policy: str = "signed_log1p",
+    fitted_params: Optional[dict] = None,
 ) -> Tuple[pd.DataFrame, List[str], pd.DataFrame]:
     """
     Orchestrate the full numeric transformation + pruning pipeline.
@@ -503,12 +548,18 @@ def build_transformed_dataframe(
         signed_log_cols=signed_log_cols,
         cfg=cfg,
         neg_policy=neg_policy,
+        fitted_params=fitted_params,
     )
 
-    # 3) Prune
-    df_numeric_transformed, pd_features_pruned, dropped_cols = prune_post_transform_features(
-        df_numeric_transformed, pd_features, cfg=cfg
-    )
+    # 3) Prune — skipped at inference (fitted_params present): the model's feature_order
+    #    is the authoritative list; pruning against the scoring batch would be batch-dependent.
+    if fitted_params is not None:
+        pd_features_pruned = [c for c in pd_features if c in df_numeric_transformed.columns]
+        dropped_cols: List[str] = []
+    else:
+        df_numeric_transformed, pd_features_pruned, dropped_cols = prune_post_transform_features(
+            df_numeric_transformed, pd_features, cfg=cfg
+        )
 
     # 4) Index alignment guard (BEFORE concat)
     assert_index_aligned(df_pd, df_numeric_transformed, context="build_transformed_dataframe")

@@ -102,6 +102,24 @@ def load_artifacts(artifacts_dir: Path) -> ModelArtifacts:
         len(feature_order), len(cal_map), len(xgb_policy_thresholds),
     )
 
+    # Log lineage from model_metadata.json if present and non-empty
+    meta_path = artifacts_dir / "model_metadata.json"
+    if meta_path.exists():
+        try:
+            import json as _json
+            meta = _json.loads(meta_path.read_text())
+            if meta:
+                champion_key = meta.get("champion", "xgb")
+                logger.info(
+                    "Model lineage: trained_at=%s | git=%s | champion=%s | auc=%.4f",
+                    meta.get("training_completed_at", "unknown"),
+                    str(meta.get("git_commit", "unknown"))[:8],
+                    champion_key,
+                    meta.get(f"{champion_key}_val_auc") or float("nan"),
+                )
+        except Exception:
+            pass  # metadata is informational; don't block inference on parse errors
+
     return ModelArtifacts(
         xgb_model=xgb_model,
         lgb_model=lgb_model,
@@ -371,6 +389,20 @@ def run_inference_pipeline(
     (pd_features, log_cols, cap_cols, _protected, signed_log_cols, _excluded_df) = (
         get_and_classify_pd_features(df)
     )
+    # Build fitted_params from the training-time transform_report so that
+    # winsorization bounds and transformation choices are replayed exactly,
+    # not recomputed from the inference batch (which would make scores
+    # batch-size and batch-composition dependent).
+    fitted_params = {
+        row["feature"]: {
+            "action": row["action"],
+            "lo": row.get("lo") if not pd.isna(row.get("lo", float("nan"))) else None,
+            "hi": row.get("hi") if not pd.isna(row.get("hi", float("nan"))) else None,
+        }
+        for _, row in artifacts.transform_report.iterrows()
+        if pd.notna(row.get("action"))
+    }
+
     df_transformed, _pruned, _report = build_transformed_dataframe(
         df,
         pd_features=pd_features,
@@ -378,6 +410,7 @@ def run_inference_pipeline(
         cap_cols=cap_cols,
         signed_log_cols=signed_log_cols,
         cfg=cfg,
+        fitted_params=fitted_params,
     )
 
     return score_new_agents(
