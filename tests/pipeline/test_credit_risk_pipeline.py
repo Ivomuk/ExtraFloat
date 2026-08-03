@@ -454,3 +454,277 @@ def test_pd_decile_nan_when_cal_pd_absent():
 def test_pd_decile_in_final_output_columns():
     """pd_decile survives keep_intermediate=False trimming."""
     assert "pd_decile" in FINAL_OUTPUT_COLUMNS
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 9. F5 — Calibration fail-closed
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_calibration_exception_propagates():
+    """After F5 fix: calibration failure must raise, not be swallowed."""
+    from pd_model.modeling.inference import ModelArtifacts, score_new_agents
+
+    n = 6
+    feature_cols = ["feat_a", "feat_b", "feat_c"]
+    rng = np.random.default_rng(42)
+    df = pd.DataFrame(rng.uniform(0, 1, (n, len(feature_cols))), columns=feature_cols)
+    df["agent_msisdn"] = [f"256{i:09d}" for i in range(n)]
+    df["thin_file_flag"] = 0  # all thick-file → triggers calibration path
+
+    mock_xgb = MagicMock()
+    mock_xgb.predict_proba.return_value = np.column_stack(
+        [np.full(n, 0.8), np.full(n, 0.2)]
+    )
+    mock_lgb = MagicMock()
+    mock_lgb.predict_proba.return_value = np.column_stack(
+        [np.full(n, 0.7), np.full(n, 0.3)]
+    )
+
+    artifacts = ModelArtifacts(
+        xgb_model=mock_xgb,
+        lgb_model=mock_lgb,
+        feature_order=feature_cols,
+        cal_map=pd.DataFrame(),
+        xgb_policy_thresholds=pd.DataFrame(),
+        lgb_policy_thresholds=pd.DataFrame(),
+        transform_report=pd.DataFrame({"feature": [], "action": []}),
+    )
+
+    with patch("pd_model.modeling.inference.attach_cal_pd",
+               side_effect=RuntimeError("Calibration map corrupt")):
+        with pytest.raises(RuntimeError, match="Calibration map corrupt"):
+            score_new_agents(df, artifacts)
+
+
+def test_score_source_pd_model_when_cal_pd_present(tmp_path):
+    """score_source == 'pd_model' for every agent that has cal_pd."""
+    from run_credit_risk_pipeline import run_credit_risk_pipeline
+
+    n = 5
+    msisdn_list = [f"256700{i:06d}" for i in range(n)]
+    df_features = _minimal_features_df(n=n)
+    pd_scored = _make_pd_scored(msisdn_list)  # all agents have cal_pd
+
+    with (
+        patch("run_credit_risk_pipeline._check_artifacts"),
+        patch("run_credit_risk_pipeline.pd.read_csv",
+              return_value=pd.DataFrame({"agent_msisdn": msisdn_list})),
+        patch("run_credit_risk_pipeline.load_transaction_capacity_features",
+              return_value=MagicMock()),
+        patch("run_credit_risk_pipeline.load_loan_summary_recent_features",
+              return_value=MagicMock()),
+        patch("run_credit_risk_pipeline.load_borrower_limit_features",
+              return_value=MagicMock()),
+        patch("run_credit_risk_pipeline.run_inference_pipeline",
+              return_value=pd_scored),
+        patch("run_credit_risk_pipeline.build_extrafloat_limit_engine_features",
+              return_value=df_features),
+    ):
+        result = run_credit_risk_pipeline(
+            transaction_file="dummy.csv",
+            loan_file="dummy.csv",
+            borrower_file="dummy.csv",
+            artifacts_dir=str(tmp_path),
+        )
+
+    assert "score_source" in result.columns
+    assert "scored_at" in result.columns
+    assert (result["score_source"] == "pd_model").all(), (
+        "All agents with cal_pd must have score_source='pd_model'"
+    )
+
+
+def test_score_source_fallback_when_cal_pd_absent(tmp_path):
+    """score_source == '7_signal_fallback' for agents without cal_pd."""
+    from run_credit_risk_pipeline import run_credit_risk_pipeline
+
+    n = 6
+    msisdn_list = [f"256700{i:06d}" for i in range(n)]
+    df_features = _minimal_features_df(n=n)
+
+    # PD model returns NaN cal_pd for all agents (e.g. not in PD output)
+    pd_scored_no_pd = pd.DataFrame({
+        "agent_msisdn": msisdn_list,
+        "cal_pd":        [float("nan")] * n,
+        "thin_file_flag": [0] * n,
+    })
+
+    with (
+        patch("run_credit_risk_pipeline._check_artifacts"),
+        patch("run_credit_risk_pipeline.pd.read_csv",
+              return_value=pd.DataFrame({"agent_msisdn": msisdn_list})),
+        patch("run_credit_risk_pipeline.load_transaction_capacity_features",
+              return_value=MagicMock()),
+        patch("run_credit_risk_pipeline.load_loan_summary_recent_features",
+              return_value=MagicMock()),
+        patch("run_credit_risk_pipeline.load_borrower_limit_features",
+              return_value=MagicMock()),
+        patch("run_credit_risk_pipeline.run_inference_pipeline",
+              return_value=pd_scored_no_pd),
+        patch("run_credit_risk_pipeline.build_extrafloat_limit_engine_features",
+              return_value=df_features),
+    ):
+        result = run_credit_risk_pipeline(
+            transaction_file="dummy.csv",
+            loan_file="dummy.csv",
+            borrower_file="dummy.csv",
+            artifacts_dir=str(tmp_path),
+        )
+
+    assert (result["score_source"] == "7_signal_fallback").all(), (
+        "Agents with no cal_pd must have score_source='7_signal_fallback'"
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 10. F6 — Join integrity
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_join_raises_on_duplicate_engine_msisdn(tmp_path):
+    """Duplicate msisdn in engine features must raise ValueError before the join."""
+    from run_credit_risk_pipeline import run_credit_risk_pipeline
+
+    n = 4
+    msisdn_list = [f"256700{i:06d}" for i in range(n)]
+    pd_scored = _make_pd_scored(msisdn_list)
+
+    # Engine features with a duplicate msisdn
+    df_features_dup = _minimal_features_df(n=n)
+    df_features_dup.loc[1, "msisdn"] = df_features_dup.loc[0, "msisdn"]  # duplicate
+
+    with (
+        patch("run_credit_risk_pipeline._check_artifacts"),
+        patch("run_credit_risk_pipeline.pd.read_csv",
+              return_value=pd.DataFrame({"agent_msisdn": msisdn_list})),
+        patch("run_credit_risk_pipeline.load_transaction_capacity_features",
+              return_value=MagicMock()),
+        patch("run_credit_risk_pipeline.load_loan_summary_recent_features",
+              return_value=MagicMock()),
+        patch("run_credit_risk_pipeline.load_borrower_limit_features",
+              return_value=MagicMock()),
+        patch("run_credit_risk_pipeline.run_inference_pipeline",
+              return_value=pd_scored),
+        patch("run_credit_risk_pipeline.build_extrafloat_limit_engine_features",
+              return_value=df_features_dup),
+    ):
+        with pytest.raises(ValueError, match="Duplicate msisdn in engine features"):
+            run_credit_risk_pipeline(
+                transaction_file="dummy.csv",
+                loan_file="dummy.csv",
+                borrower_file="dummy.csv",
+                artifacts_dir=str(tmp_path),
+            )
+
+
+def test_join_raises_on_duplicate_pd_msisdn(tmp_path):
+    """Duplicate agent_msisdn in PD output must raise ValueError before the join."""
+    from run_credit_risk_pipeline import run_credit_risk_pipeline
+
+    n = 4
+    msisdn_list = [f"256700{i:06d}" for i in range(n)]
+    df_features = _minimal_features_df(n=n)
+
+    # PD output with a duplicate agent_msisdn
+    pd_scored_dup = _make_pd_scored(msisdn_list)
+    pd_scored_dup = pd.concat([pd_scored_dup, pd_scored_dup.iloc[[0]]], ignore_index=True)
+
+    with (
+        patch("run_credit_risk_pipeline._check_artifacts"),
+        patch("run_credit_risk_pipeline.pd.read_csv",
+              return_value=pd.DataFrame({"agent_msisdn": msisdn_list})),
+        patch("run_credit_risk_pipeline.load_transaction_capacity_features",
+              return_value=MagicMock()),
+        patch("run_credit_risk_pipeline.load_loan_summary_recent_features",
+              return_value=MagicMock()),
+        patch("run_credit_risk_pipeline.load_borrower_limit_features",
+              return_value=MagicMock()),
+        patch("run_credit_risk_pipeline.run_inference_pipeline",
+              return_value=pd_scored_dup),
+        patch("run_credit_risk_pipeline.build_extrafloat_limit_engine_features",
+              return_value=df_features),
+    ):
+        with pytest.raises(ValueError, match="Duplicate agent_msisdn in PD output"):
+            run_credit_risk_pipeline(
+                transaction_file="dummy.csv",
+                loan_file="dummy.csv",
+                borrower_file="dummy.csv",
+                artifacts_dir=str(tmp_path),
+            )
+
+
+def test_join_raises_on_null_engine_msisdn(tmp_path):
+    """Null msisdn in engine features must raise ValueError before the join."""
+    from run_credit_risk_pipeline import run_credit_risk_pipeline
+
+    n = 4
+    msisdn_list = [f"256700{i:06d}" for i in range(n)]
+    pd_scored = _make_pd_scored(msisdn_list)
+
+    df_features_null = _minimal_features_df(n=n)
+    df_features_null.loc[2, "msisdn"] = None  # inject null
+
+    with (
+        patch("run_credit_risk_pipeline._check_artifacts"),
+        patch("run_credit_risk_pipeline.pd.read_csv",
+              return_value=pd.DataFrame({"agent_msisdn": msisdn_list})),
+        patch("run_credit_risk_pipeline.load_transaction_capacity_features",
+              return_value=MagicMock()),
+        patch("run_credit_risk_pipeline.load_loan_summary_recent_features",
+              return_value=MagicMock()),
+        patch("run_credit_risk_pipeline.load_borrower_limit_features",
+              return_value=MagicMock()),
+        patch("run_credit_risk_pipeline.run_inference_pipeline",
+              return_value=pd_scored),
+        patch("run_credit_risk_pipeline.build_extrafloat_limit_engine_features",
+              return_value=df_features_null),
+    ):
+        with pytest.raises(ValueError, match="null msisdn"):
+            run_credit_risk_pipeline(
+                transaction_file="dummy.csv",
+                loan_file="dummy.csv",
+                borrower_file="dummy.csv",
+                artifacts_dir=str(tmp_path),
+            )
+
+
+def test_msisdn_dot_zero_normalized(tmp_path):
+    """'256700123.0' in the engine must match '256700123' in PD output after normalisation."""
+    from run_credit_risk_pipeline import run_credit_risk_pipeline
+
+    n = 3
+    canonical = [f"256700{i:06d}" for i in range(n)]
+
+    # PD output uses the canonical form
+    pd_scored = _make_pd_scored(canonical)
+
+    # Engine features use the .0-suffix form (common when read from float CSV column)
+    df_features_dot0 = _minimal_features_df(n=n)
+    df_features_dot0["msisdn"] = [f + ".0" for f in canonical]
+
+    with (
+        patch("run_credit_risk_pipeline._check_artifacts"),
+        patch("run_credit_risk_pipeline.pd.read_csv",
+              return_value=pd.DataFrame({"agent_msisdn": canonical})),
+        patch("run_credit_risk_pipeline.load_transaction_capacity_features",
+              return_value=MagicMock()),
+        patch("run_credit_risk_pipeline.load_loan_summary_recent_features",
+              return_value=MagicMock()),
+        patch("run_credit_risk_pipeline.load_borrower_limit_features",
+              return_value=MagicMock()),
+        patch("run_credit_risk_pipeline.run_inference_pipeline",
+              return_value=pd_scored),
+        patch("run_credit_risk_pipeline.build_extrafloat_limit_engine_features",
+              return_value=df_features_dot0),
+    ):
+        result = run_credit_risk_pipeline(
+            transaction_file="dummy.csv",
+            loan_file="dummy.csv",
+            borrower_file="dummy.csv",
+            artifacts_dir=str(tmp_path),
+        )
+
+    # All agents must have cal_pd — normalisation resolved the mismatch
+    assert result["cal_pd"].notna().all(), (
+        "MSISDN .0-suffix normalisation failed: some agents have no cal_pd "
+        "despite matching canonical MSISDNs in PD output"
+    )

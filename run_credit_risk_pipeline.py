@@ -49,10 +49,12 @@ All --*-file arguments accept CSV or tab-delimited text (auto-detected).
 from __future__ import annotations
 
 import argparse
+import datetime as _dt
 import logging
 import sys
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 from extrafloat.engine.extrafloat_limit_engine_features import (
@@ -105,6 +107,11 @@ def _check_artifacts(artifacts_dir: Path) -> None:
             f"      --output-dir  {artifacts_dir}\n\n"
             "Or run:  make train"
         )
+
+
+def _norm_msisdn(s: pd.Series) -> pd.Series:
+    """Normalise MSISDN strings: strip whitespace and remove trailing .0 suffixes."""
+    return s.astype(str).str.strip().str.replace(r"\.0$", "", regex=True)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -201,8 +208,49 @@ def run_credit_risk_pipeline(
     pd_join_cols = [c for c in ["agent_msisdn", "cal_pd", "thin_file_flag"] if c in pd_scored.columns]
     pd_join = pd_scored[pd_join_cols].rename(columns={"agent_msisdn": "msisdn"})
 
+    # Normalise MSISDN on both sides before joining to prevent .0-suffix /
+    # whitespace mismatches that would silently leave agents without cal_pd.
+    features_df["msisdn"] = _norm_msisdn(features_df["msisdn"])
+    pd_join["msisdn"] = _norm_msisdn(pd_join["msisdn"])
+
+    # Guard: null join keys cannot be meaningfully joined.
+    null_engine = features_df["msisdn"].isna().sum()
+    if null_engine > 0:
+        raise ValueError(
+            f"{null_engine} null msisdn values in engine features — cannot join. "
+            "Check load_transaction_capacity_features / build_extrafloat_limit_engine_features."
+        )
+    null_pd = pd_join["msisdn"].isna().sum()
+    if null_pd > 0:
+        logger.warning(
+            "PD output contains %d null agent_msisdn rows — dropping before join", null_pd
+        )
+        pd_join = pd_join.dropna(subset=["msisdn"])
+
+    # Guard: duplicates on either side would silently expand rows (many-to-many).
+    dup_engine = features_df["msisdn"].duplicated().sum()
+    if dup_engine > 0:
+        raise ValueError(
+            f"Duplicate msisdn in engine features ({dup_engine} rows). "
+            "Check build_extrafloat_limit_engine_features for fan-out."
+        )
+    dup_pd = pd_join["msisdn"].duplicated().sum()
+    if dup_pd > 0:
+        raise ValueError(
+            f"Duplicate agent_msisdn in PD output ({dup_pd} rows). "
+            "Check run_inference_pipeline for duplicate agents."
+        )
+
     pre_join = len(features_df)
-    features_df = features_df.merge(pd_join, on="msisdn", how="left")
+    features_df = features_df.merge(pd_join, on="msisdn", how="left", validate="one_to_one")
+
+    # Left join must never expand rows.
+    if len(features_df) != pre_join:
+        raise RuntimeError(
+            f"Stage 4 join expanded rows: pre={pre_join}, post={len(features_df)}. "
+            "Duplicate msisdn values may have bypassed the pre-join checks."
+        )
+
     covered = features_df["cal_pd"].notna().sum()
     logger.info(
         "PD join: %d / %d agents have cal_pd (%.1f%% coverage); "
@@ -225,6 +273,15 @@ def run_credit_risk_pipeline(
         result_df["assigned_limit"].mean() if "assigned_limit" in result_df.columns else float("nan"),
         result_df["risk_tier"].value_counts().to_string() if "risk_tier" in result_df.columns else "n/a",
     )
+
+    # ── Stage 6: Audit columns ─────────────────────────────────────────────
+    # score_source distinguishes legitimate population misses (agents not in
+    # PD output → "7_signal_fallback") from calibration failures that now
+    # propagate as exceptions rather than silent NaN.
+    result_df["score_source"] = np.where(
+        result_df["cal_pd"].notna(), "pd_model", "7_signal_fallback"
+    )
+    result_df["scored_at"] = _dt.datetime.utcnow().isoformat() + "Z"
 
     return result_df
 

@@ -574,19 +574,21 @@ def build_transformed_dataframe(
         axis=1,
     )
 
-    assert df_pd_transformed.columns.is_unique, (
-        "[build_transformed_dataframe] Duplicate columns after concat"
-    )
+    if not df_pd_transformed.columns.is_unique:
+        raise RuntimeError("[build_transformed_dataframe] Duplicate columns after concat")
     leaked = sorted(set(dropped_cols) & set(df_pd_transformed.columns))
-    assert not leaked, (
-        "[build_transformed_dataframe] Dropped numeric cols leaked into output: "
-        + ", ".join(leaked[:20])
-    )
-    assert "agent_msisdn" in df_pd_transformed.columns, (
-        "[build_transformed_dataframe] agent_msisdn missing after transform join"
-    )
-    assert df_pd_transformed["agent_msisdn"].notna().all(), (
-        "[build_transformed_dataframe] agent_msisdn has nulls after transform join"
-    )
+    if leaked:
+        raise RuntimeError(
+            "[build_transformed_dataframe] Dropped numeric cols leaked into output: "
+            + ", ".join(leaked[:20])
+        )
+    if "agent_msisdn" not in df_pd_transformed.columns:
+        raise RuntimeError(
+            "[build_transformed_dataframe] agent_msisdn missing after transform join"
+        )
+    if not df_pd_transformed["agent_msisdn"].notna().all():
+        raise RuntimeError(
+            "[build_transformed_dataframe] agent_msisdn has nulls after transform join"
+        )
 
     return df_pd_transformed, pd_features_pruned, transform_report

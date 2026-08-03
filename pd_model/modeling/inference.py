@@ -267,22 +267,18 @@ def score_new_agents(
             thick_df = thick_df.rename(columns={score_col: feature_config.RAW_SCORE_COL})
             thick_df["bad_state"] = 0  # placeholder — not available at inference time
 
-            try:
-                thick_cal = attach_cal_pd(thick_df, artifacts.cal_map, model_key, cfg=cfg)
-                out.loc[thick_mask, cal_pd_col] = thick_cal[feature_config.CAL_PD_COL].values
+            thick_cal = attach_cal_pd(thick_df, artifacts.cal_map, model_key, cfg=cfg)
+            out.loc[thick_mask, cal_pd_col] = thick_cal[feature_config.CAL_PD_COL].values
 
-                out_thick = add_policy_flags(
-                    out.loc[thick_mask].copy(), thresh, prefix=model_key, cfg=cfg
-                )
-                for col in out_thick.columns:
-                    if col not in out.columns:
-                        out[col] = np.nan
-                    out.loc[thick_mask, col] = out_thick[col].values
-
-            except Exception as exc:
-                logger.warning(
-                    "Calibration failed for model=%s thick-file agents: %s", model_key, exc
-                )
+            # add_policy_flags reads feature_config.CAL_PD_COL ("cal_pd");
+            # inject this model's calibrated PD before calling it.
+            thick_for_flags = out.loc[thick_mask].copy()
+            thick_for_flags[feature_config.CAL_PD_COL] = thick_cal[feature_config.CAL_PD_COL].values
+            out_thick = add_policy_flags(thick_for_flags, thresh, prefix=model_key, cfg=cfg)
+            for col in out_thick.columns:
+                if col not in out.columns:
+                    out[col] = np.nan
+                out.loc[thick_mask, col] = out_thick[col].values
 
     # Thin-file agents: use never_loan_pd_like as PD for both models
     if thin_mask.sum() > 0 and "never_loan_pd_like" in out.columns:
