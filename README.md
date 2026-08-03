@@ -138,7 +138,7 @@ The engine evaluates four independent cap signals and combines them with configu
 Thin-file agents (fewer than 3 lifetime loans) receive higher risk weight because repayment history is sparse. The PD model already handles thin-file conservatism via `never_loan_pd_like`; the experience ramp in the 7-signal fallback path does **not** apply on the `cal_pd` path.
 
 After combining, the engine applies:
-- Risk-tier policy multiplier (tier_1 = 100%, tier_4 = 35%)
+- Risk-tier policy multiplier (tier_1 = 100%, tier_4 = 40%)
 - Agent-tier ceiling (Silver / Gold / Platinum class multipliers)
 - Bank of Uganda regulatory cap: **5,000,000 UGX**
 - Global floor: **0 UGX**

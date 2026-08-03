@@ -172,9 +172,22 @@ def run_pipeline(args: argparse.Namespace) -> None:
     df_pd = add_never_loan_scorecard_from_phase_2_1(df_pd, cfg=cfg)
 
     # ------------------------------------------------------------------ #
-    # 6) Feature classification + transformation
+    # 6) Feature classification + transformation (fit on train only)
     # ------------------------------------------------------------------ #
     logger.info("=== Step 6: Feature classification + transformation ===")
+
+    # Determine the temporal split boundary up-front so winsorization bounds
+    # are fitted on training data only and applied to validation — prevents
+    # validation-distribution leakage into the transform_report saved to disk.
+    train_cutoff = pd.Timestamp(args.train_cutoff)
+    split_mask = pd.to_datetime(df_pd["snapshot_dt"], errors="coerce") <= train_cutoff
+    df_train_raw = df_pd[split_mask].copy()
+    df_val_raw   = df_pd[~split_mask].copy()
+    logger.info(
+        "Pre-transform split: %d train rows / %d val rows (cutoff=%s)",
+        len(df_train_raw), len(df_val_raw), train_cutoff.date(),
+    )
+
     (
         pd_features,
         log_cols,
@@ -182,12 +195,11 @@ def run_pipeline(args: argparse.Namespace) -> None:
         _protected,
         signed_log_cols,
         _excluded_df,
-    ) = get_and_classify_pd_features(df_pd)
+    ) = get_and_classify_pd_features(df_train_raw)
 
-    df_pd_raw = df_pd.copy(deep=True)
-
-    df_pd_transformed, pd_features_pruned, transform_report = build_transformed_dataframe(
-        df_pd,
+    # Fit transformations on training data only
+    df_train_trans, pd_features_pruned, transform_report = build_transformed_dataframe(
+        df_train_raw,
         pd_features=pd_features,
         log_cols=log_cols,
         cap_cols=cap_cols,
@@ -195,11 +207,41 @@ def run_pipeline(args: argparse.Namespace) -> None:
         cfg=cfg,
     )
 
+    # Replay training-fitted params on the validation set so clip bounds and
+    # transform choices are fixed to the training distribution.
+    fitted_params = {
+        row["feature"]: {
+            "action": row["action"],
+            "lo": row.get("lo") if not pd.isna(row.get("lo", float("nan"))) else None,
+            "hi": row.get("hi") if not pd.isna(row.get("hi", float("nan"))) else None,
+        }
+        for _, row in transform_report.iterrows()
+        if pd.notna(row.get("action"))
+    }
+    df_val_trans, _, _ = build_transformed_dataframe(
+        df_val_raw,
+        pd_features=pd_features,
+        log_cols=log_cols,
+        cap_cols=cap_cols,
+        signed_log_cols=signed_log_cols,
+        cfg=cfg,
+        fitted_params=fitted_params,
+    )
+    # Restrict val columns to the training feature set (prune skips features
+    # with fitted_params, so val may have fewer columns than train).
+    val_cols = [c for c in df_train_trans.columns if c in df_val_trans.columns]
+    df_val_trans = df_val_trans[val_cols]
+
+    # Re-combine into the unified frames that prepare_pd_training_and_validation_data
+    # expects; it will re-split internally using the same train_cutoff.
+    df_pd_raw = pd.concat([df_train_raw, df_val_raw], ignore_index=True)
+    df_pd_transformed = pd.concat([df_train_trans, df_val_trans], ignore_index=True)
+
     # ------------------------------------------------------------------ #
     # 7) Train/val split + final data prep
     # ------------------------------------------------------------------ #
     logger.info("=== Step 7: Train/val split ===")
-    train_cutoff = pd.Timestamp(args.train_cutoff)
+    # train_cutoff already defined above
 
     (
         X_train_raw, X_train_trans, y_train,

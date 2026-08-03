@@ -108,7 +108,7 @@ def load_artifacts(artifacts_dir: Path) -> ModelArtifacts:
         try:
             import json as _json
             meta = _json.loads(meta_path.read_text())
-            if meta:
+            if meta and not meta.get("_comment"):
                 champion_key = meta.get("champion", "xgb")
                 logger.info(
                     "Model lineage: trained_at=%s | git=%s | champion=%s | auc=%.4f",
@@ -117,8 +117,12 @@ def load_artifacts(artifacts_dir: Path) -> ModelArtifacts:
                     champion_key,
                     meta.get(f"{champion_key}_val_auc") or float("nan"),
                 )
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(
+                f"[load_artifacts] model_metadata.json contains invalid JSON: {exc}"
+            ) from exc
         except Exception:
-            pass  # metadata is informational; don't block inference on parse errors
+            pass  # file-read edge cases only; structural errors caught above
 
     return ModelArtifacts(
         xgb_model=xgb_model,

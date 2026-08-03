@@ -394,11 +394,15 @@ def test_preflight_raises_on_missing_artifacts(tmp_path):
 
 
 def test_preflight_passes_when_all_artifacts_present(tmp_path):
+    import json as _json
     from run_credit_risk_pipeline import _check_artifacts, _REQUIRED_ARTIFACTS
 
-    # Create all required artifact files (empty is fine — preflight only checks existence)
     for fname in _REQUIRED_ARTIFACTS:
-        (tmp_path / fname).touch()
+        if fname == "model_metadata.json":
+            # Empty checksums → warning + early return, no error
+            (tmp_path / fname).write_text(_json.dumps({}))
+        else:
+            (tmp_path / fname).touch()
 
     # Should complete without raising
     _check_artifacts(tmp_path)
@@ -652,8 +656,9 @@ def test_join_raises_on_duplicate_pd_msisdn(tmp_path):
             )
 
 
-def test_join_raises_on_null_engine_msisdn(tmp_path):
-    """Null msisdn in engine features must raise ValueError before the join."""
+@pytest.mark.parametrize("null_value", [None, np.nan, "None", "none", "nan"])
+def test_join_raises_on_null_engine_msisdn(tmp_path, null_value):
+    """Null msisdn in engine features (None, np.nan, or sentinel strings) raises ValueError."""
     from run_credit_risk_pipeline import run_credit_risk_pipeline
 
     n = 4
@@ -661,7 +666,7 @@ def test_join_raises_on_null_engine_msisdn(tmp_path):
     pd_scored = _make_pd_scored(msisdn_list)
 
     df_features_null = _minimal_features_df(n=n)
-    df_features_null.loc[2, "msisdn"] = None  # inject null
+    df_features_null.loc[2, "msisdn"] = null_value
 
     with (
         patch("run_credit_risk_pipeline._check_artifacts"),
@@ -727,4 +732,72 @@ def test_msisdn_dot_zero_normalized(tmp_path):
     assert result["cal_pd"].notna().all(), (
         "MSISDN .0-suffix normalisation failed: some agents have no cal_pd "
         "despite matching canonical MSISDNs in PD output"
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Checksum integrity tests (NF2)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_checksum_passes_with_valid_artifacts(tmp_path):
+    """_check_artifacts does not raise when all stored checksums match."""
+    import hashlib
+    import json as _json
+    from run_credit_risk_pipeline import _check_artifacts, _REQUIRED_ARTIFACTS
+
+    artifact_hashes = {}
+    for fname in _REQUIRED_ARTIFACTS:
+        if fname == "model_metadata.json":
+            continue
+        fpath = tmp_path / fname
+        fpath.write_bytes(b"dummy content for " + fname.encode())
+        artifact_hashes[fname] = hashlib.sha256(fpath.read_bytes()).hexdigest()
+
+    meta = {"artifact_sha256": artifact_hashes}
+    (tmp_path / "model_metadata.json").write_text(_json.dumps(meta))
+
+    _check_artifacts(tmp_path)  # must not raise
+
+
+def test_checksum_mismatch_raises_on_preflight(tmp_path):
+    """_check_artifacts raises RuntimeError when a stored checksum does not match."""
+    import hashlib
+    import json as _json
+    from run_credit_risk_pipeline import _check_artifacts, _REQUIRED_ARTIFACTS
+
+    artifact_hashes = {}
+    for fname in _REQUIRED_ARTIFACTS:
+        if fname == "model_metadata.json":
+            continue
+        fpath = tmp_path / fname
+        fpath.write_bytes(b"original content")
+        artifact_hashes[fname] = hashlib.sha256(fpath.read_bytes()).hexdigest()
+
+    # Corrupt one artifact after hashing
+    (tmp_path / "xgb_model.joblib").write_bytes(b"corrupted content")
+
+    meta = {"artifact_sha256": artifact_hashes}
+    (tmp_path / "model_metadata.json").write_text(_json.dumps(meta))
+
+    with pytest.raises(RuntimeError, match="checksum mismatch"):
+        _check_artifacts(tmp_path)
+
+
+def test_preflight_warns_when_no_checksums_stored(tmp_path, caplog):
+    """_check_artifacts emits a warning but does not raise when artifact_sha256 is absent."""
+    import json as _json
+    import logging
+    from run_credit_risk_pipeline import _check_artifacts, _REQUIRED_ARTIFACTS
+
+    for fname in _REQUIRED_ARTIFACTS:
+        if fname == "model_metadata.json":
+            (tmp_path / fname).write_text(_json.dumps({}))
+        else:
+            (tmp_path / fname).touch()
+
+    with caplog.at_level(logging.WARNING, logger="credit_risk_pipeline"):
+        _check_artifacts(tmp_path)  # must not raise
+
+    assert any("no artifact_sha256 checksums" in r.message for r in caplog.records), (
+        "Expected a warning about missing checksums"
     )

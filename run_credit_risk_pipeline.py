@@ -50,6 +50,8 @@ from __future__ import annotations
 
 import argparse
 import datetime as _dt
+import hashlib
+import json
 import logging
 import sys
 from pathlib import Path
@@ -84,16 +86,23 @@ _REQUIRED_ARTIFACTS = [
     "xgb_policy_thresholds.csv",
     "lgb_policy_thresholds.csv",
     "transform_report.csv",
+    "model_metadata.json",
 ]
 
 
 def _check_artifacts(artifacts_dir: Path) -> None:
     """
-    Raise FileNotFoundError early if any required PD model artifact is missing.
+    Raise FileNotFoundError early if any required PD model artifact is missing,
+    then verify sha256 checksums against the values stored in model_metadata.json.
 
     Called before run_inference_pipeline() so failures surface with a clear
     message and the exact training command, rather than crashing deep inside
     load_artifacts() with a generic FileNotFoundError.
+
+    When model_metadata.json contains no artifact_sha256 entries (e.g. the
+    placeholder committed pre-training), checksum verification is skipped with
+    a warning rather than a hard failure — this allows the test suite and fresh
+    clones to proceed without trained artifacts.
     """
     missing = [f for f in _REQUIRED_ARTIFACTS if not (artifacts_dir / f).exists()]
     if missing:
@@ -108,10 +117,53 @@ def _check_artifacts(artifacts_dir: Path) -> None:
             "Or run:  make train"
         )
 
+    # Verify sha256 checksums if model_metadata.json contains them.
+    meta_path = artifacts_dir / "model_metadata.json"
+    try:
+        meta = json.loads(meta_path.read_text())
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(
+            f"[preflight] model_metadata.json is present but contains invalid JSON: {exc}\n"
+            "Re-train to regenerate a valid metadata file."
+        ) from exc
+
+    stored_hashes = meta.get("artifact_sha256", {})
+    if not stored_hashes:
+        logger.warning(
+            "[preflight] model_metadata.json contains no artifact_sha256 checksums — "
+            "skipping integrity verification. Re-train to generate checksums."
+        )
+        return
+
+    mismatches = []
+    for fname in _REQUIRED_ARTIFACTS:
+        if fname == "model_metadata.json":
+            continue
+        if fname not in stored_hashes:
+            logger.warning("[preflight] No stored checksum for %s — skipping", fname)
+            continue
+        actual = hashlib.sha256((artifacts_dir / fname).read_bytes()).hexdigest()
+        if actual != stored_hashes[fname]:
+            mismatches.append(fname)
+
+    if mismatches:
+        raise RuntimeError(
+            f"[preflight] Artifact checksum mismatch for: {', '.join(mismatches)}\n"
+            "Artifacts may be corrupted, partially copied, or from a different training run.\n"
+            "Re-train or restore from backup."
+        )
+
 
 def _norm_msisdn(s: pd.Series) -> pd.Series:
-    """Normalise MSISDN strings: strip whitespace and remove trailing .0 suffixes."""
-    return s.astype(str).str.strip().str.replace(r"\.0$", "", regex=True)
+    """Normalise MSISDN strings: strip whitespace and remove trailing .0 suffixes.
+
+    Uses StringDtype so pd.NA is preserved through chained str operations,
+    keeping isna() accurate after normalisation.  Values that stringify to
+    known null sentinels ("nan", "none", "<na>", "") are also masked to NA
+    so the null-key guard catches them correctly.
+    """
+    out = s.astype("string").str.strip().str.replace(r"\.0$", "", regex=True)
+    return out.mask(out.str.lower().isin({"", "nan", "none", "<na>"}))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
