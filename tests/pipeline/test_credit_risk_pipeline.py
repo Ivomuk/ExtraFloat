@@ -402,3 +402,55 @@ def test_preflight_passes_when_all_artifacts_present(tmp_path):
 
     # Should complete without raising
     _check_artifacts(tmp_path)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 8. pd_decile — population-relative risk rank from cal_pd
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_pd_decile_computed_when_cal_pd_present():
+    """pd_decile (1–10) is present and correctly ordered when cal_pd is available."""
+    from extrafloat.engine.extrafloat_limit_engine_caps import apply_policy_adjustments
+
+    n = 50
+    rng = np.random.default_rng(42)
+    df = _minimal_features_df(n=n, seed=42)
+    df["cal_pd"] = rng.uniform(0.01, 0.95, n)
+    # Build a risk_score column so apply_policy_adjustments can find it
+    df["risk_score"] = 1.0 - df["cal_pd"]
+    df["combined_cap"] = rng.uniform(100_000, 2_000_000, n)
+    df["agent_profile"] = "Gold"
+
+    result = apply_policy_adjustments(df)
+
+    assert "pd_decile" in result.columns, "pd_decile must be in output"
+    assert result["pd_decile"].notna().all(), "all rows should have pd_decile when cal_pd is fully present"
+
+    d1_median = result.loc[result["pd_decile"] == 1, "cal_pd"].median()
+    d10_median = result.loc[result["pd_decile"] == 10, "cal_pd"].median()
+    assert d1_median < d10_median, "decile 1 (lowest risk) must have lower cal_pd than decile 10"
+
+
+def test_pd_decile_nan_when_cal_pd_absent():
+    """pd_decile is NA for all agents when cal_pd is not present (7-signal fallback)."""
+    from extrafloat.engine.extrafloat_limit_engine_caps import apply_policy_adjustments
+
+    n = 20
+    rng = np.random.default_rng(7)
+    df = _minimal_features_df(n=n, seed=7)
+    # Provide risk_score directly (no cal_pd — simulates 7-signal path)
+    df["risk_score"] = rng.uniform(0.1, 0.9, n)
+    df["combined_cap"] = rng.uniform(100_000, 2_000_000, n)
+    df["agent_profile"] = "Gold"
+    # Ensure cal_pd is absent
+    assert "cal_pd" not in df.columns
+
+    result = apply_policy_adjustments(df)
+
+    assert "pd_decile" in result.columns, "pd_decile column must still be present"
+    assert result["pd_decile"].isna().all(), "pd_decile must be NA on the 7-signal path"
+
+
+def test_pd_decile_in_final_output_columns():
+    """pd_decile survives keep_intermediate=False trimming."""
+    assert "pd_decile" in FINAL_OUTPUT_COLUMNS

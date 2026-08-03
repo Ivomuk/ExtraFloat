@@ -118,6 +118,7 @@ python run_credit_risk_pipeline.py \
 | `policy_reason` | string | Policy-stage reason (tier assignment, floor override, regulatory cap) |
 | `combined_reason` | string | Combination-stage reason (weighting scheme applied) |
 | `combined_top_driver` | string | Which cap was the binding constraint |
+| `pd_decile` | int 1–10 \| NA | Population-relative risk rank from `cal_pd` (1 = lowest risk, 10 = highest). NA for agents on the 7-signal fallback. |
 
 See `docs/engine_output_data_dictionary.md` for the full column reference and reason code catalogue.
 
@@ -252,4 +253,5 @@ result = run_credit_risk_pipeline(
 ## Known limitations
 
 - **Risk tier thresholds are not yet calibrated.** The current thresholds (tier_1: cal_pd < 0.15, tier_2: < 0.40, tier_3: < 0.65) were set before the PD model was trained. They should be recalibrated against `pd_calibration_map.csv` once the model has been trained on production data, aligning cut-points with observed default rate step-changes.
+- **`pd_decile` uses dynamic (per-run) quantile cuts.** Decile boundaries are recomputed from each scoring batch, so an agent's decile can shift as the population mix changes. Once `pd_calibration_map.csv` is available, freeze the boundaries to training-derived thresholds for production consistency.
 - **Cap blend weights were designed for the 7-signal fallback.** With `cal_pd` now driving the risk cap, the 20% risk weight may underweight the PD signal. Consider increasing it at the expense of capacity weight once live performance is available.

@@ -1535,6 +1535,20 @@ def apply_policy_adjustments(features_df, config=None):
     )
 
     df["risk_tier"] = risk_tier
+
+    # pd_decile: population-relative score rank (1=lowest risk, 10=highest risk).
+    # Only meaningful on the cal_pd path; NaN for agents on the 7-signal fallback.
+    if "cal_pd" in df.columns and df["cal_pd"].notna().any():
+        cal_pd_s = _safe_series(df, "cal_pd", np.nan)
+        has_pd = cal_pd_s.notna()
+        df["pd_decile"] = pd.array([pd.NA] * len(df), dtype="Int64")
+        if has_pd.any():
+            df.loc[has_pd, "pd_decile"] = (
+                pd.qcut(cal_pd_s[has_pd], q=10, labels=False, duplicates="drop") + 1
+            ).astype("Int64")
+    else:
+        df["pd_decile"] = pd.array([pd.NA] * len(df), dtype="Int64")
+
     df["policy_multiplier"] = tier_multiplier
     df["is_proven_good_borrower"] = proven_good_mask.astype(int)
     df["proven_good_floor"] = proven_good_floor

@@ -57,6 +57,7 @@ FINAL_OUTPUT_COLUMNS = [
     "combined_top_driver",
     "risk_tier",
     "cal_pd",
+    "pd_decile",
 ]
 
 
