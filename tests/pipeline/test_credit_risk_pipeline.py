@@ -259,16 +259,15 @@ def test_pipeline_produces_required_output_columns(tmp_path):
     df_features = _minimal_features_df(n=n)
     pd_scored   = _make_pd_scored(msisdn_list)
 
-    # Synthetic agent profile snapshot (pd_model_file) — schema the PD model expects.
-    df_agent_profile = pd.DataFrame({
+    df_raw = pd.DataFrame({
         "agent_msisdn": msisdn_list,
-        "commission":   np.random.default_rng(0).uniform(1e4, 1e5, n),
+        "commission":      np.random.default_rng(0).uniform(1e4, 1e5, n),
         "account_balance": np.random.default_rng(1).uniform(1e5, 5e6, n),
     })
 
     with (
         patch("run_credit_risk_pipeline._check_artifacts"),
-        patch("run_credit_risk_pipeline.pd.read_csv", return_value=df_agent_profile),
+        patch("run_credit_risk_pipeline.pd.read_csv", return_value=df_raw),
         patch("run_credit_risk_pipeline.load_transaction_capacity_features") as mock_txn,
         patch("run_credit_risk_pipeline.load_loan_summary_recent_features")  as mock_loan,
         patch("run_credit_risk_pipeline.load_borrower_limit_features")       as mock_bor,
@@ -281,7 +280,6 @@ def test_pipeline_produces_required_output_columns(tmp_path):
         mock_bor.return_value  = MagicMock()
 
         result = run_credit_risk_pipeline(
-            pd_model_file="dummy_agent_profile.csv",
             transaction_file="dummy_txn.csv",
             loan_file="dummy_loan.csv",
             borrower_file="dummy_bor.csv",
@@ -294,17 +292,19 @@ def test_pipeline_produces_required_output_columns(tmp_path):
     assert len(result) == n
 
 
-def test_pd_model_file_is_separate_from_transaction_file(tmp_path):
-    """run_inference_pipeline must receive df_agent (pd_model_file), not df_txn."""
+def test_inference_receives_raw_data_with_agent_msisdn(tmp_path):
+    """run_inference_pipeline must receive the raw CSV (agent_msisdn key),
+    not the engine-loader output where the key has been renamed to msisdn."""
     from run_credit_risk_pipeline import run_credit_risk_pipeline
 
     n = 4
-    msisdn_list  = [f"256700{i:06d}" for i in range(n)]
-    df_features  = _minimal_features_df(n=n)
-    pd_scored    = _make_pd_scored(msisdn_list)
+    msisdn_list = [f"256700{i:06d}" for i in range(n)]
+    df_features = _minimal_features_df(n=n)
+    pd_scored   = _make_pd_scored(msisdn_list)
 
-    sentinel_agent = pd.DataFrame({"agent_msisdn": msisdn_list, "marker": ["agent_profile"] * n})
-    sentinel_txn   = pd.DataFrame({"msisdn": msisdn_list, "marker": ["txn_capacity"] * n})
+    # Raw read returns agent_msisdn; loader returns msisdn (engine rename)
+    raw_df    = pd.DataFrame({"agent_msisdn": msisdn_list, "commission": [1.0] * n})
+    engine_df = pd.DataFrame({"msisdn":       msisdn_list, "commission": [1.0] * n})
 
     captured = {}
 
@@ -314,9 +314,9 @@ def test_pd_model_file_is_separate_from_transaction_file(tmp_path):
 
     with (
         patch("run_credit_risk_pipeline._check_artifacts"),
-        patch("run_credit_risk_pipeline.pd.read_csv", return_value=sentinel_agent),
+        patch("run_credit_risk_pipeline.pd.read_csv", return_value=raw_df),
         patch("run_credit_risk_pipeline.load_transaction_capacity_features",
-              return_value=sentinel_txn),
+              return_value=engine_df),
         patch("run_credit_risk_pipeline.load_loan_summary_recent_features",  return_value=MagicMock()),
         patch("run_credit_risk_pipeline.load_borrower_limit_features",        return_value=MagicMock()),
         patch("run_credit_risk_pipeline.run_inference_pipeline", side_effect=capture_inference),
@@ -324,18 +324,17 @@ def test_pd_model_file_is_separate_from_transaction_file(tmp_path):
               return_value=df_features),
     ):
         run_credit_risk_pipeline(
-            pd_model_file="dummy_agent_profile.csv",
             transaction_file="dummy_txn.csv",
             loan_file="dummy_loan.csv",
             borrower_file="dummy_bor.csv",
             artifacts_dir=str(tmp_path),
         )
 
-    assert "marker" in captured["df_raw"].columns
-    assert (captured["df_raw"]["marker"] == "agent_profile").all(), (
-        "run_inference_pipeline must receive the agent profile DataFrame "
-        "(pd_model_file), not the transaction capacity DataFrame"
+    assert "agent_msisdn" in captured["df_raw"].columns, (
+        "run_inference_pipeline must receive the raw DataFrame with agent_msisdn, "
+        "not the engine-loader version where the key is renamed to msisdn"
     )
+    assert "msisdn" not in captured["df_raw"].columns
 
 
 # ─────────────────────────────────────────────────────────────────────────────

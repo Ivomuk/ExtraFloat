@@ -5,28 +5,21 @@ End-to-end CreditRisk pipeline: PD model → credit limit engine.
 
 Pipeline stages
 ---------------
-1. Load four input files (one for the PD model, three for the engine).
+1. Load three input files (transaction, loan, borrower).
 2. Run the PD model inference pipeline → cal_pd per agent.
-3. Build engine features from the three engine CSVs.
+3. Build engine features from the three CSVs.
 4. Join cal_pd onto the engine features DataFrame (on agent_msisdn / msisdn).
 5. Run the credit limit engine → assigned_limit + risk_tier + cal_pd per agent.
 6. Optionally write the result to a CSV.
 
 Input files
 -----------
-The PD model and credit limit engine draw from different source tables and
-require separate input files:
-
-``--pd-model-file``
-    Agent profile snapshot — broad MTN MoMo agent behavioural features:
-    commission, account_balance, cash_in/out volumes, customer counts,
-    activation_dt, date_of_birth, etc.  Fed to PD model Phase 2.1 feature
-    engineering (``run_phase_2_1_richer_tx_behaviour``).
-
 ``--transaction-file``
-    XtraFloat transaction capacity aggregations — avg_balance_30d/90d,
-    net_cashflow_30d/90d, txn_count_30d/90d, payments_in_30d/90d, etc.
-    Fed to the engine's capacity cap.
+    Agent profile snapshot — MTN MoMo agent behavioural features:
+    commission, account_balance, cash_in/out volumes, customer counts, etc.
+    Read twice: once raw (agent_msisdn key) for PD model Phase 2.1 feature
+    engineering, and once via the capacity loader (renamed to msisdn) for
+    the engine's capacity cap.
 
 ``--loan-file``
     XtraFloat loan summary — disbursement/repayment volumes and penalty
@@ -42,8 +35,7 @@ Usage
 ::
 
     python run_credit_risk_pipeline.py \\
-        --pd-model-file     data/agent_profile_snapshot.csv \\
-        --transaction-file  data/transaction_capacity.csv \\
+        --transaction-file  data/agent_profile_snapshot.csv \\
         --loan-file         data/loan_summary.csv \\
         --borrower-file     data/borrower_credit.csv \\
         --artifacts-dir     pd_model/artifacts/ \\
@@ -120,7 +112,6 @@ def _check_artifacts(artifacts_dir: Path) -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def run_credit_risk_pipeline(
-    pd_model_file: str | Path,
     transaction_file: str | Path,
     loan_file: str | Path,
     borrower_file: str | Path,
@@ -135,13 +126,11 @@ def run_credit_risk_pipeline(
 
     Parameters
     ----------
-    pd_model_file    : agent profile snapshot CSV — broad MTN MoMo behavioural
-                       features (commission, account_balance, cash_in/out,
-                       customer counts, activation_dt, date_of_birth, …).
-                       Fed to PD model Phase 2.1 feature engineering.
-    transaction_file : XtraFloat transaction capacity CSV — avg_balance_30d/90d,
-                       net_cashflow_30d/90d, txn_count_30d/90d, etc.
-                       Fed to the engine capacity cap.
+    transaction_file : Agent profile snapshot CSV — MTN MoMo behavioural features
+                       (commission, account_balance, cash_in/out, customer counts, …).
+                       Read twice from the same path:
+                         - raw (agent_msisdn key) → PD model Phase 2.1 feature engineering
+                         - via capacity loader (msisdn key) → engine capacity cap
     loan_file        : XtraFloat loan summary CSV — disbursement/repayment
                        volumes and penalty counts over 1m/3m windows.
                        Fed to the engine recent usage cap.
@@ -166,12 +155,14 @@ def run_credit_risk_pipeline(
 
     # ── Stage 1: Load raw data ──────────────────────────────────────────────
     logger.info("Stage 1: loading raw data")
-    df_agent    = pd.read_csv(pd_model_file, sep=None, engine="python")
+    # Raw read preserves agent_msisdn — required by PD model Phase 2.1
+    df_agent    = pd.read_csv(transaction_file, sep=None, engine="python")
+    # Loader renames agent_msisdn → msisdn for the engine
     df_txn      = load_transaction_capacity_features(transaction_file)
     df_loan     = load_loan_summary_recent_features(loan_file)
     df_borrower = load_borrower_limit_features(borrower_file)
     logger.info(
-        "Loaded — pd_model: %d rows | txn: %d rows | loan: %d rows | borrower: %d rows",
+        "Loaded — agents: %d rows | txn: %d rows | loan: %d rows | borrower: %d rows",
         len(df_agent), len(df_txn), len(df_loan), len(df_borrower),
     )
 
@@ -181,9 +172,6 @@ def run_credit_risk_pipeline(
         logger.info("Repayment file loaded: %d rows", len(repayment_df))
 
     # ── Stage 2: PD model scoring ───────────────────────────────────────────
-    # df_agent is the broad MTN MoMo agent profile snapshot (commission,
-    # account_balance, cash_in/out volumes, customer counts, etc.) — the
-    # schema the PD model's Phase 2.1 feature engineering expects.
     logger.info("Stage 2: running PD model inference (champion=%s)", champion)
     _check_artifacts(artifacts_dir)
     pd_scored = run_inference_pipeline(
@@ -250,10 +238,8 @@ def _parse_args(argv=None):
         description="CreditRisk pipeline: PD model → credit limit engine",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    p.add_argument("--pd-model-file",     required=True,
-                   help="Agent profile snapshot CSV (broad MTN MoMo behavioural features for PD model)")
     p.add_argument("--transaction-file",  required=True,
-                   help="XtraFloat transaction capacity CSV (engine capacity cap)")
+                   help="Agent profile snapshot CSV — read raw for PD model, via loader for engine capacity cap")
     p.add_argument("--loan-file",         required=True,
                    help="XtraFloat loan summary CSV (engine recent usage cap)")
     p.add_argument("--borrower-file",     required=True,
@@ -274,7 +260,6 @@ def main(argv=None):
     args = _parse_args(argv)
 
     result = run_credit_risk_pipeline(
-        pd_model_file=args.pd_model_file,
         transaction_file=args.transaction_file,
         loan_file=args.loan_file,
         borrower_file=args.borrower_file,

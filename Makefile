@@ -20,8 +20,7 @@ TRAIN_CUTOFF     ?= 2025-08-31
 ARTIFACTS_DIR    ?= pd_model/artifacts
 CHAMPION         ?= xgb
 
-PD_MODEL_FILE    ?= data/agent_profile_snapshot.csv
-TRANSACTION_FILE ?= data/transaction_capacity.csv
+TRANSACTION_FILE ?= data/agent_profile_snapshot.csv
 LOAN_FILE        ?= data/loan_summary.csv
 BORROWER_FILE    ?= data/borrower_credit.csv
 OUTPUT           ?= output/credit_risk_output.csv
@@ -45,7 +44,6 @@ train:
 # ── Phase 2: Run the credit risk pipeline ───────────────────────────────────
 run: check-artifacts
 	python run_credit_risk_pipeline.py \
-		--pd-model-file     $(PD_MODEL_FILE) \
 		--transaction-file  $(TRANSACTION_FILE) \
 		--loan-file         $(LOAN_FILE) \
 		--borrower-file     $(BORROWER_FILE) \
@@ -83,6 +81,6 @@ help:
 	@echo "  TRAIN            Training snapshot CSV  (default: $(TRAIN))"
 	@echo "  VAL              Validation snapshot CSV (default: $(VAL))"
 	@echo "  ARTIFACTS_DIR    Model artifacts dir     (default: $(ARTIFACTS_DIR))"
-	@echo "  PD_MODEL_FILE    Agent profile snapshot  (default: $(PD_MODEL_FILE))"
+	@echo "  TRANSACTION_FILE Agent profile snapshot  (default: $(TRANSACTION_FILE))"
 	@echo "  OUTPUT           Pipeline output CSV     (default: $(OUTPUT))"
 	@echo ""
