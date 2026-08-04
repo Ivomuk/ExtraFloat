@@ -17,11 +17,14 @@ Covers all 10 requested test scenarios:
   10. End-to-end: features → caps → assigned_limit sensible values
 """
 
+from copy import deepcopy
+
 import pandas as pd
 import pytest
 
 from extrafloat.engine.extrafloat_limit_engine_caps import (
     DEFAULT_CAP_CONFIG,
+    _validate_config,
     apply_policy_adjustments,
     combine_caps,
     compute_capacity_cap,
@@ -35,6 +38,7 @@ from extrafloat.engine.extrafloat_limit_engine_features import (
     prepare_transaction_capacity_features,
 )
 from extrafloat.engine.run_extrafloat_limit_engine import run_extrafloat_limit_engine
+from pd_model.exceptions import PolicyConfigurationError
 
 _THIN_FILE_THRESHOLD = DEFAULT_CAP_CONFIG.get("combination", {}).get("thin_file_threshold", 3)
 
@@ -750,3 +754,27 @@ def test_run_extrafloat_limit_engine_end_to_end():
     assert float(assigned.iloc[0]) > 0, (
         "Healthy borrower with realistic signals should get assigned_limit > 0"
     )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# _validate_config — PolicyConfigurationError
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_invalid_tier_thresholds_raise_policy_error():
+    cfg = deepcopy(DEFAULT_CAP_CONFIG)
+    # tier_2 > tier_1 violates the strictly-decreasing invariant
+    cfg["policy"]["risk_tier_1_score_min"] = 0.50
+    cfg["policy"]["risk_tier_2_score_min"] = 0.60
+
+    with pytest.raises(PolicyConfigurationError):
+        _validate_config(cfg)
+
+
+def test_invalid_combination_weights_raise_policy_error():
+    cfg = deepcopy(DEFAULT_CAP_CONFIG)
+    # raise risk_weight so total = 1.40 instead of 1.0
+    cfg["combination"]["risk_weight"] = 0.90
+
+    with pytest.raises(PolicyConfigurationError):
+        _validate_config(cfg)

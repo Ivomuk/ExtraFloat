@@ -56,6 +56,15 @@ class ArtifactVerificationError(CreditRiskError, RuntimeError):
     """
 
 
+class MissingArtifactError(ArtifactVerificationError, FileNotFoundError):
+    """Raised when a required artifact file is absent.
+
+    Inherits from both ArtifactVerificationError and FileNotFoundError so
+    callers can catch all artifact problems via ArtifactVerificationError alone,
+    or use FileNotFoundError for standard OS-level checks.
+    """
+
+
 class CalibrationError(CreditRiskError, RuntimeError):
     """Raised when the calibration map is missing, corrupt, or produces invalid output.
 

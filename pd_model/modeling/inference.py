@@ -27,7 +27,7 @@ import pandas as pd
 
 from pd_model.config import feature_config
 from pd_model.config.model_config import DEFAULT_CONFIG, ModelConfig
-from pd_model.exceptions import ArtifactVerificationError, SchemaValidationError
+from pd_model.exceptions import ArtifactVerificationError, MissingArtifactError, SchemaValidationError
 from pd_model.logging_config import get_logger
 from pd_model.modeling.calibration import add_policy_flags, attach_cal_pd, make_policy_bucket
 from pd_model.modeling.explainability import build_adverse_action_df, compute_shap_values
@@ -80,7 +80,7 @@ def load_artifacts(artifacts_dir: Path) -> ModelArtifacts:
     def _require(fname: str) -> Path:
         p = artifacts_dir / fname
         if not p.exists():
-            raise FileNotFoundError(
+            raise MissingArtifactError(
                 f"[load_artifacts] Required artifact not found: {p}\n"
                 "Run the full training pipeline first to generate all artifacts."
             )

@@ -137,8 +137,13 @@ def build_pd_calibration_map(
     df = df.sort_values("model_score").reset_index(drop=True)
     try:
         df["bin"] = pd.qcut(df["model_score"], q=cfg.cal_n_bins, labels=False, duplicates="drop")
-    except Exception:
-        df["bin"] = pd.qcut(df["model_score"], q=20, labels=False, duplicates="drop")
+    except ValueError:
+        try:
+            df["bin"] = pd.qcut(df["model_score"], q=20, labels=False, duplicates="drop")
+        except ValueError as exc:
+            raise CalibrationError(
+                f"[build_pd_calibration_map] Unable to form calibration bins for model '{model_key}'"
+            ) from exc
 
     bin_tbl = (
         df.groupby("bin", as_index=False)
