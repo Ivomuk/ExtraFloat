@@ -28,14 +28,6 @@ class TestPIIRedactingFilter:
         assert "256701234567" not in r.getMessage()
         assert "[MSISDN]" in r.getMessage()
 
-    def test_kenya_international_redacted(self):
-        # Kenya country code 254 was NOT matched by the old regex — regression guard.
-        f = PIIRedactingFilter()
-        r = _make_record("agent %s", ("254712345678",))
-        f.filter(r)
-        assert "254712345678" not in r.getMessage()
-        assert "[MSISDN]" in r.getMessage()
-
     def test_plus_prefix_international_redacted(self):
         f = PIIRedactingFilter()
         r = _make_record("+256701234567 processed")
@@ -74,19 +66,19 @@ class TestPIIRedactingFilter:
 
     def test_multiple_msisdns_in_one_message(self):
         f = PIIRedactingFilter()
-        r = _make_record("from=%s to=%s", ("256701234567", "254712345678"))
+        r = _make_record("from=%s to=%s", ("256701234567", "0712345678"))
         f.filter(r)
         msg = r.getMessage()
         assert "256701234567" not in msg
-        assert "254712345678" not in msg
+        assert "0712345678" not in msg
         assert msg.count("[MSISDN]") == 2
 
-    def test_non_msisdn_254_prefix_not_redacted(self):
-        # A short number starting with 254 that is not a valid MSISDN (too few digits)
+    def test_kenya_format_not_redacted(self):
+        # This pipeline is Uganda-only; Kenyan 254 numbers are not in scope.
         f = PIIRedactingFilter()
-        r = _make_record("code %s", ("2541",))
+        r = _make_record("ref %s", ("254712345678",))
         f.filter(r)
-        assert "2541" in r.getMessage()
+        assert "254712345678" in r.getMessage()
 
 
 class TestInstallPiiFilter:

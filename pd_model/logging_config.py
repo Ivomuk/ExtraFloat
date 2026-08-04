@@ -17,9 +17,9 @@ import sys
 _LOG_FORMAT = "%(asctime)s | %(name)s | %(levelname)-8s | %(message)s"
 _DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 
-# Matches Uganda (+256) and Kenya (+254) international format with optional
-# leading +, and the local 07xxxxxxxx format used in both markets.
-_MSISDN_RE = re.compile(r"\b(?:\+?25[46]\d{9}|07\d{8})\b")
+# Uganda MSISDN formats: international (256xxxxxxxxx, optional leading +)
+# and local mobile (07xxxxxxxx).
+_MSISDN_RE = re.compile(r"\b(?:\+?256\d{9}|07\d{8})\b")
 
 
 class PIIRedactingFilter(logging.Filter):
@@ -28,10 +28,9 @@ class PIIRedactingFilter(logging.Filter):
     Enforces as a structural guarantee what is currently informal practice:
     no individual phone numbers appear in log output, even as the codebase evolves.
 
-    Covered formats:
-    - Uganda international: 256xxxxxxxxx or +256xxxxxxxxx
-    - Kenya international:  254xxxxxxxxx or +254xxxxxxxxx
-    - Local 0-prefix:       07xxxxxxxx (Uganda/Kenya mobile)
+    Covered formats (Uganda):
+    - International: 256xxxxxxxxx or +256xxxxxxxxx
+    - Local 0-prefix: 07xxxxxxxx
     """
 
     def filter(self, record: logging.LogRecord) -> bool:
