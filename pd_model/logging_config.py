@@ -17,10 +17,9 @@ import sys
 _LOG_FORMAT = "%(asctime)s | %(name)s | %(levelname)-8s | %(message)s"
 _DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 
-# Uganda/Kenya MSISDN pattern: 25[67] followed by 8–9 digits.
-# Matches both local (07xx) and international (2567xx) formats that may
-# appear if a raw MSISDN is accidentally interpolated into a log message.
-_MSISDN_RE = re.compile(r"\b25[67]\d{8,9}\b")
+# Matches Uganda (+256) and Kenya (+254) international format with optional
+# leading +, and the local 07xxxxxxxx format used in both markets.
+_MSISDN_RE = re.compile(r"\b(?:\+?25[46]\d{9}|07\d{8})\b")
 
 
 class PIIRedactingFilter(logging.Filter):
@@ -28,13 +27,17 @@ class PIIRedactingFilter(logging.Filter):
 
     Enforces as a structural guarantee what is currently informal practice:
     no individual phone numbers appear in log output, even as the codebase evolves.
+
+    Covered formats:
+    - Uganda international: 256xxxxxxxxx or +256xxxxxxxxx
+    - Kenya international:  254xxxxxxxxx or +254xxxxxxxxx
+    - Local 0-prefix:       07xxxxxxxx (Uganda/Kenya mobile)
     """
 
     def filter(self, record: logging.LogRecord) -> bool:
-        record.msg = _MSISDN_RE.sub("[MSISDN]", str(record.msg))
-        record.args = tuple(
-            _MSISDN_RE.sub("[MSISDN]", str(a)) if isinstance(a, str) else a for a in (record.args or ())
-        )
+        # Format eagerly so dict/list/non-string args embedded via %s are also scrubbed.
+        record.msg = _MSISDN_RE.sub("[MSISDN]", record.getMessage())
+        record.args = ()  # already baked into msg; prevents double-formatting
         return True
 
 
@@ -65,6 +68,22 @@ def get_logger(name: str, level: int = logging.INFO) -> logging.Logger:
     logger.propagate = False
 
     return logger
+
+
+def install_pii_filter() -> None:
+    """Install PIIRedactingFilter on all current root logger handlers.
+
+    Call once at application startup after ``logging.basicConfig()`` to protect
+    loggers that propagate to root — extrafloat modules, run_* entry-point scripts,
+    and any third-party library logger.
+
+    Idempotent: a second call will not add a duplicate filter to a handler that
+    already has one.
+    """
+    root = logging.getLogger()
+    for handler in root.handlers:
+        if not any(isinstance(f, PIIRedactingFilter) for f in handler.filters):
+            handler.addFilter(PIIRedactingFilter())
 
 
 def configure_root_level(level: int = logging.INFO) -> None:

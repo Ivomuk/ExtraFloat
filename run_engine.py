@@ -29,11 +29,13 @@ from extrafloat.io.extrafloat_data_loaders import (
     load_loan_summary_recent_features,
     load_transaction_capacity_features,
 )
+from pd_model.logging_config import install_pii_filter
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(levelname)s  %(name)s  %(message)s",
 )
+install_pii_filter()  # protect root handler used by extrafloat/ and propagating loggers
 logger = logging.getLogger("run_engine")
 
 DEFAULT_TRANSACTION = "data/transaction_capacity.csv"

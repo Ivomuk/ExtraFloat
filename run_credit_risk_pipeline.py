@@ -69,6 +69,7 @@ from extrafloat.io.extrafloat_data_loaders import (
     load_transaction_capacity_features,
 )
 from pd_model.exceptions import ArtifactVerificationError, DataAlignmentError, MissingArtifactError
+from pd_model.logging_config import install_pii_filter
 from pd_model.modeling.inference import run_inference_pipeline
 
 logging.basicConfig(
@@ -76,6 +77,7 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s — %(message)s",
     datefmt="%H:%M:%S",
 )
+install_pii_filter()  # protect root handler used by extrafloat/ and propagating loggers
 logger = logging.getLogger("credit_risk_pipeline")
 
 # Artifact files produced by pd_model.run_pipeline that must exist before scoring.
