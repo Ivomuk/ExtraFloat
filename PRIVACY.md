@@ -27,7 +27,7 @@ each pipeline stage:
 |---|---|
 | **Ingestion** | MSISDN is normalised (strip whitespace, remove `.0` suffix) and used as the join key. It is not transformed beyond normalisation at this stage. |
 | **Feature engineering** | MSISDN is in `PD_FEATURE_BLACKLIST` and `NON_BEHAVIOURAL_COLS`. It is structurally prevented from entering the model feature matrix. |
-| **Logging** | `PIIRedactingFilter` in `pd_model/logging_config.py` scrubs Uganda/Kenya MSISDN patterns (`25[67]\d{8,9}`) from all log records before emission. |
+| **Logging** | `PIIRedactingFilter` in `pd_model/logging_config.py` scrubs Ugandan MSISDNs in international (`256xxxxxxxxx`) and local (`07xxxxxxxx`) formats, and Kenyan MSISDNs in international (`254xxxxxxxxx`) format, from all log records before emission. The filter is installed on the root logger handler so it covers all loggers including `extrafloat/` modules. |
 | **Scoring output** | `_trim_output_columns()` in `run_extrafloat_limit_engine.py` retains only `FINAL_OUTPUT_COLUMNS` by default. MSISDN is not in this list. |
 | **Training export** | `ops_scored.csv` replaces `agent_msisdn` with the first 16 hex characters of its SHA-256 hash before writing. The raw MSISDN is not persisted. |
 | **Error messages** | Exception messages embed only column names (string constants) and integer counts — never raw MSISDN cell values. |
