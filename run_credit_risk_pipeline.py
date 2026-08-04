@@ -68,7 +68,7 @@ from extrafloat.io.extrafloat_data_loaders import (
     load_loan_summary_recent_features,
     load_transaction_capacity_features,
 )
-from pd_model.exceptions import ArtifactVerificationError, DataAlignmentError
+from pd_model.exceptions import ArtifactVerificationError, DataAlignmentError, MissingArtifactError
 from pd_model.modeling.inference import run_inference_pipeline
 
 logging.basicConfig(
@@ -93,12 +93,12 @@ _REQUIRED_ARTIFACTS = [
 
 def _check_artifacts(artifacts_dir: Path, allow_unverified: bool = False) -> None:
     """
-    Raise FileNotFoundError early if any required PD model artifact is missing,
+    Raise MissingArtifactError early if any required PD model artifact is missing,
     then verify sha256 checksums against the values stored in model_metadata.json.
 
     Called before run_inference_pipeline() so failures surface with a clear
     message and the exact training command, rather than crashing deep inside
-    load_artifacts() with a generic FileNotFoundError.
+    load_artifacts() with a MissingArtifactError.
 
     Parameters
     ----------
@@ -110,7 +110,7 @@ def _check_artifacts(artifacts_dir: Path, allow_unverified: bool = False) -> Non
     """
     missing = [f for f in _REQUIRED_ARTIFACTS if not (artifacts_dir / f).exists()]
     if missing:
-        raise FileNotFoundError(
+        raise MissingArtifactError(
             f"Missing PD model artifacts in {artifacts_dir}:\n" + "  " + ", ".join(missing) + "\n\n"
             "Train the model first:\n"
             "  python -m pd_model.run_pipeline \\\n"
