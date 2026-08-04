@@ -17,6 +17,7 @@ from sklearn.metrics import roc_auc_score
 
 from pd_model.config import feature_config
 from pd_model.config.model_config import DEFAULT_CONFIG, ModelConfig
+from pd_model.exceptions import DataAlignmentError, ModelInputError
 from pd_model.logging_config import get_logger
 from pd_model.modeling.evaluation import safe_auc_with_reason
 
@@ -117,9 +118,9 @@ def train_xgb(
     """
     # Hard alignment checks (preserved from file7)
     if X_train.columns.tolist() != X_val.columns.tolist():
-        raise RuntimeError("[FATAL] Train/val column order mismatch")
+        raise ModelInputError("[FATAL] Train/val column order mismatch")
     if feature_config.THIN_FILE_COL in X_train.columns.tolist():
-        raise RuntimeError(f"[FATAL] {feature_config.THIN_FILE_COL} leaked into model matrix")
+        raise ModelInputError(f"[FATAL] {feature_config.THIN_FILE_COL} leaked into model matrix")
 
     feature_cols = X_train.columns.tolist()
 
@@ -127,7 +128,7 @@ def train_xgb(
         monotone_constraints = build_monotone_constraints(feature_cols, X_train, y_train)
 
     if len(monotone_constraints) != len(feature_cols):
-        raise RuntimeError(
+        raise ModelInputError(
             f"[FATAL] constraints length {len(monotone_constraints)} != features {len(feature_cols)}"
         )
 
@@ -168,9 +169,9 @@ def train_xgb(
 
     # Hard row alignment checks (preserved from file7)
     if not (len(train_raw) == X_train.shape[0] == len(y_train_arr)):
-        raise RuntimeError("[FATAL] Train rows misaligned at scoring time")
+        raise DataAlignmentError("[FATAL] Train rows misaligned at scoring time")
     if not (len(val_raw) == X_val.shape[0] == len(y_val_arr)):
-        raise RuntimeError("[FATAL] Val rows misaligned at scoring time")
+        raise DataAlignmentError("[FATAL] Val rows misaligned at scoring time")
 
     train_scored = pd.DataFrame(
         {"bad_state": y_train_arr, "raw_score": train_raw},

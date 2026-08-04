@@ -1,5 +1,4 @@
-"""
-Input / output validation helpers for the PD model pipeline.
+"""Input / output validation helpers for the PD model pipeline.
 
 These functions raise clear, context-rich exceptions rather than letting
 silent failures propagate downstream.  They are designed to be called at
@@ -10,14 +9,14 @@ from __future__ import annotations
 
 import pandas as pd
 
+from pd_model.exceptions import DataAlignmentError, SchemaValidationError
 from pd_model.logging_config import get_logger
 
 logger = get_logger(__name__)
 
 
 def require_columns(df: pd.DataFrame, required: list[str], context: str = "") -> None:
-    """
-    Assert that *df* contains every column in *required*.
+    """Assert that *df* contains every column in *required*.
 
     Args:
         df:       DataFrame to validate.
@@ -25,11 +24,11 @@ def require_columns(df: pd.DataFrame, required: list[str], context: str = "") ->
         context:  Human-readable label for the calling step (e.g. ``"run_phase_2_1"``).
 
     Raises:
-        ValueError: If any required column is absent.
+        SchemaValidationError: If any required column is absent.
     """
     missing = [c for c in required if c not in df.columns]
     if missing:
-        raise ValueError(f"[{context}] Missing required columns: {missing}")
+        raise SchemaValidationError(f"[{context}] Missing required columns: {missing}")
 
 
 def check_missing_rates(
@@ -38,8 +37,7 @@ def check_missing_rates(
     max_rate: float = 0.95,
     context: str = "",
 ) -> None:
-    """
-    Warn when a column's missing rate exceeds *max_rate*.
+    """Warn when a column's missing rate exceeds *max_rate*.
 
     Args:
         df:       DataFrame to inspect.
@@ -48,34 +46,34 @@ def check_missing_rates(
         context:  Human-readable label for the calling step.
 
     Raises:
-        ValueError: If any column's missing rate exceeds *max_rate*.
+        SchemaValidationError: If any column's missing rate exceeds *max_rate*.
     """
     for col in cols:
         if col not in df.columns:
             continue
         rate = df[col].isna().mean()
         if rate > max_rate:
-            raise ValueError(f"[{context}] Column '{col}' has {rate:.1%} missing (threshold {max_rate:.0%})")
+            raise SchemaValidationError(
+                f"[{context}] Column '{col}' has {rate:.1%} missing (threshold {max_rate:.0%})"
+            )
 
 
-def assert_output_not_empty(df: pd.DataFrame, context: str = "") -> None:
-    """
-    Assert that *df* has at least one row.
+def require_non_empty_dataframe(df: pd.DataFrame, context: str = "") -> None:
+    """Assert that *df* has at least one row.
 
     Args:
         df:      DataFrame to check.
         context: Human-readable label for the calling step.
 
     Raises:
-        ValueError: If *df* is empty.
+        SchemaValidationError: If *df* is empty.
     """
     if len(df) == 0:
-        raise ValueError(f"[{context}] Output DataFrame is empty")
+        raise SchemaValidationError(f"[{context}] Output DataFrame is empty")
 
 
-def assert_binary_column(df: pd.DataFrame, col: str, context: str = "") -> None:
-    """
-    Assert that *col* contains only 0 and 1 (no NaNs, no other values).
+def require_binary_column(df: pd.DataFrame, col: str, context: str = "") -> None:
+    """Assert that *col* contains only 0 and 1 (no NaNs, no other values).
 
     Args:
         df:      DataFrame containing the column.
@@ -83,23 +81,24 @@ def assert_binary_column(df: pd.DataFrame, col: str, context: str = "") -> None:
         context: Human-readable label for the calling step.
 
     Raises:
-        ValueError: If the column has NaNs or values outside {0, 1}.
+        SchemaValidationError: If the column has NaNs or values outside {0, 1}.
     """
     require_columns(df, [col], context=context)
     if df[col].isna().any():
-        raise ValueError(f"[{context}] Column '{col}' contains NaN values")
+        raise SchemaValidationError(f"[{context}] Column '{col}' contains NaN values")
     bad_vals = set(df[col].unique()) - {0, 1}
     if bad_vals:
-        raise ValueError(f"[{context}] Column '{col}' contains values outside {{0, 1}}: {bad_vals}")
+        raise SchemaValidationError(
+            f"[{context}] Column '{col}' contains values outside {{0, 1}}: {bad_vals}"
+        )
 
 
-def assert_index_aligned(
+def require_index_alignment(
     df_a: pd.DataFrame,
     df_b: pd.DataFrame,
     context: str = "",
 ) -> None:
-    """
-    Assert that two DataFrames have identical indices.
+    """Assert that two DataFrames have identical indices.
 
     Args:
         df_a:    First DataFrame.
@@ -107,11 +106,20 @@ def assert_index_aligned(
         context: Human-readable label for the calling step.
 
     Raises:
-        ValueError: If the indices differ.
+        DataAlignmentError: If the indices differ.
     """
     if not df_a.index.equals(df_b.index):
-        raise ValueError(
+        raise DataAlignmentError(
             f"[{context}] Index mismatch: "
             f"df_a has {len(df_a)} rows, df_b has {len(df_b)} rows; "
             "indices are not identical."
         )
+
+
+# ---------------------------------------------------------------------------
+# Backward-compatible aliases (deprecated — use require_* names instead)
+# ---------------------------------------------------------------------------
+
+assert_output_not_empty = require_non_empty_dataframe
+assert_binary_column = require_binary_column
+assert_index_aligned = require_index_alignment

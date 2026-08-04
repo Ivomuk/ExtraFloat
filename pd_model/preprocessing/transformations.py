@@ -28,8 +28,9 @@ from pd_model.config.feature_config import (
     SIGNED_AMOUNT_PATTERNS,
 )
 from pd_model.config.model_config import DEFAULT_CONFIG, ModelConfig
+from pd_model.exceptions import DataLeakageError
 from pd_model.logging_config import get_logger
-from pd_model.validation.schema import assert_index_aligned
+from pd_model.validation.schema import require_index_alignment
 
 logger = get_logger(__name__)
 
@@ -111,7 +112,7 @@ def get_and_classify_pd_features(
         c for c in pd_features if "dpd" in c.lower() and not any(p in c.lower() for p in DPD_ALLOW_PATTERNS)
     ]
     if leaked_dpd:
-        raise RuntimeError(
+        raise DataLeakageError(
             "[get_and_classify_pd_features] DPD-like columns in PD candidates: " + str(sorted(leaked_dpd))
         )
 
@@ -587,7 +588,7 @@ def build_transformed_dataframe(
         )
 
     # 4) Index alignment guard (BEFORE concat)
-    assert_index_aligned(df_pd, df_numeric_transformed, context="build_transformed_dataframe")
+    require_index_alignment(df_pd, df_numeric_transformed, context="build_transformed_dataframe")
 
     # 5) Concat: non-numeric cols + transformed numeric
     cols_to_replace = sorted(set(pd_features))

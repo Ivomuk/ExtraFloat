@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from pd_model.exceptions import ModelInputError
 from pd_model.modeling.xgb_model import build_monotone_constraints, evaluate_xgb, train_xgb
 
 
@@ -76,13 +77,13 @@ class TestTrainXgb:
         Xtr, ytr, Xva, yva = _make_data(400)
         Xtr["thin_file_flag"] = 0
         Xva["thin_file_flag"] = 0
-        with pytest.raises(RuntimeError, match="thin_file_flag"):
+        with pytest.raises(ModelInputError, match="thin_file_flag"):
             train_xgb(Xtr, ytr, Xva, yva)
 
     def test_column_mismatch_raises(self):
         Xtr, ytr, Xva, yva = _make_data(400)
         Xva2 = Xva.rename(columns={"feat_0": "feat_WRONG"})
-        with pytest.raises(RuntimeError, match="column order"):
+        with pytest.raises(ModelInputError, match="column order"):
             train_xgb(Xtr, ytr, Xva2, yva)
 
 

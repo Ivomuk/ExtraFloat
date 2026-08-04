@@ -16,6 +16,7 @@ from sklearn.metrics import roc_auc_score
 
 from pd_model.config import feature_config
 from pd_model.config.model_config import DEFAULT_CONFIG, ModelConfig
+from pd_model.exceptions import ModelInputError
 from pd_model.logging_config import get_logger
 from pd_model.modeling.evaluation import build_decile_tables, safe_auc_with_reason
 from pd_model.modeling.xgb_model import build_monotone_constraints
@@ -59,7 +60,7 @@ def train_lgbm(
     scored_df columns: bad_state, raw_score
     """
     if X_train.columns.tolist() != X_val.columns.tolist():
-        raise RuntimeError("[FATAL] Train/val column order mismatch")
+        raise ModelInputError("[FATAL] Train/val column order mismatch")
 
     feature_cols = X_train.columns.tolist()
 
@@ -67,7 +68,7 @@ def train_lgbm(
         monotone_constraints = build_monotone_constraints(feature_cols, X_train, y_train)
 
     if len(monotone_constraints) != len(feature_cols):
-        raise RuntimeError(
+        raise ModelInputError(
             f"[FATAL] constraints length {len(monotone_constraints)} != features {len(feature_cols)}"
         )
 

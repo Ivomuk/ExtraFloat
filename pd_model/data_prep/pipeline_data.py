@@ -13,7 +13,9 @@ from __future__ import annotations
 import pandas as pd
 
 from pd_model.config import feature_config
+from pd_model.exceptions import DataAlignmentError, DataLeakageError, SchemaValidationError
 from pd_model.logging_config import get_logger
+from pd_model.validation.schema import require_index_alignment
 
 logger = get_logger(__name__)
 
@@ -85,14 +87,15 @@ def prepare_pd_training_and_validation_data(
     common_idx = df_pd_raw.index.intersection(df_pd_transformed.index)
     df_pd_raw = df_pd_raw.loc[common_idx].copy()
     df_pd_transformed = df_pd_transformed.loc[common_idx].copy()
-    if not df_pd_raw.index.equals(df_pd_transformed.index):
-        raise RuntimeError("[prepare_pd_data] Raw and transformed snapshots misaligned after alignment")
+    require_index_alignment(df_pd_raw, df_pd_transformed, context="prepare_pd_data")
 
     # ------------------------------------------------------------------ #
     # 2) Split date validation
     # ------------------------------------------------------------------ #
     if split_date_col not in df_pd_raw.columns and split_date_col not in df_pd_transformed.columns:
-        raise ValueError(f"[prepare_pd_data] split_date_col '{split_date_col}' missing from both DataFrames")
+        raise SchemaValidationError(
+            f"[prepare_pd_data] split_date_col '{split_date_col}' missing from both DataFrames"
+        )
 
     if split_date_col in df_pd_raw.columns:
         df_pd_raw[split_date_col] = pd.to_datetime(df_pd_raw[split_date_col], errors="coerce")
@@ -102,7 +105,7 @@ def prepare_pd_training_and_validation_data(
         split_series = df_pd_transformed[split_date_col]
 
     if not split_series.notna().all():
-        raise ValueError(f"[prepare_pd_data] split_date_col '{split_date_col}' has NaT values")
+        raise SchemaValidationError(f"[prepare_pd_data] split_date_col '{split_date_col}' has NaT values")
 
     # Coerce optional date columns if present
     for c in date_cols:
@@ -147,12 +150,12 @@ def prepare_pd_training_and_validation_data(
     # ------------------------------------------------------------------ #
     leakage_hits = [c for c in candidate_features if any(p in c.lower() for p in forbidden_patterns_low)]
     if leakage_hits:
-        raise RuntimeError(
+        raise DataLeakageError(
             "[prepare_pd_data] Pattern-based leakage detected. "
             "Add to PD_FEATURE_BLACKLIST explicitly:\n" + ", ".join(leakage_hits)
         )
     if agent_key in candidate_features:
-        raise RuntimeError(f"[prepare_pd_data] {agent_key} leaked into candidate_features")
+        raise DataLeakageError(f"[prepare_pd_data] {agent_key} leaked into candidate_features")
 
     # ------------------------------------------------------------------ #
     # 5) Time-based split
@@ -174,41 +177,43 @@ def prepare_pd_training_and_validation_data(
     # 6) Schema assertions
     # ------------------------------------------------------------------ #
     if agent_key not in df_train_raw.columns:
-        raise RuntimeError(f"[prepare_pd_data] {agent_key} missing in df_train_raw")
+        raise DataAlignmentError(f"[prepare_pd_data] {agent_key} missing in df_train_raw")
     if agent_key not in df_val_raw.columns:
-        raise RuntimeError(f"[prepare_pd_data] {agent_key} missing in df_val_raw")
+        raise DataAlignmentError(f"[prepare_pd_data] {agent_key} missing in df_val_raw")
     if not df_train_raw[agent_key].notna().all():
-        raise RuntimeError(f"[prepare_pd_data] {agent_key} nulls in train")
+        raise DataAlignmentError(f"[prepare_pd_data] {agent_key} nulls in train")
     if not df_val_raw[agent_key].notna().all():
-        raise RuntimeError(f"[prepare_pd_data] {agent_key} nulls in val")
+        raise DataAlignmentError(f"[prepare_pd_data] {agent_key} nulls in val")
 
     agent_train = df_train_raw[agent_key].copy()
     agent_val = df_val_raw[agent_key].copy()
 
     if df_train_raw.empty:
-        raise ValueError("[prepare_pd_data] Training set is empty")
+        raise SchemaValidationError("[prepare_pd_data] Training set is empty")
     if df_train_raw.shape[0] != df_train_trans.shape[0]:
-        raise RuntimeError("[prepare_pd_data] Raw and transformed train rows misaligned")
-    if not df_train_raw.index.equals(df_train_trans.index):
-        raise RuntimeError("[prepare_pd_data] Raw and transformed train indexes misaligned")
+        raise DataAlignmentError("[prepare_pd_data] Raw and transformed train rows misaligned")
+    require_index_alignment(df_train_raw, df_train_trans, context="prepare_pd_data/train")
     if df_val_raw.shape[0] != df_val_trans.shape[0]:
-        raise RuntimeError("[prepare_pd_data] Raw and transformed val rows misaligned")
-    if not df_val_raw.index.equals(df_val_trans.index):
-        raise RuntimeError("[prepare_pd_data] Raw and transformed val indexes misaligned")
+        raise DataAlignmentError("[prepare_pd_data] Raw and transformed val rows misaligned")
+    require_index_alignment(df_val_raw, df_val_trans, context="prepare_pd_data/val")
 
     if target_col not in df_train_trans.columns:
-        raise ValueError(f"[prepare_pd_data] target_col '{target_col}' missing in train transformed")
+        raise SchemaValidationError(
+            f"[prepare_pd_data] target_col '{target_col}' missing in train transformed"
+        )
     if target_col not in df_val_trans.columns:
-        raise ValueError(f"[prepare_pd_data] target_col '{target_col}' missing in val transformed")
+        raise SchemaValidationError(f"[prepare_pd_data] target_col '{target_col}' missing in val transformed")
 
     missing_train = [c for c in candidate_features if c not in df_train_trans.columns]
     if missing_train:
-        raise ValueError(
+        raise SchemaValidationError(
             f"[prepare_pd_data] Candidate features missing in train transformed: {missing_train}"
         )
     missing_val = [c for c in candidate_features if c not in df_val_trans.columns]
     if missing_val:
-        raise ValueError(f"[prepare_pd_data] Candidate features missing in val transformed: {missing_val}")
+        raise SchemaValidationError(
+            f"[prepare_pd_data] Candidate features missing in val transformed: {missing_val}"
+        )
 
     X_train_raw = df_train_raw[candidate_features]
     X_train_trans = df_train_trans[candidate_features]
@@ -219,13 +224,13 @@ def prepare_pd_training_and_validation_data(
     y_val = df_val_trans[target_col]
 
     if X_train_raw.shape != X_train_trans.shape:
-        raise RuntimeError("[prepare_pd_data] Train raw/trans shapes differ")
+        raise DataAlignmentError("[prepare_pd_data] Train raw/trans shapes differ")
     if X_val_raw.shape != X_val_trans.shape:
-        raise RuntimeError("[prepare_pd_data] Val raw/trans shapes differ")
+        raise DataAlignmentError("[prepare_pd_data] Val raw/trans shapes differ")
     if not y_train.notna().all():
-        raise ValueError("[prepare_pd_data] Training target contains NaNs")
+        raise SchemaValidationError("[prepare_pd_data] Training target contains NaNs")
     if not y_val.notna().all():
-        raise ValueError("[prepare_pd_data] Validation target contains NaNs")
+        raise SchemaValidationError("[prepare_pd_data] Validation target contains NaNs")
 
     thin_train = (
         df_train_raw[thin_col] if thin_col in df_train_raw.columns else pd.Series(0, index=df_train_raw.index)

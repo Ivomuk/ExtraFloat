@@ -5,6 +5,7 @@ import pandas as pd
 import pytest
 from sklearn.metrics import roc_auc_score
 
+from pd_model.exceptions import ModelInputError
 from pd_model.modeling.lgbm_model import evaluate_lgbm, train_lgbm
 
 
@@ -48,7 +49,7 @@ class TestTrainLgbm:
     def test_column_mismatch_raises(self):
         Xtr, ytr, Xva, yva = _make_data()
         Xva2 = Xva.rename(columns={"feat_0": "feat_WRONG"})
-        with pytest.raises(RuntimeError, match="column order"):
+        with pytest.raises(ModelInputError, match="column order"):
             train_lgbm(Xtr, ytr, Xva2, yva)
 
 
