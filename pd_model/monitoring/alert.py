@@ -193,7 +193,7 @@ def send_slack_alert(message: str, webhook_url: str) -> bool:
             headers={"Content-Type": "application/json"},
             method="POST",
         )
-        with urllib.request.urlopen(req, timeout=10) as resp:
+        with urllib.request.urlopen(req, timeout=10) as resp:  # nosec B310 — URL is the Slack webhook from SLACK_WEBHOOK env var, not user-supplied input
             success = resp.status == 200
         if success:
             logger.info("Slack alert sent successfully")

@@ -37,6 +37,36 @@ _LOAN_SUMMARY_3M_COLS = [
     "penalties_3m",
 ]
 
+# PII columns that must not travel beyond the loader.
+# These are not required by any downstream pipeline stage; carrying them
+# through would expose sensitive data in intermediate DataFrames and outputs.
+# The primary join key (msisdn / agent_msisdn) is intentionally excluded from
+# this set — it is the pipeline join key and is handled separately.
+_PII_COLUMNS_TO_DROP = frozenset(
+    {
+        "date_of_birth",
+        "dob",
+        "account_name",
+        "account_number",
+        "acct_no",
+        "national_id",
+        "nid",
+        "passport_no",
+        "imei",
+        "imsi",
+        "device_id",
+    }
+)
+
+
+def _drop_extra_pii(df: pd.DataFrame) -> pd.DataFrame:
+    """Drop known-PII columns that are not required by any downstream stage."""
+    to_drop = [c for c in df.columns if c.lower() in _PII_COLUMNS_TO_DROP]
+    if to_drop:
+        logger.info("Dropping PII columns not required downstream: %s", to_drop)
+        df = df.drop(columns=to_drop)
+    return df
+
 
 def _read_csv(path: str | Path) -> pd.DataFrame:
     """Read CSV after confirming the file exists."""
@@ -98,6 +128,7 @@ def load_transaction_capacity_features(path: str | Path) -> pd.DataFrame:
     # ── Date parsing ────────────────────────────────────────────────────────
     df = _parse_dates(df, ["snapshot_dt", "tbl_dt", "activation_dt"])
 
+    df = _drop_extra_pii(df)
     return df
 
 
@@ -147,6 +178,7 @@ def load_loan_summary_recent_features(path: str | Path) -> pd.DataFrame:
         for col in missing_3m:
             df[col] = 0.0
 
+    df = _drop_extra_pii(df)
     return df
 
 
@@ -183,4 +215,5 @@ def load_borrower_limit_features(path: str | Path) -> pd.DataFrame:
         ["first_loan_ts", "latest_loan_ts", "latest_disbursement_ts"],
     )
 
+    df = _drop_extra_pii(df)
     return df

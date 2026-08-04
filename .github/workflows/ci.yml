@@ -96,6 +96,26 @@ jobs:
           print('Preflight smoke OK')
           "
 
+  sast:
+    name: SAST (Bandit)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Bandit
+        run: pip install "bandit[toml]"
+
+      - name: Run Bandit
+        # -ll: medium+ severity only. B101: assert usage is enforced separately
+        # via the exception hierarchy; test files legitimately use assert.
+        run: |
+          bandit -r pd_model/ extrafloat/ run_credit_risk_pipeline.py run_engine.py \
+            -ll --skip B101
+
   security:
     name: Security scan (pip-audit)
     runs-on: ubuntu-latest

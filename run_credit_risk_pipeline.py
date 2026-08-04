@@ -422,11 +422,8 @@ def main(argv=None):
         result.to_csv(out_path, index=False)
         logger.info("Output written to %s (%d rows, %d columns)", out_path, len(result), len(result.columns))
     else:
-        print(
-            result[["msisdn", "assigned_limit", "risk_tier", "cal_pd", "final_decision_reason"]].to_string(
-                index=False
-            )
-        )
+        preview_cols = ["assigned_limit", "risk_tier", "cal_pd", "final_decision_reason"]
+        print(result[[c for c in preview_cols if c in result.columns]].to_string(index=False))
 
     return 0
 

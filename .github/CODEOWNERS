@@ -1,0 +1,22 @@
+# CODEOWNERS — CreditRisk repository
+#
+# These rules require review from the specified roles before merging.
+# Replace placeholder handles with actual GitHub usernames.
+
+# Model and calibration logic — requires Model Owner review
+/pd_model/modeling/         @model-owner
+/pd_model/config/           @model-owner
+/pd_model/preprocessing/    @model-owner
+/pd_model/run_pipeline.py   @model-owner
+
+# Engine policy configuration — requires Risk Lead review
+/extrafloat/engine/extrafloat_limit_engine_caps.py  @risk-lead
+
+# Governance and compliance documents — require both roles
+/GOVERNANCE.md    @model-owner @risk-lead
+/PRIVACY.md       @data-custodian
+/MODEL_CARD.md    @model-owner
+/docs/RUNBOOK.md  @model-owner @risk-lead
+
+# CI and security configuration — require both roles
+/.github/workflows/  @model-owner @risk-lead

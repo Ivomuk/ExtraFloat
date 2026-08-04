@@ -410,9 +410,18 @@ def run_pipeline(args: argparse.Namespace) -> None:
         exec_summary = build_exec_summary(ops_scored)
         logger.info("Exec summary:\n%s", exec_summary.to_string(index=False))
 
+        # Pseudonymise MSISDN before writing: replace with first 16 hex chars of
+        # SHA-256 so the file does not contain raw phone numbers.
+        if feature_config.AGENT_KEY in ops_scored.columns:
+            ops_scored = ops_scored.copy()
+            ops_scored[feature_config.AGENT_KEY] = (
+                ops_scored[feature_config.AGENT_KEY]
+                .astype(str)
+                .apply(lambda x: hashlib.sha256(x.encode()).hexdigest()[:16])
+            )
         ops_path = output_dir / "ops_scored.csv"
         ops_scored.to_csv(ops_path, index=False)
-        logger.info("Wrote %s (%d rows)", ops_path, len(ops_scored))
+        logger.info("Wrote %s (%d rows) [agent_msisdn pseudonymised]", ops_path, len(ops_scored))
 
     except Exception as exc:
         logger.warning("ops_scored build failed (calibration may need more data): %s", exc)
