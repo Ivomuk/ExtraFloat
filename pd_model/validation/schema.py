@@ -114,12 +114,3 @@ def require_index_alignment(
             f"df_a has {len(df_a)} rows, df_b has {len(df_b)} rows; "
             "indices are not identical."
         )
-
-
-# ---------------------------------------------------------------------------
-# Backward-compatible aliases (deprecated — use require_* names instead)
-# ---------------------------------------------------------------------------
-
-assert_output_not_empty = require_non_empty_dataframe
-assert_binary_column = require_binary_column
-assert_index_aligned = require_index_alignment

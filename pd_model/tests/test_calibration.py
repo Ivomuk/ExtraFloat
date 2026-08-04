@@ -5,6 +5,7 @@ import pandas as pd
 import pytest
 
 from pd_model.config.model_config import ModelConfig
+from pd_model.exceptions import CalibrationError
 from pd_model.modeling.calibration import (
     add_policy_flags,
     attach_cal_pd,
@@ -54,7 +55,7 @@ class TestBuildPdCalibrationMap:
 
     def test_fail_closed_small_n(self):
         small_df = _scored_df(50)
-        with pytest.raises(ValueError, match="cal_min_n"):
+        with pytest.raises(CalibrationError, match="cal_min_n"):
             build_pd_calibration_map(small_df, "xgb")  # default cfg.cal_min_n=5000
 
 
@@ -75,7 +76,7 @@ class TestAttachCalPd:
     def test_fail_closed_missing_model_key(self):
         df = _scored_df()
         cal_map = build_pd_calibration_map(df, "xgb", cfg=_TEST_CFG)
-        with pytest.raises(ValueError, match="no calibration mapping"):
+        with pytest.raises(CalibrationError, match="no calibration mapping"):
             attach_cal_pd(df, cal_map, "lgb", cfg=_TEST_CFG)
 
 

@@ -5,6 +5,8 @@ import logging
 import numpy as np
 import pandas as pd
 
+from pd_model.exceptions import PolicyConfigurationError
+
 logger = logging.getLogger(__name__)
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -216,7 +218,7 @@ def _validate_tier_config(final_cfg):
     t2 = policy_cfg["risk_tier_2_score_min"]
     t3 = policy_cfg["risk_tier_3_score_min"]
     if not (t1 > t2 > t3):
-        raise ValueError(
+        raise PolicyConfigurationError(
             f"Risk tier min-thresholds must be strictly decreasing: tier_1={t1}, tier_2={t2}, tier_3={t3}"
         )
 
@@ -241,7 +243,7 @@ def _validate_config(cfg):
         + combo.get("risk_weight", 0.0)
     )
     if abs(std_weights - 1.0) > 0.01:
-        raise ValueError(
+        raise PolicyConfigurationError(
             f"Standard combination weights must sum to 1.0; got {std_weights:.4f}. "
             "Check capacity_weight + recent_usage_weight + prior_exposure_weight + risk_weight."
         )

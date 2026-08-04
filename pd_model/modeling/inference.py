@@ -129,8 +129,10 @@ def load_artifacts(artifacts_dir: Path) -> ModelArtifacts:
             raise ArtifactVerificationError(
                 f"[load_artifacts] model_metadata.json contains invalid JSON: {exc}"
             ) from exc
-        except Exception:
-            pass  # file-read edge cases only; structural errors caught above
+        except OSError as exc:
+            raise ArtifactVerificationError(
+                f"[load_artifacts] Could not read model_metadata.json: {exc}"
+            ) from exc
 
     return ModelArtifacts(
         xgb_model=xgb_model,

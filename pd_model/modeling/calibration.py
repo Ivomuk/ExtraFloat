@@ -23,6 +23,7 @@ from tqdm import tqdm
 
 from pd_model.config import feature_config
 from pd_model.config.model_config import DEFAULT_CONFIG, ModelConfig
+from pd_model.exceptions import CalibrationError, SchemaValidationError
 from pd_model.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -66,7 +67,7 @@ def _standardize_scored_df(
         if score_cands:
             score_col = score_cands[0]
     if score_col is None:
-        raise ValueError(f"No score column found for model '{model_key}'")
+        raise SchemaValidationError(f"No score column found for model '{model_key}'")
 
     df["model_score"] = pd.to_numeric(df[score_col], errors="coerce")
     df = df.replace([np.inf, -np.inf], np.nan)
@@ -109,17 +110,17 @@ def build_pd_calibration_map(
     event_rate = float(df["y"].mean())
 
     if n_obs < cfg.cal_min_n:
-        raise ValueError(
+        raise CalibrationError(
             f"[build_pd_calibration_map] Fail-closed: n={n_obs} < cal_min_n={cfg.cal_min_n} "
             f"for model '{model_key}'"
         )
     if n_bads < cfg.cal_min_bads:
-        raise ValueError(
+        raise CalibrationError(
             f"[build_pd_calibration_map] Fail-closed: bads={n_bads} < cal_min_bads={cfg.cal_min_bads} "
             f"for model '{model_key}'"
         )
     if event_rate <= 0.0 or event_rate >= 1.0:
-        raise ValueError(
+        raise CalibrationError(
             f"[build_pd_calibration_map] Fail-closed: event_rate={event_rate:.4f} is degenerate "
             f"for model '{model_key}'"
         )
@@ -127,7 +128,7 @@ def build_pd_calibration_map(
     # Risk direction
     corr_val = float(pd.Series(df["model_score"]).corr(pd.Series(df["y"])))
     if np.isnan(corr_val):
-        raise ValueError(
+        raise CalibrationError(
             f"[build_pd_calibration_map] Fail-closed: correlation undefined for model '{model_key}'"
         )
     ascending_risk = bool(corr_val > 0)
@@ -205,7 +206,7 @@ def attach_cal_pd(
 
     cal_sub = cal_map_tbl[cal_map_tbl["model"].astype(str) == str(model_key)].copy()
     if cal_sub.shape[0] == 0:
-        raise ValueError(f"[attach_cal_pd] Fail-closed: no calibration mapping for model '{model_key}'")
+        raise CalibrationError(f"[attach_cal_pd] Fail-closed: no calibration mapping for model '{model_key}'")
 
     for col in ("score_min", "score_max", "pd"):
         cal_sub[col] = pd.to_numeric(cal_sub[col], errors="coerce")
@@ -229,7 +230,7 @@ def attach_cal_pd(
     df[feature_config.CAL_PD_COL] = assigned_pd
     coverage = float(pd.Series(assigned_pd).notna().mean())
     if coverage < cfg.cal_min_coverage:
-        raise ValueError(
+        raise CalibrationError(
             f"[attach_cal_pd] Fail-closed: cal_pd coverage={coverage:.4f} < "
             f"cal_min_coverage={cfg.cal_min_coverage} for model '{model_key}'"
         )
@@ -273,14 +274,14 @@ def build_policy_tables(
 
     if prefer_pd:
         if feature_config.CAL_PD_COL not in df.columns:
-            raise ValueError("[build_policy_tables] Fail-closed: cal_pd missing but prefer_pd=True")
+            raise CalibrationError("[build_policy_tables] Fail-closed: cal_pd missing but prefer_pd=True")
         sort_var = feature_config.CAL_PD_COL
         sort_ascending = True
     else:
         sort_var = "model_score"
         corr_val = float(pd.Series(df["model_score"]).corr(pd.Series(df["y"])))
         if np.isnan(corr_val):
-            raise ValueError("[build_policy_tables] Fail-closed: correlation undefined")
+            raise CalibrationError("[build_policy_tables] Fail-closed: correlation undefined")
         sort_ascending = not bool(corr_val > 0)
 
     df_sorted = df.sort_values(sort_var, ascending=sort_ascending).reset_index(drop=True)
