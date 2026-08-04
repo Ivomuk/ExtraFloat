@@ -110,9 +110,10 @@ def get_and_classify_pd_features(
     leaked_dpd = [
         c for c in pd_features if "dpd" in c.lower() and not any(p in c.lower() for p in DPD_ALLOW_PATTERNS)
     ]
-    assert not leaked_dpd, "[get_and_classify_pd_features] DPD-like columns in PD candidates: " + str(
-        sorted(leaked_dpd)
-    )
+    if leaked_dpd:
+        raise RuntimeError(
+            "[get_and_classify_pd_features] DPD-like columns in PD candidates: " + str(sorted(leaked_dpd))
+        )
 
     # ------------------------------------------------------------------ #
     # Classify into transformation buckets

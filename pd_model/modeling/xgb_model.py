@@ -116,19 +116,20 @@ def train_xgb(
     (* only present if those columns exist in the original X_train/X_val)
     """
     # Hard alignment checks (preserved from file7)
-    assert X_train.columns.tolist() == X_val.columns.tolist(), "[FATAL] Train/val column order mismatch"
-    assert feature_config.THIN_FILE_COL not in X_train.columns.tolist(), (
-        f"[FATAL] {feature_config.THIN_FILE_COL} leaked into model matrix"
-    )
+    if X_train.columns.tolist() != X_val.columns.tolist():
+        raise RuntimeError("[FATAL] Train/val column order mismatch")
+    if feature_config.THIN_FILE_COL in X_train.columns.tolist():
+        raise RuntimeError(f"[FATAL] {feature_config.THIN_FILE_COL} leaked into model matrix")
 
     feature_cols = X_train.columns.tolist()
 
     if monotone_constraints is None:
         monotone_constraints = build_monotone_constraints(feature_cols, X_train, y_train)
 
-    assert len(monotone_constraints) == len(feature_cols), (
-        f"[FATAL] constraints length {len(monotone_constraints)} != features {len(feature_cols)}"
-    )
+    if len(monotone_constraints) != len(feature_cols):
+        raise RuntimeError(
+            f"[FATAL] constraints length {len(monotone_constraints)} != features {len(feature_cols)}"
+        )
 
     constraints_str = "(" + ",".join(str(int(v)) for v in monotone_constraints) + ")"
 
@@ -166,10 +167,10 @@ def train_xgb(
     val_raw = model.predict_proba(X_val)[:, 1]
 
     # Hard row alignment checks (preserved from file7)
-    assert len(train_raw) == X_train.shape[0] == len(y_train_arr), (
-        "[FATAL] Train rows misaligned at scoring time"
-    )
-    assert len(val_raw) == X_val.shape[0] == len(y_val_arr), "[FATAL] Val rows misaligned at scoring time"
+    if not (len(train_raw) == X_train.shape[0] == len(y_train_arr)):
+        raise RuntimeError("[FATAL] Train rows misaligned at scoring time")
+    if not (len(val_raw) == X_val.shape[0] == len(y_val_arr)):
+        raise RuntimeError("[FATAL] Val rows misaligned at scoring time")
 
     train_scored = pd.DataFrame(
         {"bad_state": y_train_arr, "raw_score": train_raw},

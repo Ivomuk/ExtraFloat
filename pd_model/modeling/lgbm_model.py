@@ -58,16 +58,18 @@ def train_lgbm(
 
     scored_df columns: bad_state, raw_score
     """
-    assert X_train.columns.tolist() == X_val.columns.tolist(), "[FATAL] Train/val column order mismatch"
+    if X_train.columns.tolist() != X_val.columns.tolist():
+        raise RuntimeError("[FATAL] Train/val column order mismatch")
 
     feature_cols = X_train.columns.tolist()
 
     if monotone_constraints is None:
         monotone_constraints = build_monotone_constraints(feature_cols, X_train, y_train)
 
-    assert len(monotone_constraints) == len(feature_cols), (
-        f"[FATAL] constraints length {len(monotone_constraints)} != features {len(feature_cols)}"
-    )
+    if len(monotone_constraints) != len(feature_cols):
+        raise RuntimeError(
+            f"[FATAL] constraints length {len(monotone_constraints)} != features {len(feature_cols)}"
+        )
 
     y_train_arr = pd.Series(y_train, index=X_train.index).astype(int).values
     y_val_arr = pd.Series(y_val, index=X_val.index).astype(int).values

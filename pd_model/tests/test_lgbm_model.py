@@ -48,7 +48,7 @@ class TestTrainLgbm:
     def test_column_mismatch_raises(self):
         Xtr, ytr, Xva, yva = _make_data()
         Xva2 = Xva.rename(columns={"feat_0": "feat_WRONG"})
-        with pytest.raises(AssertionError, match="column order"):
+        with pytest.raises(RuntimeError, match="column order"):
             train_lgbm(Xtr, ytr, Xva2, yva)
 
 
