@@ -622,7 +622,12 @@ def test_combine_caps_thin_file_vs_standard():
 
     Scenario B (risk_cap=30000, not binding): combined_reason reflects weighting type.
     """
-    base = {"capacity_cap": 10000.0, "recent_usage_cap": 10000.0, "prior_exposure_cap": 10000.0, "prior_limit": 0.0}
+    base = {
+        "capacity_cap": 10000.0,
+        "recent_usage_cap": 10000.0,
+        "prior_exposure_cap": 10000.0,
+        "prior_limit": 0.0,
+    }
 
     # Scenario A — guardrail binds; check pre-guardrail difference
     thin_A = combine_caps(_features(is_thin_file=1.0, risk_cap=2000.0, **base))

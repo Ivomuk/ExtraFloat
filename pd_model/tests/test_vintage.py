@@ -13,7 +13,9 @@ from pd_model.monitoring.vintage import (
 def _make_loans(n: int = 200, seed: int = 0) -> pd.DataFrame:
     rng = np.random.default_rng(seed)
     disburse_months = rng.choice(pd.date_range("2025-01-01", periods=6, freq="MS"), n)
-    obs_months = [d + pd.DateOffset(months=int(m)) for d, m in zip(disburse_months, rng.integers(1, 7, n), strict=False)]
+    obs_months = [
+        d + pd.DateOffset(months=int(m)) for d, m in zip(disburse_months, rng.integers(1, 7, n), strict=False)
+    ]
     return pd.DataFrame(
         {
             "agent_msisdn": [f"msisdn_{i}" for i in range(n)],
