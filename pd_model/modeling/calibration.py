@@ -71,7 +71,9 @@ def _standardize_scored_df(
 
     df["model_score"] = pd.to_numeric(df[score_col], errors="coerce")
     df = df.replace([np.inf, -np.inf], np.nan)
-    df = df[[feature_config.AGENT_KEY, "y", "model_score"]].dropna()
+    required = [feature_config.AGENT_KEY, "y", "model_score"]
+    passthrough = [c for c in ["bad_state", feature_config.THIN_FILE_COL] if c in df.columns]
+    df = df[required + passthrough].dropna(subset=required)
 
     return df, score_col
 
