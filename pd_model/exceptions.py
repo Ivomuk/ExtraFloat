@@ -46,3 +46,26 @@ class ModelInputError(CreditRiskError, RuntimeError):
     Examples: train/val column order mismatch, protected columns leaked
     into the feature matrix, monotone constraint length mismatch.
     """
+
+
+class ArtifactVerificationError(CreditRiskError, RuntimeError):
+    """Raised when artifact integrity checks fail.
+
+    Examples: checksum mismatch, corrupt model_metadata.json,
+    missing required artifact files detected during preflight.
+    """
+
+
+class CalibrationError(CreditRiskError, RuntimeError):
+    """Raised when the calibration map is missing, corrupt, or produces invalid output.
+
+    Examples: empty cal_map, cal_pd values outside [0, 1], NaN calibrated scores.
+    """
+
+
+class PolicyConfigurationError(CreditRiskError, ValueError):
+    """Raised when engine policy configuration is invalid.
+
+    Examples: signal weights that do not sum to 1, tier thresholds out of order,
+    negative floor or ceiling limits.
+    """

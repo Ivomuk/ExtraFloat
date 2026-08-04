@@ -694,7 +694,7 @@ def run_phase_2_2_repayment_pd_features(
         )
 
     if not repayment_numeric_features:
-        raise DataAlignmentError("[run_phase_2_2] No numeric repayment behavioural features detected")
+        raise SchemaValidationError("[run_phase_2_2] No numeric repayment behavioural features detected")
 
     # ------------------------------------------------------------------ #
     # Label merge (separate from behavioural features)

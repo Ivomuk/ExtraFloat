@@ -177,13 +177,13 @@ def prepare_pd_training_and_validation_data(
     # 6) Schema assertions
     # ------------------------------------------------------------------ #
     if agent_key not in df_train_raw.columns:
-        raise DataAlignmentError(f"[prepare_pd_data] {agent_key} missing in df_train_raw")
+        raise SchemaValidationError(f"[prepare_pd_data] {agent_key} missing in df_train_raw")
     if agent_key not in df_val_raw.columns:
-        raise DataAlignmentError(f"[prepare_pd_data] {agent_key} missing in df_val_raw")
+        raise SchemaValidationError(f"[prepare_pd_data] {agent_key} missing in df_val_raw")
     if not df_train_raw[agent_key].notna().all():
-        raise DataAlignmentError(f"[prepare_pd_data] {agent_key} nulls in train")
+        raise SchemaValidationError(f"[prepare_pd_data] {agent_key} nulls in train")
     if not df_val_raw[agent_key].notna().all():
-        raise DataAlignmentError(f"[prepare_pd_data] {agent_key} nulls in val")
+        raise SchemaValidationError(f"[prepare_pd_data] {agent_key} nulls in val")
 
     agent_train = df_train_raw[agent_key].copy()
     agent_val = df_val_raw[agent_key].copy()

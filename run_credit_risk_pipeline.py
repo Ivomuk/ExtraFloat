@@ -68,6 +68,7 @@ from extrafloat.io.extrafloat_data_loaders import (
     load_loan_summary_recent_features,
     load_transaction_capacity_features,
 )
+from pd_model.exceptions import ArtifactVerificationError, DataAlignmentError
 from pd_model.modeling.inference import run_inference_pipeline
 
 logging.basicConfig(
@@ -124,7 +125,7 @@ def _check_artifacts(artifacts_dir: Path, allow_unverified: bool = False) -> Non
     try:
         meta = json.loads(meta_path.read_text())
     except json.JSONDecodeError as exc:
-        raise RuntimeError(
+        raise ArtifactVerificationError(
             f"[preflight] model_metadata.json is present but contains invalid JSON: {exc}\n"
             "Re-train to regenerate a valid metadata file."
         ) from exc
@@ -156,7 +157,7 @@ def _check_artifacts(artifacts_dir: Path, allow_unverified: bool = False) -> Non
             mismatches.append(fname)
 
     if mismatches:
-        raise RuntimeError(
+        raise ArtifactVerificationError(
             f"[preflight] Artifact checksum mismatch for: {', '.join(mismatches)}\n"
             "Artifacts may be corrupted, partially copied, or from a different training run.\n"
             "Re-train or restore from backup."
@@ -164,11 +165,11 @@ def _check_artifacts(artifacts_dir: Path, allow_unverified: bool = False) -> Non
 
 
 def _unverified_warn_or_raise(allow_unverified: bool, message: str) -> None:
-    """Emit a warning when allow_unverified=True; raise RuntimeError otherwise."""
+    """Emit a warning when allow_unverified=True; raise ArtifactVerificationError otherwise."""
     if allow_unverified:
         logger.warning("%s", message)
     else:
-        raise RuntimeError(message)
+        raise ArtifactVerificationError(message)
 
 
 def _norm_msisdn(s: pd.Series) -> pd.Series:
@@ -293,7 +294,7 @@ def run_credit_risk_pipeline(
     # Guard: null join keys cannot be meaningfully joined.
     null_engine = features_df["msisdn"].isna().sum()
     if null_engine > 0:
-        raise ValueError(
+        raise DataAlignmentError(
             f"{null_engine} null msisdn values in engine features — cannot join. "
             "Check load_transaction_capacity_features / build_extrafloat_limit_engine_features."
         )
@@ -305,13 +306,13 @@ def run_credit_risk_pipeline(
     # Guard: duplicates on either side would silently expand rows (many-to-many).
     dup_engine = features_df["msisdn"].duplicated().sum()
     if dup_engine > 0:
-        raise ValueError(
+        raise DataAlignmentError(
             f"Duplicate msisdn in engine features ({dup_engine} rows). "
             "Check build_extrafloat_limit_engine_features for fan-out."
         )
     dup_pd = pd_join["msisdn"].duplicated().sum()
     if dup_pd > 0:
-        raise ValueError(
+        raise DataAlignmentError(
             f"Duplicate agent_msisdn in PD output ({dup_pd} rows). "
             "Check run_inference_pipeline for duplicate agents."
         )
@@ -321,7 +322,7 @@ def run_credit_risk_pipeline(
 
     # Left join must never expand rows.
     if len(features_df) != pre_join:
-        raise RuntimeError(
+        raise DataAlignmentError(
             f"Stage 4 join expanded rows: pre={pre_join}, post={len(features_df)}. "
             "Duplicate msisdn values may have bypassed the pre-join checks."
         )

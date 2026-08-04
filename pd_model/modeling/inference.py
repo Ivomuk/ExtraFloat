@@ -27,6 +27,7 @@ import pandas as pd
 
 from pd_model.config import feature_config
 from pd_model.config.model_config import DEFAULT_CONFIG, ModelConfig
+from pd_model.exceptions import ArtifactVerificationError, SchemaValidationError
 from pd_model.logging_config import get_logger
 from pd_model.modeling.calibration import add_policy_flags, attach_cal_pd, make_policy_bucket
 from pd_model.modeling.explainability import build_adverse_action_df, compute_shap_values
@@ -92,7 +93,9 @@ def load_artifacts(artifacts_dir: Path) -> ModelArtifacts:
         feature_order_data = json.load(f)
     feature_order = feature_order_data.get("selected_features", feature_order_data)
     if not isinstance(feature_order, list):
-        raise ValueError("[load_artifacts] feature_order.json must contain a list of feature names")
+        raise SchemaValidationError(
+            "[load_artifacts] feature_order.json must contain a list of feature names"
+        )
 
     cal_map = pd.read_csv(_require("pd_calibration_map.csv"))
     xgb_policy_thresholds = pd.read_csv(_require("xgb_policy_thresholds.csv"))
@@ -123,7 +126,9 @@ def load_artifacts(artifacts_dir: Path) -> ModelArtifacts:
                     meta.get(f"{champion_key}_val_auc") or float("nan"),
                 )
         except json.JSONDecodeError as exc:
-            raise RuntimeError(f"[load_artifacts] model_metadata.json contains invalid JSON: {exc}") from exc
+            raise ArtifactVerificationError(
+                f"[load_artifacts] model_metadata.json contains invalid JSON: {exc}"
+            ) from exc
         except Exception:
             pass  # file-read edge cases only; structural errors caught above
 
@@ -231,7 +236,7 @@ def score_new_agents(
         adverse_reason_1/2/3_shap (only if compute_shap=True)
     """
     if champion not in ("xgb", "lgb"):
-        raise ValueError(f"champion must be 'xgb' or 'lgb', got '{champion}'")
+        raise SchemaValidationError(f"champion must be 'xgb' or 'lgb', got '{champion}'")
 
     # Extract meta columns before aligning to feature matrix
     meta_cols = [

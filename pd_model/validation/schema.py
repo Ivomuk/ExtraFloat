@@ -16,7 +16,7 @@ logger = get_logger(__name__)
 
 
 def require_columns(df: pd.DataFrame, required: list[str], context: str = "") -> None:
-    """Assert that *df* contains every column in *required*.
+    """Validate that *df* contains every column in *required*.
 
     Args:
         df:       DataFrame to validate.
@@ -59,7 +59,7 @@ def check_missing_rates(
 
 
 def require_non_empty_dataframe(df: pd.DataFrame, context: str = "") -> None:
-    """Assert that *df* has at least one row.
+    """Validate that *df* has at least one row.
 
     Args:
         df:      DataFrame to check.
@@ -73,7 +73,7 @@ def require_non_empty_dataframe(df: pd.DataFrame, context: str = "") -> None:
 
 
 def require_binary_column(df: pd.DataFrame, col: str, context: str = "") -> None:
-    """Assert that *col* contains only 0 and 1 (no NaNs, no other values).
+    """Validate that *col* contains only 0 and 1 (no NaNs, no other values).
 
     Args:
         df:      DataFrame containing the column.
@@ -98,7 +98,7 @@ def require_index_alignment(
     df_b: pd.DataFrame,
     context: str = "",
 ) -> None:
-    """Assert that two DataFrames have identical indices.
+    """Validate that two DataFrames have identical indices.
 
     Args:
         df_a:    First DataFrame.

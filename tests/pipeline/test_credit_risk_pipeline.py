@@ -31,6 +31,7 @@ from extrafloat.engine.run_extrafloat_limit_engine import (
     FINAL_OUTPUT_COLUMNS,
     run_extrafloat_limit_engine,
 )
+from pd_model.exceptions import DataAlignmentError
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Helpers
@@ -586,7 +587,7 @@ def test_score_source_fallback_when_cal_pd_absent(tmp_path):
 
 
 def test_join_raises_on_duplicate_engine_msisdn(tmp_path):
-    """Duplicate msisdn in engine features must raise ValueError before the join."""
+    """Duplicate msisdn in engine features must raise DataAlignmentError before the join."""
     from run_credit_risk_pipeline import run_credit_risk_pipeline
 
     n = 4
@@ -610,7 +611,7 @@ def test_join_raises_on_duplicate_engine_msisdn(tmp_path):
             "run_credit_risk_pipeline.build_extrafloat_limit_engine_features", return_value=df_features_dup
         ),
     ):
-        with pytest.raises(ValueError, match="Duplicate msisdn in engine features"):
+        with pytest.raises(DataAlignmentError, match="Duplicate msisdn in engine features"):
             run_credit_risk_pipeline(
                 transaction_file="dummy.csv",
                 loan_file="dummy.csv",
@@ -620,7 +621,7 @@ def test_join_raises_on_duplicate_engine_msisdn(tmp_path):
 
 
 def test_join_raises_on_duplicate_pd_msisdn(tmp_path):
-    """Duplicate agent_msisdn in PD output must raise ValueError before the join."""
+    """Duplicate agent_msisdn in PD output must raise DataAlignmentError before the join."""
     from run_credit_risk_pipeline import run_credit_risk_pipeline
 
     n = 4
@@ -642,7 +643,7 @@ def test_join_raises_on_duplicate_pd_msisdn(tmp_path):
         patch("run_credit_risk_pipeline.run_inference_pipeline", return_value=pd_scored_dup),
         patch("run_credit_risk_pipeline.build_extrafloat_limit_engine_features", return_value=df_features),
     ):
-        with pytest.raises(ValueError, match="Duplicate agent_msisdn in PD output"):
+        with pytest.raises(DataAlignmentError, match="Duplicate agent_msisdn in PD output"):
             run_credit_risk_pipeline(
                 transaction_file="dummy.csv",
                 loan_file="dummy.csv",
@@ -653,7 +654,7 @@ def test_join_raises_on_duplicate_pd_msisdn(tmp_path):
 
 @pytest.mark.parametrize("null_value", [None, np.nan, "None", "none", "nan"])
 def test_join_raises_on_null_engine_msisdn(tmp_path, null_value):
-    """Null msisdn in engine features (None, np.nan, or sentinel strings) raises ValueError."""
+    """Null msisdn in engine features (None, np.nan, or sentinel strings) raises DataAlignmentError."""
     from run_credit_risk_pipeline import run_credit_risk_pipeline
 
     n = 4
@@ -676,7 +677,7 @@ def test_join_raises_on_null_engine_msisdn(tmp_path, null_value):
             "run_credit_risk_pipeline.build_extrafloat_limit_engine_features", return_value=df_features_null
         ),
     ):
-        with pytest.raises(ValueError, match="null msisdn"):
+        with pytest.raises(DataAlignmentError, match="null msisdn"):
             run_credit_risk_pipeline(
                 transaction_file="dummy.csv",
                 loan_file="dummy.csv",
