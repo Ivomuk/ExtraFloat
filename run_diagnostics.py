@@ -258,6 +258,66 @@ def run_diagnostics(args: argparse.Namespace) -> None:
         print("  SKIP: net_exposure_6M or bad_state not found in training DataFrame")
 
     # ------------------------------------------------------------------ #
+    # CHECK 4: Thin-file vs thick-file population breakdown
+    # ------------------------------------------------------------------ #
+    print(f"\n{DIVIDER}")
+    print("CHECK 4: Thin-file vs thick-file population breakdown")
+    print(DIVIDER)
+
+    thin_col = feature_config.THIN_FILE_COL  # "thin_file_flag"
+    label_col = feature_config.TARGET_COL    # "bad_state"
+
+    if thin_col in df_train_raw.columns and label_col in df_train_raw.columns:
+        from sklearn.metrics import roc_auc_score
+
+        tf = df_train_raw[[thin_col, label_col]].copy()
+        tf[thin_col] = pd.to_numeric(tf[thin_col], errors="coerce")
+        tf[label_col] = pd.to_numeric(tf[label_col], errors="coerce")
+        tf = tf.dropna()
+
+        n_total     = len(tf)
+        n_thin      = int((tf[thin_col] == 1).sum())
+        n_thick     = int((tf[thin_col] == 0).sum())
+        br_thin     = float(tf.loc[tf[thin_col] == 1, label_col].mean()) if n_thin else float("nan")
+        br_thick    = float(tf.loc[tf[thin_col] == 0, label_col].mean()) if n_thick else float("nan")
+        br_overall  = float(tf[label_col].mean())
+
+        print(f"  {'Segment':<20} {'n':>10} {'share':>8} {'bad_rate':>10}")
+        print(f"  {'-'*50}")
+        print(f"  {'thin-file (scorecard)':<20} {n_thin:>10,} {n_thin/n_total:>8.1%} {br_thin:>10.2%}")
+        print(f"  {'thick-file (PD model)':<20} {n_thick:>10,} {n_thick/n_total:>8.1%} {br_thick:>10.2%}")
+        print(f"  {'overall':<20} {n_total:>10,} {'100%':>8} {br_overall:>10.2%}")
+
+        # AUC per segment using model score from X_train if available
+        print()
+        # Thin-file single-feature AUC using only transaction volume features
+        thin_mask  = (df_train_raw[thin_col] == 1) if thin_col in df_train_raw.columns else pd.Series(False, index=df_train_raw.index)
+        thick_mask = ~thin_mask
+
+        y_all = pd.to_numeric(df_train_raw[label_col], errors="coerce")
+
+        # Check top feature AUC on thin vs thick separately
+        top_feat = auc_report.iloc[0]["feature"]
+        if top_feat in df_train_raw.columns:
+            x_feat = pd.to_numeric(df_train_raw[top_feat], errors="coerce")
+            for seg_name, mask in [("thin-file", thin_mask), ("thick-file", thick_mask)]:
+                valid = mask & x_feat.notna() & y_all.notna()
+                if valid.sum() >= 50 and y_all[valid].nunique() == 2:
+                    auc = roc_auc_score(y_all[valid], x_feat[valid])
+                    auc = max(auc, 1 - auc)
+                    print(f"  Top feature '{top_feat}' AUC on {seg_name}: {auc:.4f}")
+                else:
+                    print(f"  Top feature '{top_feat}' AUC on {seg_name}: insufficient data")
+
+        if n_thin > 0:
+            print(f"\n  NOTE: {n_thin:,} thin-file agents ({n_thin/n_total:.1%}) use the scorecard,")
+            print(f"  not XGBoost. The 0.989 AUC is measured across all {n_total:,} agents.")
+            print(f"  Thin-file bad rate ({br_thin:.2%}) vs thick-file ({br_thick:.2%}) — separate")
+            print(f"  AUC estimates per segment would confirm scorecard discrimination quality.")
+    else:
+        print(f"  SKIP: '{thin_col}' or '{label_col}' not found in training DataFrame")
+
+    # ------------------------------------------------------------------ #
     # Summary
     # ------------------------------------------------------------------ #
     print(f"\n{DIVIDER}")
