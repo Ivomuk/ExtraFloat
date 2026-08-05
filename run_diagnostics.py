@@ -288,32 +288,44 @@ def run_diagnostics(args: argparse.Namespace) -> None:
         print(f"  {'thick-file (PD model)':<20} {n_thick:>10,} {n_thick/n_total:>8.1%} {br_thick:>10.2%}")
         print(f"  {'overall':<20} {n_total:>10,} {'100%':>8} {br_overall:>10.2%}")
 
-        # AUC per segment using model score from X_train if available
         print()
-        # Thin-file single-feature AUC using only transaction volume features
-        thin_mask  = (df_train_raw[thin_col] == 1) if thin_col in df_train_raw.columns else pd.Series(False, index=df_train_raw.index)
-        thick_mask = ~thin_mask
+        from sklearn.metrics import roc_auc_score
 
+        thin_mask  = pd.to_numeric(df_train_raw[thin_col], errors="coerce") == 1
+        thick_mask = ~thin_mask
         y_all = pd.to_numeric(df_train_raw[label_col], errors="coerce")
 
-        # Check top feature AUC on thin vs thick separately
+        # Thin-file AUC: use the scorecard's own PD estimate (never_loan_pd_like)
+        # XGBoost does not score thin-file agents in production — the scorecard does.
+        scorecard_score_col = "never_loan_pd_like"
+        if scorecard_score_col in df_train_raw.columns:
+            sc_score = pd.to_numeric(df_train_raw[scorecard_score_col], errors="coerce")
+            valid_thin = thin_mask & sc_score.notna() & y_all.notna()
+            if valid_thin.sum() >= 50 and y_all[valid_thin].nunique() == 2:
+                auc_thin = roc_auc_score(y_all[valid_thin], sc_score[valid_thin])
+                auc_thin = max(auc_thin, 1 - auc_thin)
+                print(f"  Scorecard AUC on thin-file agents  : {auc_thin:.4f}  (n={valid_thin.sum():,})")
+            else:
+                print(f"  Scorecard AUC on thin-file agents  : insufficient data")
+        else:
+            print(f"  Scorecard AUC on thin-file agents  : '{scorecard_score_col}' not found in DataFrame")
+
+        # Thick-file AUC: use the top XGBoost feature as a proxy for the model's signal
+        # (full model AUC requires running XGBoost — use top feature as lower-bound indicator)
         top_feat = auc_report.iloc[0]["feature"]
         if top_feat in df_train_raw.columns:
             x_feat = pd.to_numeric(df_train_raw[top_feat], errors="coerce")
-            for seg_name, mask in [("thin-file", thin_mask), ("thick-file", thick_mask)]:
-                valid = mask & x_feat.notna() & y_all.notna()
-                if valid.sum() >= 50 and y_all[valid].nunique() == 2:
-                    auc = roc_auc_score(y_all[valid], x_feat[valid])
-                    auc = max(auc, 1 - auc)
-                    print(f"  Top feature '{top_feat}' AUC on {seg_name}: {auc:.4f}")
-                else:
-                    print(f"  Top feature '{top_feat}' AUC on {seg_name}: insufficient data")
+            valid_thick = thick_mask & x_feat.notna() & y_all.notna()
+            if valid_thick.sum() >= 50 and y_all[valid_thick].nunique() == 2:
+                auc_thick = roc_auc_score(y_all[valid_thick], x_feat[valid_thick])
+                auc_thick = max(auc_thick, 1 - auc_thick)
+                print(f"  Top feature AUC on thick-file only : {auc_thick:.4f}  (n={valid_thick.sum():,})")
+                print(f"  (Full XGBoost AUC on thick-file would be higher — this is a single-feature lower bound)")
 
         if n_thin > 0:
-            print(f"\n  NOTE: {n_thin:,} thin-file agents ({n_thin/n_total:.1%}) use the scorecard,")
-            print(f"  not XGBoost. The 0.989 AUC is measured across all {n_total:,} agents.")
-            print(f"  Thin-file bad rate ({br_thin:.2%}) vs thick-file ({br_thick:.2%}) — separate")
-            print(f"  AUC estimates per segment would confirm scorecard discrimination quality.")
+            print(f"\n  NOTE: {n_thin:,} thin-file agents ({n_thin/n_total:.1%}) go through the scorecard.")
+            print(f"  The overall 0.989 AUC combines both populations. Scorecard AUC above")
+            print(f"  shows whether the rule-based path discriminates thin-file risk adequately.")
     else:
         print(f"  SKIP: '{thin_col}' or '{label_col}' not found in training DataFrame")
 
