@@ -467,7 +467,7 @@ def run_diagnostics(args: argparse.Namespace) -> None:
             "coefficient": _lr_step.coef_[0],
         }).sort_values("coefficient", key=abs, ascending=False).reset_index(drop=True)
         _coef_df["direction"] = _coef_df["coefficient"].apply(
-            lambda c: "↑ riskier" if c > 0 else "↓ safer"
+            lambda c: "(+) riskier" if c > 0 else "(-) safer"
         )
 
         print(f"  {'Feature':<40} {'Coeff':>8}  Direction")
