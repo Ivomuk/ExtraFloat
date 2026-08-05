@@ -110,7 +110,9 @@ LEAKAGE_PATTERNS: tuple[str, ...] = (
     "default",
     "delinq",
     "delinquency",
-    "penalty",
+    "penalt",   # catches both "penalty" and "penalties"
+    "future",   # catches any forward-looking column (e.g. future_penalties_30d)
+    "outcome",  # catches outcome_observed_30d and similar
     "collections",
     "collection",
     "recovery",
