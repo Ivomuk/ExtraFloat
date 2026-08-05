@@ -163,10 +163,12 @@ def run_diagnostics(args: argparse.Namespace) -> None:
         df_pd_raw=df_pd_raw,
         df_pd_transformed=df_pd_transformed,
         target_col=feature_config.TARGET_COL,
-        split_date_col="snapshot_dt",
         train_cutoff=train_cutoff,
-        agent_key=feature_config.AGENT_KEY,
+        id_cols=[feature_config.AGENT_KEY],
+        protected_cols=list(feature_config.PD_FEATURE_BLACKLIST),
         pd_feature_blacklist=feature_config.PD_FEATURE_BLACKLIST,
+        forbidden_feature_patterns=feature_config.LEAKAGE_PATTERNS,
+        date_cols=feature_config.DATE_COLS,
     )
 
     selected_features, _ = iv_filter_phase_2(
@@ -174,6 +176,9 @@ def run_diagnostics(args: argparse.Namespace) -> None:
         X_train_transformed=X_train_trans,
         y_train=y_train,
         cfg=cfg,
+        pd_feature_blacklist=feature_config.PD_FEATURE_BLACKLIST,
+        forbidden_feature_patterns=feature_config.LEAKAGE_PATTERNS,
+        target_col=feature_config.TARGET_COL,
     )
 
     X_train = X_train_trans[selected_features].copy()
