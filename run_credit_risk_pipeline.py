@@ -1,32 +1,32 @@
 """
 run_credit_risk_pipeline.py
 ============================
-End-to-end CreditRisk pipeline: PD model → credit limit engine.
+End-to-end CreditRisk pipeline: PD model -> credit limit engine.
 
 Pipeline stages
 ---------------
 1. Load three input files (transaction, loan, borrower).
-2. Run the PD model inference pipeline → cal_pd per agent.
+2. Run the PD model inference pipeline -> cal_pd per agent.
 3. Build engine features from the three CSVs.
 4. Join cal_pd onto the engine features DataFrame (on agent_msisdn / msisdn).
-5. Run the credit limit engine → assigned_limit + risk_tier + cal_pd per agent.
+5. Run the credit limit engine -> assigned_limit + risk_tier + cal_pd per agent.
 6. Optionally write the result to a CSV.
 
 Input files
 -----------
 ``--transaction-file``
-    Agent profile snapshot — MTN MoMo agent behavioural features:
+    Agent profile snapshot -- MTN MoMo agent behavioural features:
     commission, account_balance, cash_in/out volumes, customer counts, etc.
     Read twice: once raw (agent_msisdn key) for PD model Phase 2.1 feature
     engineering, and once via the capacity loader (renamed to msisdn) for
     the engine's capacity cap.
 
 ``--loan-file``
-    XtraFloat loan summary — disbursement/repayment volumes and penalty
+    XtraFloat loan summary -- disbursement/repayment volumes and penalty
     counts over 1m/3m windows.  Fed to the engine's recent usage cap.
 
 ``--borrower-file``
-    Borrower credit history — on_time_repayment_rate, lifetime_default_rate,
+    Borrower credit history -- on_time_repayment_rate, lifetime_default_rate,
     prior loan sizes, lifetime_loan_count.  Fed to the engine's prior
     exposure cap and risk signal fallback.
 
@@ -74,7 +74,7 @@ from pd_model.modeling.inference import run_inference_pipeline
 
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(name)s — %(message)s",
+    format="%(asctime)s %(levelname)s %(name)s -- %(message)s",
     datefmt="%H:%M:%S",
 )
 install_pii_filter()  # protect root handler used by extrafloat/ and propagating loggers
@@ -186,9 +186,9 @@ def _norm_msisdn(s: pd.Series) -> pd.Series:
     return out.mask(out.str.lower().isin({"", "nan", "none", "<na>"}))
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Pipeline
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 
 def run_credit_risk_pipeline(
@@ -203,26 +203,26 @@ def run_credit_risk_pipeline(
     allow_unverified_artifacts: bool = False,
 ) -> pd.DataFrame:
     """
-    Run the full PD model → credit limit engine pipeline.
+    Run the full PD model -> credit limit engine pipeline.
 
     Parameters
     ----------
-    transaction_file           : Agent profile snapshot CSV — MTN MoMo behavioural features
+    transaction_file           : Agent profile snapshot CSV -- MTN MoMo behavioural features
                                  (commission, account_balance, cash_in/out, customer counts, …).
                                  Read twice from the same path:
-                                   - raw (agent_msisdn key) → PD model Phase 2.1 feature engineering
-                                   - via capacity loader (msisdn key) → engine capacity cap
-    loan_file                  : XtraFloat loan summary CSV — disbursement/repayment
+                                   - raw (agent_msisdn key) -> PD model Phase 2.1 feature engineering
+                                   - via capacity loader (msisdn key) -> engine capacity cap
+    loan_file                  : XtraFloat loan summary CSV -- disbursement/repayment
                                  volumes and penalty counts over 1m/3m windows.
                                  Fed to the engine recent usage cap.
-    borrower_file              : Borrower credit history CSV — on_time_repayment_rate,
+    borrower_file              : Borrower credit history CSV -- on_time_repayment_rate,
                                  lifetime_default_rate, prior loan sizes, etc.
                                  Fed to the engine prior exposure cap.
     artifacts_dir              : directory containing trained PD model artifacts
                                  (xgb_model.joblib, lgbm_model.joblib, pd_calibration_map.csv, …)
     repayment_file             : optional repayment history CSV for Phase 2.2 PD features.
                                  Agents without repayment rows are treated as thin-file.
-    champion                   : "xgb" or "lgb" — which model's cal_pd feeds into the engine
+    champion                   : "xgb" or "lgb" -- which model's cal_pd feeds into the engine
     keep_intermediate          : if True, all engine intermediate columns are retained
     engine_config              : optional dict to override DEFAULT_CAP_CONFIG values
     allow_unverified_artifacts : if True, missing or incomplete artifact checksums produce a
@@ -237,16 +237,16 @@ def run_credit_risk_pipeline(
     """
     artifacts_dir = Path(artifacts_dir)
 
-    # ── Stage 1: Load raw data ──────────────────────────────────────────────
+    # -- Stage 1: Load raw data ----------------------------------------------
     logger.info("Stage 1: loading raw data")
-    # Raw read preserves agent_msisdn — required by PD model Phase 2.1
+    # Raw read preserves agent_msisdn -- required by PD model Phase 2.1
     df_agent = pd.read_csv(transaction_file, sep=None, engine="python")
-    # Loader renames agent_msisdn → msisdn for the engine
+    # Loader renames agent_msisdn -> msisdn for the engine
     df_txn = load_transaction_capacity_features(transaction_file)
     df_loan = load_loan_summary_recent_features(loan_file)
     df_borrower = load_borrower_limit_features(borrower_file)
     logger.info(
-        "Loaded — agents: %d rows | txn: %d rows | loan: %d rows | borrower: %d rows",
+        "Loaded -- agents: %d rows | txn: %d rows | loan: %d rows | borrower: %d rows",
         len(df_agent),
         len(df_txn),
         len(df_loan),
@@ -258,7 +258,7 @@ def run_credit_risk_pipeline(
         repayment_df = pd.read_csv(repayment_file, sep=None, engine="python")
         logger.info("Repayment file loaded: %d rows", len(repayment_df))
 
-    # ── Stage 2: PD model scoring ───────────────────────────────────────────
+    # -- Stage 2: PD model scoring -------------------------------------------
     logger.info("Stage 2: running PD model inference (champion=%s)", champion)
     _check_artifacts(artifacts_dir, allow_unverified=allow_unverified_artifacts)
     pd_scored = run_inference_pipeline(
@@ -273,7 +273,7 @@ def run_credit_risk_pipeline(
         pd_scored["cal_pd"].mean() if "cal_pd" in pd_scored.columns else float("nan"),
     )
 
-    # ── Stage 3: Engine feature engineering ────────────────────────────────
+    # -- Stage 3: Engine feature engineering --------------------------------
     logger.info("Stage 3: building engine features")
     features_df = build_extrafloat_limit_engine_features(
         df_txn=df_txn,
@@ -282,7 +282,7 @@ def run_credit_risk_pipeline(
     )
     logger.info("Engine features: %d agents", len(features_df))
 
-    # ── Stage 4: Join cal_pd onto engine features ───────────────────────────
+    # -- Stage 4: Join cal_pd onto engine features ---------------------------
     # PD model key: agent_msisdn  |  engine key: msisdn  (same identifier)
     logger.info("Stage 4: joining PD scores onto engine features")
     pd_join_cols = [c for c in ["agent_msisdn", "cal_pd", "thin_file_flag"] if c in pd_scored.columns]
@@ -297,12 +297,12 @@ def run_credit_risk_pipeline(
     null_engine = features_df["msisdn"].isna().sum()
     if null_engine > 0:
         raise DataAlignmentError(
-            f"{null_engine} null msisdn values in engine features — cannot join. "
+            f"{null_engine} null msisdn values in engine features -- cannot join. "
             "Check load_transaction_capacity_features / build_extrafloat_limit_engine_features."
         )
     null_pd = pd_join["msisdn"].isna().sum()
     if null_pd > 0:
-        logger.warning("PD output contains %d null agent_msisdn rows — dropping before join", null_pd)
+        logger.warning("PD output contains %d null agent_msisdn rows -- dropping before join", null_pd)
         pd_join = pd_join.dropna(subset=["msisdn"])
 
     # Guard: duplicates on either side would silently expand rows (many-to-many).
@@ -338,7 +338,7 @@ def run_credit_risk_pipeline(
         pre_join - covered,
     )
 
-    # ── Stage 5: Run credit limit engine ───────────────────────────────────
+    # -- Stage 5: Run credit limit engine -----------------------------------
     logger.info("Stage 5: running credit limit engine")
     result_df = run_extrafloat_limit_engine(
         features_df,
@@ -352,9 +352,9 @@ def run_credit_risk_pipeline(
         result_df["risk_tier"].value_counts().to_string() if "risk_tier" in result_df.columns else "n/a",
     )
 
-    # ── Stage 6: Audit columns ─────────────────────────────────────────────
+    # -- Stage 6: Audit columns ---------------------------------------------
     # score_source distinguishes legitimate population misses (agents not in
-    # PD output → "7_signal_fallback") from calibration failures that now
+    # PD output -> "7_signal_fallback") from calibration failures that now
     # propagate as exceptions rather than silent NaN.
     result_df["score_source"] = np.where(result_df["cal_pd"].notna(), "pd_model", "7_signal_fallback")
     result_df["scored_at"] = _dt.datetime.utcnow().isoformat() + "Z"
@@ -362,20 +362,20 @@ def run_credit_risk_pipeline(
     return result_df
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # CLI
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 
 def _parse_args(argv=None):
     p = argparse.ArgumentParser(
-        description="CreditRisk pipeline: PD model → credit limit engine",
+        description="CreditRisk pipeline: PD model -> credit limit engine",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     p.add_argument(
         "--transaction-file",
         required=True,
-        help="Agent profile snapshot CSV — read raw for PD model, via loader for engine capacity cap",
+        help="Agent profile snapshot CSV -- read raw for PD model, via loader for engine capacity cap",
     )
     p.add_argument("--loan-file", required=True, help="XtraFloat loan summary CSV (engine recent usage cap)")
     p.add_argument(

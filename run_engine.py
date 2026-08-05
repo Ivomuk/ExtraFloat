@@ -1,5 +1,5 @@
 """
-ExtraFloat limit engine — CLI runner.
+ExtraFloat limit engine -- CLI runner.
 
 Usage:
     python run_engine.py \
@@ -9,7 +9,7 @@ Usage:
         --output       data/engine_output.csv
 
 All arguments are optional; the defaults shown above are used when omitted.
---loan-summary is the only file that may not exist yet — the engine zero-fills
+--loan-summary is the only file that may not exist yet -- the engine zero-fills
 loan features and warns if the file is missing or empty.
 """
 
@@ -73,7 +73,7 @@ def _load_loan_summary(path: str) -> pd.DataFrame:
     p = Path(path)
     if not p.exists():
         logger.warning(
-            "loan-summary file not found (%s) — engine will run without loan "
+            "loan-summary file not found (%s) -- engine will run without loan "
             "features (all loan columns defaulting to 0).",
             path,
         )

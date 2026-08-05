@@ -1,5 +1,5 @@
 """
-PD Model Feature + Training Pipeline — CLI entry point.
+PD Model Feature + Training Pipeline -- CLI entry point.
 
 Usage
 -----
@@ -18,8 +18,8 @@ Usage
 
 The pipeline:
 1.  Load raw snapshots and stack into a combined modelling DataFrame.
-2.  Phase 2.1 — transaction behaviour features.
-3.  Phase 2.2 — loan repayment features + labelling.
+2.  Phase 2.1 -- transaction behaviour features.
+3.  Phase 2.2 -- loan repayment features + labelling.
 4.  Thin-file scorecard (agents with no loan history).
 5.  Feature classification + transformation.
 6.  IV-based feature selection (train-only).
@@ -135,15 +135,15 @@ def run_pipeline(args: argparse.Namespace) -> None:
     logger.info("Combined DataFrame: %d rows, %d cols", *df_pd.shape)
 
     # ------------------------------------------------------------------ #
-    # 2) Phase 2.1 — transaction behaviour features
+    # 2) Phase 2.1 -- transaction behaviour features
     # ------------------------------------------------------------------ #
-    logger.info("=== Step 2: Phase 2.1 — transaction behaviour features ===")
+    logger.info("=== Step 2: Phase 2.1 -- transaction behaviour features ===")
     df_pd = run_phase_2_1_richer_tx_behaviour(df_pd, cfg=cfg)
 
     # ------------------------------------------------------------------ #
     # 3) Load repayments and run Phase 2.2
     # ------------------------------------------------------------------ #
-    logger.info("=== Step 3: Phase 2.2 — repayment features + labelling ===")
+    logger.info("=== Step 3: Phase 2.2 -- repayment features + labelling ===")
     df_repayments = pd.read_csv(args.repayment_file)
     logger.info("Repayments loaded: %d rows", len(df_repayments))
 
@@ -177,7 +177,7 @@ def run_pipeline(args: argparse.Namespace) -> None:
     logger.info("=== Step 6: Feature classification + transformation ===")
 
     # Determine the temporal split boundary up-front so winsorization bounds
-    # are fitted on training data only and applied to validation — prevents
+    # are fitted on training data only and applied to validation -- prevents
     # validation-distribution leakage into the transform_report saved to disk.
     train_cutoff = pd.Timestamp(args.train_cutoff)
     split_mask = pd.to_datetime(df_pd["snapshot_dt"], errors="coerce") <= train_cutoff
@@ -376,7 +376,7 @@ def run_pipeline(args: argparse.Namespace) -> None:
         float(xgb_val_cal["bad_state"].mean()),
     )
 
-    # Thick-file-only XGBoost AUC — removes population mixing effect so the
+    # Thick-file-only XGBoost AUC -- removes population mixing effect so the
     # reported metric reflects genuine credit-risk discrimination.
     _thick_mask_sel = xgb_val_select[feature_config.THIN_FILE_COL].eq(0)
     _xgb_sel_thick = xgb_val_select[_thick_mask_sel]
@@ -499,13 +499,13 @@ def run_pipeline(args: argparse.Namespace) -> None:
     lgb_path = output_dir / "lgbm_model.joblib"
     joblib.dump(xgb_model, xgb_path)
     joblib.dump(lgb_model, lgb_path)
-    logger.info("Saved XGBoost model → %s", xgb_path)
-    logger.info("Saved LightGBM model → %s", lgb_path)
+    logger.info("Saved XGBoost model -> %s", xgb_path)
+    logger.info("Saved LightGBM model -> %s", lgb_path)
 
     # transform_report for inference
     tr_path = output_dir / "transform_report.csv"
     transform_report.to_csv(tr_path, index=False)
-    logger.info("Saved transform_report → %s", tr_path)
+    logger.info("Saved transform_report -> %s", tr_path)
 
     # feature_order.json
     feature_order_path = output_dir / "feature_order.json"

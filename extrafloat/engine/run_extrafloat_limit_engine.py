@@ -6,7 +6,7 @@ from extrafloat.engine.extrafloat_limit_engine_caps import (
     _get_config,
     _round_to_nearest,
     _safe_series,
-    _validate_config,  # was _validate_tier_config — now correctly named
+    _validate_config,  # was _validate_tier_config -- now correctly named
     apply_policy_adjustments,
     combine_caps,
     compute_capacity_cap,
@@ -74,8 +74,8 @@ def validate_expected_columns(features_df):
 
 def _final_limit_source_series(df):
     # Check column names in order of preference:
-    # policy_cap   — written by apply_policy_adjustments() (primary path)
-    # combined_cap — pre-policy fallback (e.g. if policy step was skipped)
+    # policy_cap   -- written by apply_policy_adjustments() (primary path)
+    # combined_cap -- pre-policy fallback (e.g. if policy step was skipped)
     if "policy_cap" in df.columns:
         return _safe_series(df, "policy_cap", 0.0)
     if "combined_cap" in df.columns:
@@ -98,7 +98,7 @@ def finalize_limits(features_df, config=None):
         cfg["rounding"]["round_to_nearest"],
     )
 
-    # ── Bank of Uganda regulatory cap (change E / L) ──────────────────────
+    # -- Bank of Uganda regulatory cap (change E / L) ----------------------
     reg_cfg = cfg.get("regulatory", {})
     regulatory_cap_applied = pd.Series(False, index=df.index, dtype="bool")
 
@@ -111,7 +111,7 @@ def finalize_limits(features_df, config=None):
             dtype="float64",
         )
 
-    # ── Decision reason ────────────────────────────────────────────────────
+    # -- Decision reason ----------------------------------------------------
     policy_reason_col = _safe_series(df, "policy_reason", "").astype(str)
     combined_reason_col = _safe_series(df, "combined_reason", "finalized_from_combined_cap").astype(str)
 
@@ -194,7 +194,7 @@ def extract_drift_snapshot(result_df):
 
     Returns a flat dict suitable for persisting (log, file, DB) as a
     reference window to pass to extrafloat_drift_monitor.run_drift_monitor().
-    Does NOT import from extrafloat_drift_monitor — no circular dependency.
+    Does NOT import from extrafloat_drift_monitor -- no circular dependency.
     """
 
     def _rate(col):

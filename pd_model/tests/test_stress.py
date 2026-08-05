@@ -50,7 +50,7 @@ class TestRunStressTest:
             stress_multipliers=(1.0, 2.0),
             operating_points=(0.20, 0.50),
         )
-        assert len(result) == 2 * 2  # 2 OPs × 2 multipliers
+        assert len(result) == 2 * 2  # 2 OPs x 2 multipliers
 
     def test_required_columns(self):
         scored = _make_scored_df()
@@ -88,7 +88,7 @@ class TestRunStressTest:
         scored = _make_scored_df()
         thresh = _make_policy_tbl()
         result = run_stress_test(scored, thresh, operating_points=(0.20,), stress_multipliers=(1.0, 3.0))
-        # EL may be lower (fewer approved) or higher (stressed PDs) — net effect varies
+        # EL may be lower (fewer approved) or higher (stressed PDs) -- net effect varies
         # but el_change_pct should be computable
         assert not np.isnan(result[result["stress_multiplier"] == 3.0]["el_change_pct"].iloc[0])
 

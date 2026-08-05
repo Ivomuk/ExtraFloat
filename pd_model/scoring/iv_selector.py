@@ -2,12 +2,12 @@
 Information Value (IV) computation and feature selection for PD modelling (file5).
 
 Provides:
-- ``compute_iv``                              – quantile-binned IV for a single feature
-- ``compute_iv_fixed_bins``                   – IV with bins learned from a reference series
-- ``compute_iv_with_bins``                    – IV using externally provided bin edges
-- ``iv_filter_phase_2``                       – IV-based feature selection (train-only)
-- ``iv_filter_phase_2_separability_sensitive``– IV selection with diagnostic variants
-- ``iv_audit``                                – annotate IV table for leakage / degeneracy
+- ``compute_iv``                              - quantile-binned IV for a single feature
+- ``compute_iv_fixed_bins``                   - IV with bins learned from a reference series
+- ``compute_iv_with_bins``                    - IV using externally provided bin edges
+- ``iv_filter_phase_2``                       - IV-based feature selection (train-only)
+- ``iv_filter_phase_2_separability_sensitive``- IV selection with diagnostic variants
+- ``iv_audit``                                - annotate IV table for leakage / degeneracy
 
 Note: the duplicate ``compute_iv_fixed_bins`` definition present in the original
 file5.txt has been removed; only one canonical definition is kept here.

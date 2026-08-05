@@ -1,4 +1,4 @@
-"""Tests for pd_model.logging_config — PIIRedactingFilter and install_pii_filter."""
+"""Tests for pd_model.logging_config -- PIIRedactingFilter and install_pii_filter."""
 
 from __future__ import annotations
 
@@ -51,7 +51,7 @@ class TestPIIRedactingFilter:
         assert "12345" in msg
 
     def test_dict_arg_with_msisdn_redacted(self):
-        # Dict embedded as %s arg — getMessage() formats it, then regex applies.
+        # Dict embedded as %s arg -- getMessage() formats it, then regex applies.
         f = PIIRedactingFilter()
         r = _make_record("%s", ({"msisdn": "256701234567"},))
         f.filter(r)

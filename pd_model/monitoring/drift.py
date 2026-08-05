@@ -6,9 +6,9 @@ CSI (Characteristic Stability Index) applies the same formula per feature to
 detect which inputs have drifted.
 
 Interpretation thresholds (standard industry convention):
-    PSI / CSI < 0.10  → stable
-    0.10 ≤ PSI / CSI < 0.25 → moderate shift — investigate
-    PSI / CSI ≥ 0.25  → significant shift — retrain / escalate
+    PSI / CSI < 0.10  -> stable
+    0.10 <= PSI / CSI < 0.25 -> moderate shift -- investigate
+    PSI / CSI >= 0.25  -> significant shift -- retrain / escalate
 
 Usage
 -----
@@ -117,7 +117,7 @@ def compute_psi(
 
     Returns
     -------
-    PSI float.  Threshold: <0.10 stable, 0.10–0.25 moderate, ≥0.25 significant.
+    PSI float.  Threshold: <0.10 stable, 0.10-0.25 moderate, >=0.25 significant.
     """
     return _psi_single(
         reference_scores.to_numpy(dtype=float, na_value=np.nan),
@@ -138,7 +138,7 @@ def compute_csi(
     bins: int = 10,
 ) -> pd.DataFrame:
     """
-    CSI for each feature — same PSI formula applied column-by-column.
+    CSI for each feature -- same PSI formula applied column-by-column.
 
     Features present in ``feature_cols`` but missing from either DataFrame
     are skipped with CSI = NaN.
@@ -202,13 +202,13 @@ def run_drift_report(
     Returns
     -------
     dict with keys:
-        score_psi               – float
-        score_stability         – "stable" | "moderate_shift" | "significant_shift"
-        csi_table               – DataFrame (feature, csi, stability) sorted by csi
-        n_features_stable       – int
-        n_features_moderate     – int
-        n_features_significant  – int
-        n_features_monitored    – int
+        score_psi               - float
+        score_stability         - "stable" | "moderate_shift" | "significant_shift"
+        csi_table               - DataFrame (feature, csi, stability) sorted by csi
+        n_features_stable       - int
+        n_features_moderate     - int
+        n_features_significant  - int
+        n_features_monitored    - int
     """
     # Score PSI
     score_psi = np.nan

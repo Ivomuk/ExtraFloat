@@ -30,7 +30,7 @@ _THIN_FILE_LR_FEATURES: list[str] = [
     # Binary flags
     # Removed: is_fully_inactive_6m, is_consecutively_inactive, sharp_volume_drop_flag
     # Data shows flag=1 agents have near-zero bad rate (they cannot default if inactive/
-    # declining) — LR coefficients contradicted raw bad rates, indicating multicollinearity.
+    # declining) -- LR coefficients contradicted raw bad rates, indicating multicollinearity.
     "consistent_volume_decline_flag",
     "activity_restart_flag",
     "consistent_volume_growth_flag",
@@ -86,7 +86,7 @@ def fit_thin_file_lr(
     df_thin = df_train_raw[thin_mask]
 
     if label_col not in df_thin.columns:
-        logger.warning("fit_thin_file_lr: label_col '%s' not found — skipping LR fit", label_col)
+        logger.warning("fit_thin_file_lr: label_col '%s' not found -- skipping LR fit", label_col)
         return None, []
 
     y = pd.to_numeric(df_thin[label_col], errors="coerce").fillna(0).astype(int)
@@ -95,7 +95,7 @@ def fit_thin_file_lr(
 
     if n_pos < min_positives:
         logger.warning(
-            "fit_thin_file_lr: only %d positives in %d thin-file train agents — "
+            "fit_thin_file_lr: only %d positives in %d thin-file train agents -- "
             "skipping LR fit (min_positives=%d)",
             n_pos, n_thin, min_positives,
         )
@@ -105,7 +105,7 @@ def fit_thin_file_lr(
     feature_cols = [c for c in candidates if c in df_thin.columns]
 
     if not feature_cols:
-        logger.warning("fit_thin_file_lr: no candidate features found — skipping")
+        logger.warning("fit_thin_file_lr: no candidate features found -- skipping")
         return None, []
 
     X = df_thin[feature_cols].apply(pd.to_numeric, errors="coerce")
@@ -187,10 +187,10 @@ def add_never_loan_scorecard_from_phase_2_1(
     Compute a risk scorecard for thin-file agents (``thin_file_flag == 1``).
 
     Adds three columns to the returned DataFrame:
-    - ``never_loan_points``      – raw accumulated risk points.
-    - ``never_loan_score_0_100`` – normalised 0-100 score (1st–99th percentile).
-    - ``never_loan_pd_like``     – sigmoid-based PD probability.
-    - ``never_loan_top_drivers`` – pipe-separated string of active risk drivers.
+    - ``never_loan_points``      - raw accumulated risk points.
+    - ``never_loan_score_0_100`` - normalised 0-100 score (1st-99th percentile).
+    - ``never_loan_pd_like``     - sigmoid-based PD probability.
+    - ``never_loan_top_drivers`` - pipe-separated string of active risk drivers.
 
     For thick-file agents these columns are set to ``NaN``.
 
@@ -216,7 +216,7 @@ def add_never_loan_scorecard_from_phase_2_1(
     logger.info("Scorecard: scoring %d thin-file agents", n_thin)
 
     if n_thin == 0:
-        logger.warning("Scorecard: no thin-file agents found — returning without scoring")
+        logger.warning("Scorecard: no thin-file agents found -- returning without scoring")
         df_sc["never_loan_points"] = np.nan
         df_sc["never_loan_score_0_100"] = np.nan
         df_sc["never_loan_pd_like"] = np.nan
@@ -245,7 +245,7 @@ def add_never_loan_scorecard_from_phase_2_1(
         return s_num.clip(lower=lo, upper=hi)
 
     def _safe_log1p_pos(s: pd.Series) -> pd.Series:
-        """log1p of positive values only; non-positive → NaN."""
+        """log1p of positive values only; non-positive -> NaN."""
         s_num = pd.to_numeric(s, errors="coerce")
         s_num = s_num.where(s_num > 0, np.nan)
         return np.log1p(s_num)
@@ -317,14 +317,14 @@ def add_never_loan_scorecard_from_phase_2_1(
     df_sc["never_loan_points"] = np.where(thin_mask, pts, np.nan)
 
     # ------------------------------------------------------------------ #
-    # Normalise to 0–100
+    # Normalise to 0-100
     # ------------------------------------------------------------------ #
     thin_pts = pd.Series(df_sc.loc[thin_mask, "never_loan_points"])
     n_valid = thin_pts.notna().sum()
 
     if n_valid < 2:
         logger.warning(
-            "Scorecard: fewer than 2 valid thin-file point values (%d) — skipping 0-100 normalisation",
+            "Scorecard: fewer than 2 valid thin-file point values (%d) -- skipping 0-100 normalisation",
             n_valid,
         )
         df_sc["never_loan_score_0_100"] = np.nan

@@ -13,7 +13,7 @@ These loaders do the minimum needed before handing off to the
   3. Rename legacy column names to the canonical names the pipeline expects.
   4. Parse known date/timestamp columns.
   5. Zero-fill optional 3m columns in loan_summary if absent (with a warning).
-  6. Return the full DataFrame — no column subsetting.
+  6. Return the full DataFrame -- no column subsetting.
 
 All validation of required columns, numeric coercion, aggregation, and
 feature engineering is handled downstream by the ``prepare_*`` functions.
@@ -41,7 +41,7 @@ _LOAN_SUMMARY_3M_COLS = [
 # These are not required by any downstream pipeline stage; carrying them
 # through would expose sensitive data in intermediate DataFrames and outputs.
 # The primary join key (msisdn / agent_msisdn) is intentionally excluded from
-# this set — it is the pipeline join key and is handled separately.
+# this set -- it is the pipeline join key and is handled separately.
 _PII_COLUMNS_TO_DROP = frozenset(
     {
         "date_of_birth",
@@ -72,9 +72,9 @@ def _read_csv(path: str | Path) -> pd.DataFrame:
     """Read CSV after confirming the file exists."""
     p = Path(path)
     if not p.exists():
-        raise FileNotFoundError(f"ExtraFloat data loader: file not found — {p.resolve()}")
+        raise FileNotFoundError(f"ExtraFloat data loader: file not found -- {p.resolve()}")
     df = pd.read_csv(p, sep=None, engine="python")
-    logger.info("Loaded %s — %d rows, %d columns", p.name, len(df), len(df.columns))
+    logger.info("Loaded %s -- %d rows, %d columns", p.name, len(df), len(df.columns))
     return df
 
 
@@ -93,9 +93,9 @@ def _parse_dates(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
     return df
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # 1. TRANSACTION CAPACITY FEATURES
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 
 def load_transaction_capacity_features(path: str | Path) -> pd.DataFrame:
@@ -104,8 +104,8 @@ def load_transaction_capacity_features(path: str | Path) -> pd.DataFrame:
 
     Column renames applied
     ----------------------
-    - ``agent_msisdn``  → ``msisdn``      (if ``msisdn`` absent)
-    - ``tbl_dt``        → ``snapshot_dt`` (if ``snapshot_dt`` absent)
+    - ``agent_msisdn``  -> ``msisdn``      (if ``msisdn`` absent)
+    - ``tbl_dt``        -> ``snapshot_dt`` (if ``snapshot_dt`` absent)
 
     Date columns parsed
     -------------------
@@ -116,25 +116,25 @@ def load_transaction_capacity_features(path: str | Path) -> pd.DataFrame:
     """
     df = _read_csv(path)
 
-    # ── Column renames ──────────────────────────────────────────────────────
+    # -- Column renames ------------------------------------------------------
     if "agent_msisdn" in df.columns and "msisdn" not in df.columns:
         df = df.rename(columns={"agent_msisdn": "msisdn"})
-        logger.info("Renamed agent_msisdn → msisdn")
+        logger.info("Renamed agent_msisdn -> msisdn")
 
     if "tbl_dt" in df.columns and "snapshot_dt" not in df.columns:
         df = df.rename(columns={"tbl_dt": "snapshot_dt"})
-        logger.info("Renamed tbl_dt → snapshot_dt")
+        logger.info("Renamed tbl_dt -> snapshot_dt")
 
-    # ── Date parsing ────────────────────────────────────────────────────────
+    # -- Date parsing --------------------------------------------------------
     df = _parse_dates(df, ["snapshot_dt", "tbl_dt", "activation_dt"])
 
     df = _drop_extra_pii(df)
     return df
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # 2. LOAN SUMMARY RECENT FEATURES
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 
 def load_loan_summary_recent_features(path: str | Path) -> pd.DataFrame:
@@ -160,18 +160,18 @@ def load_loan_summary_recent_features(path: str | Path) -> pd.DataFrame:
     df = _read_csv(path)
     df.columns = df.columns.str.lower()
 
-    # ── Date parsing ────────────────────────────────────────────────────────
+    # -- Date parsing --------------------------------------------------------
     df = _parse_dates(
         df,
         ["snapshot_dt", "tbl_dt", "last_disbursement_date", "last_repayment_date"],
     )
 
-    # ── Zero-fill missing 3m columns ────────────────────────────────────────
+    # -- Zero-fill missing 3m columns ----------------------------------------
     missing_3m = [c for c in _LOAN_SUMMARY_3M_COLS if c not in df.columns]
     if missing_3m:
         logger.warning(
             "load_loan_summary_recent_features: 3m columns absent from source "
-            "and zero-filled — %s. Temporal blending in compute_recent_usage_cap() "
+            "and zero-filled -- %s. Temporal blending in compute_recent_usage_cap() "
             "will fall back to 1m values.",
             ", ".join(missing_3m),
         )
@@ -182,9 +182,9 @@ def load_loan_summary_recent_features(path: str | Path) -> pd.DataFrame:
     return df
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # 3. BORROWER LIMIT FEATURES
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 
 def load_borrower_limit_features(path: str | Path) -> pd.DataFrame:
@@ -193,7 +193,7 @@ def load_borrower_limit_features(path: str | Path) -> pd.DataFrame:
 
     Column renames applied
     ----------------------
-    - ``phonenumber`` → ``msisdn`` (if ``msisdn`` absent)
+    - ``phonenumber`` -> ``msisdn`` (if ``msisdn`` absent)
 
     Timestamp columns parsed
     ------------------------
@@ -204,12 +204,12 @@ def load_borrower_limit_features(path: str | Path) -> pd.DataFrame:
     """
     df = _read_csv(path)
 
-    # ── Column renames ──────────────────────────────────────────────────────
+    # -- Column renames ------------------------------------------------------
     if "phonenumber" in df.columns and "msisdn" not in df.columns:
         df = df.rename(columns={"phonenumber": "msisdn"})
-        logger.info("Renamed phonenumber → msisdn")
+        logger.info("Renamed phonenumber -> msisdn")
 
-    # ── Timestamp parsing ───────────────────────────────────────────────────
+    # -- Timestamp parsing ---------------------------------------------------
     df = _parse_dates(
         df,
         ["first_loan_ts", "latest_loan_ts", "latest_disbursement_ts"],

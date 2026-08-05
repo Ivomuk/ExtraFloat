@@ -18,9 +18,9 @@ from pd_model.preprocessing.transformations import (
     get_and_classify_pd_features,
 )
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Helpers
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 
 def _make_training_df(n: int = 500, seed: int = 42) -> pd.DataFrame:
@@ -83,9 +83,9 @@ def _transform_with_fitted(
     return result
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # 1. Saved clip bounds are present after training-style run
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 
 def test_transform_report_contains_lo_hi_bounds():
@@ -110,9 +110,9 @@ def test_transform_report_contains_lo_hi_bounds():
             assert float(fp["hi"]) >= float(fp["lo"]), f"{feat}: hi < lo"
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # 2. Single-row score equals that row scored in a large batch
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 
 def test_single_row_score_equals_batch_row():
@@ -141,14 +141,14 @@ def test_single_row_score_equals_batch_row():
         batch_val = float(batch_result.iloc[target_idx][col])
         single_val = float(single_result.iloc[0][col])
         assert abs(batch_val - single_val) < 1e-5, (
-            f"Column '{col}': single={single_val:.6f} vs batch={batch_val:.6f} — "
+            f"Column '{col}': single={single_val:.6f} vs batch={batch_val:.6f} -- "
             "scores differ by batch composition (batch-dependency bug)"
         )
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # 3. Row order independence
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 
 def test_row_order_independence():
@@ -184,9 +184,9 @@ def test_row_order_independence():
         )
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # 4. Duplicate extreme-value rows do not pollute other agents
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 
 def test_duplicate_extreme_rows_do_not_pollute():
@@ -198,7 +198,7 @@ def test_duplicate_extreme_rows_do_not_pollute():
 
     normal_df = _make_training_df(n=50, seed=5)
 
-    # Extreme agent: all numeric features set to 10× the column maximum from training
+    # Extreme agent: all numeric features set to 10x the column maximum from training
     extreme_row = normal_df.iloc[[0]].copy()
     for col in [c for c in pd_features if c in extreme_row.columns]:
         extreme_row[col] = float(train_df[col].max()) * 10
@@ -228,9 +228,9 @@ def test_duplicate_extreme_rows_do_not_pollute():
         )
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # 5. Determinism across repeated executions
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 
 def test_deterministic_across_repeated_executions():

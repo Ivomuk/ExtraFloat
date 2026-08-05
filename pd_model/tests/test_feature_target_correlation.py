@@ -2,13 +2,13 @@
 Test 4: Feature-target Spearman / Pearson correlation analysis.
 
 A Spearman correlation |r| > 0.80 between a single feature and the binary target
-signals the feature may be a near-proxy for the label — either temporal leakage
+signals the feature may be a near-proxy for the label -- either temporal leakage
 or business-process co-definition.
 
 Thresholds:
-    |r| > 0.80 → ALERT (investigate or exclude)
-    |r| > 0.70 → WARN
-    |r| <= 0.70 → ok
+    |r| > 0.80 -> ALERT (investigate or exclude)
+    |r| > 0.70 -> WARN
+    |r| <= 0.70 -> ok
 
 To analyse the real training matrix:
     from pd_model.tests.test_feature_target_correlation import feature_label_correlations

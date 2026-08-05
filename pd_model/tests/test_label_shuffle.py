@@ -2,15 +2,15 @@
 Test 2: Label shuffle / permutation test.
 
 If the 0.989 AUC were due to data leakage, shuffling the target labels would
-not substantially reduce model performance — a leaky feature correlates with
+not substantially reduce model performance -- a leaky feature correlates with
 the label regardless of row order.
 
 With genuine signal, shuffling labels destroys the feature-label relationship
-and AUC collapses to ~0.50 ± sampling noise.
+and AUC collapses to ~0.50 +/- sampling noise.
 
 Interpretation:
-  real_auc - mean(shuffled_aucs) > 0.10  → model is learning real signal
-  real_auc - mean(shuffled_aucs) < 0.05  → performance likely driven by leakage
+  real_auc - mean(shuffled_aucs) > 0.10  -> model is learning real signal
+  real_auc - mean(shuffled_aucs) < 0.05  -> performance likely driven by leakage
 
 To apply to the real model:
     from pd_model.tests.test_label_shuffle import permutation_auc_distribution, train_and_score

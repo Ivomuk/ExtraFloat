@@ -41,7 +41,7 @@ def compute_shap_values(model, X: pd.DataFrame, model_key: str) -> np.ndarray:
     ----------
     model     : fitted XGBClassifier or LGBMClassifier
     X         : aligned feature DataFrame (output of align_features)
-    model_key : "xgb" or "lgb" — used only for logging
+    model_key : "xgb" or "lgb" -- used only for logging
 
     Returns
     -------
@@ -109,7 +109,7 @@ def build_adverse_action_df(
     feat_arr = np.array(feature_names)
     n = shap_values.shape[0]
 
-    # Sort each row descending by SHAP — argsort on negated array
+    # Sort each row descending by SHAP -- argsort on negated array
     top_idx = np.argsort(-shap_values, axis=1)[:, :n_reasons]  # (n, n_reasons)
 
     # Gather top SHAP values and corresponding feature names

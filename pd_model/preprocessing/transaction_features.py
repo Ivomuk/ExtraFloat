@@ -1,5 +1,5 @@
 """
-Phase 2.1 — Richer transactional behaviour features for PD modelling.
+Phase 2.1 -- Richer transactional behaviour features for PD modelling.
 
 Transforms the raw agent mart snapshot into a rich feature set covering:
 - Inactivity structure (consecutive, full, per-horizon)
@@ -252,7 +252,7 @@ def run_phase_2_1_richer_tx_behaviour(
     # ------------------------------------------------------------------ #
     new_cols = sorted(set(df.columns) - cols_before)
     logger.info(
-        "Phase 2.1: created %d transactional behaviour features (df shape: %s → %s)",
+        "Phase 2.1: created %d transactional behaviour features (df shape: %s -> %s)",
         len(new_cols),
         df_pd.shape,
         df.shape,

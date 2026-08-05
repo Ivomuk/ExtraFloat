@@ -61,7 +61,7 @@ class TestBuildAdverseActionDf:
         assert len(df) == 50
 
     def test_negative_shap_not_adverse(self):
-        # All SHAP values negative → all adverse reason slots should be None
+        # All SHAP values negative -> all adverse reason slots should be None
         shap_vals = -np.abs(np.random.default_rng(1).normal(0.1, 0.05, (10, 4)))
         feat_names = [f"f{i}" for i in range(4)]
         df = build_adverse_action_df(shap_vals, feat_names, n_reasons=2, min_shap=0.0)

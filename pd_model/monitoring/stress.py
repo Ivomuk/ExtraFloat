@@ -1,5 +1,5 @@
 """
-Stress testing — what happens to approval rates and expected loss
+Stress testing -- what happens to approval rates and expected loss
 when bad rates scale up.
 
 Uses *locked thresholds* from the training-time policy table: the PD cutoff
@@ -57,17 +57,17 @@ def run_stress_test(
       - Multiply each agent's cal_pd by the stress multiplier (capped at 1.0)
       - Count agents still approved (stressed_pd <= locked cutoff)
       - Compute expected loss (EL) = sum(stressed_pd) for approved agents,
-        or sum(stressed_pd × loan_size) if loan_size_col is provided
+        or sum(stressed_pd x loan_size) if loan_size_col is provided
 
     Parameters
     ----------
     scored_df             : DataFrame with cal_pd (and optionally loan_size_col)
-    policy_threshold_tbl  : output of build_policy_tables — must contain
+    policy_threshold_tbl  : output of build_policy_tables -- must contain
                             approve_rate_target and cutoff columns
     cal_pd_col            : calibrated PD column name (default "cal_pd")
     loan_size_col         : optional column for loan amounts; if None EL uses
                             count-weighted PD (assumes unit loan size)
-    stress_multipliers    : PD scaling factors to test (default 1×, 1.5×, 2×, 3×)
+    stress_multipliers    : PD scaling factors to test (default 1x, 1.5x, 2x, 3x)
     operating_points      : approval-rate targets to lock (default 10/20/50/80%)
 
     Returns
@@ -77,8 +77,8 @@ def run_stress_test(
         locked_pd_cutoff,
         n_agents, n_approved, approval_rate,
         expected_loss, el_per_approved,
-        approval_rate_change_pp  (vs 1× baseline)
-        el_change_pct            (vs 1× baseline)
+        approval_rate_change_pp  (vs 1x baseline)
+        el_change_pct            (vs 1x baseline)
     """
     if cal_pd_col not in scored_df.columns:
         raise ValueError(f"[run_stress_test] cal_pd column '{cal_pd_col}' not found in scored_df")
@@ -96,7 +96,7 @@ def run_stress_test(
     thresh_tbl["approve_rate_target"] = pd.to_numeric(thresh_tbl["approve_rate_target"], errors="coerce")
 
     rows = []
-    baseline: dict[float, float] = {}  # operating_point → baseline approval_rate
+    baseline: dict[float, float] = {}  # operating_point -> baseline approval_rate
 
     for op in operating_points:
         # Find the row in policy table closest to the requested operating point
@@ -134,7 +134,7 @@ def run_stress_test(
 
     df = pd.DataFrame(rows)
 
-    # Compute change vs 1× baseline
+    # Compute change vs 1x baseline
     df["approval_rate_change_pp"] = df.apply(
         lambda r: round((r["approval_rate"] - baseline.get(r["operating_point"], np.nan)) * 100, 2),
         axis=1,
@@ -174,7 +174,7 @@ def build_stress_summary(
     metric: str = "approval_rate",
 ) -> pd.DataFrame:
     """
-    Pivot stress table to operating_point × stress_multiplier wide format.
+    Pivot stress table to operating_point x stress_multiplier wide format.
 
     Parameters
     ----------

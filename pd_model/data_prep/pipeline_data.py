@@ -2,7 +2,7 @@
 Final training/validation data preparation for PD modelling (file6).
 
 Provides:
-- ``prepare_pd_training_and_validation_data`` – time-split the modelling
+- ``prepare_pd_training_and_validation_data`` - time-split the modelling
   DataFrame into train and validation sets, enforce leakage guards, and
   return aligned X / y / metadata objects ready for IV filtering and model
   training.
@@ -246,7 +246,7 @@ def prepare_pd_training_and_validation_data(
         len(candidate_features),
     )
     logger.info(
-        "prepare_pd_data: Bad rate — train=%.2f%% | val=%.2f%%",
+        "prepare_pd_data: Bad rate -- train=%.2f%% | val=%.2f%%",
         float(y_train.mean()) * 100,
         float(y_val.mean()) * 100,
     )

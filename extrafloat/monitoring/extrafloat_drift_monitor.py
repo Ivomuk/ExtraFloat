@@ -9,7 +9,7 @@ import pandas as pd
 
 logger = logging.getLogger(__name__)
 
-# Optional scipy — PSI works without it; KS p-value and chi-squared require it
+# Optional scipy -- PSI works without it; KS p-value and chi-squared require it
 try:
     from scipy import stats as _scipy_stats
 
@@ -18,13 +18,13 @@ except ImportError:
     _scipy_stats = None
     _SCIPY_AVAILABLE = False
     logger.info(
-        "extrafloat_drift_monitor: scipy not available — "
+        "extrafloat_drift_monitor: scipy not available -- "
         "KS p-values and chi-squared tests will be skipped; PSI runs normally."
     )
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # SEVERITY CONSTANTS
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 SEVERITY_STABLE = "stable"
 SEVERITY_MONITOR = "monitor"
@@ -42,39 +42,39 @@ _SEVERITY_RANK: dict[str, int] = {
 }
 _RANK_SEVERITY: dict[int, str] = {v: k for k, v in _SEVERITY_RANK.items()}
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # DEFAULT CONFIGURATION
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 DEFAULT_DRIFT_CONFIG: dict[str, Any] = {
-    # ── PSI thresholds ────────────────────────────────────────────────────────
+    # -- PSI thresholds --------------------------------------------------------
     "psi": {
         "stable_threshold": 0.10,
         "alert_threshold": 0.25,
         "n_bins": 10,
         "epsilon": 1e-6,
     },
-    # ── KS test ───────────────────────────────────────────────────────────────
+    # -- KS test ---------------------------------------------------------------
     "ks": {
         "alpha": 0.05,
     },
-    # ── Percentile shift ──────────────────────────────────────────────────────
+    # -- Percentile shift ------------------------------------------------------
     "percentile_shift": {
         "percentiles": [25, 50, 75, 95],
-        "monitor_pct_change": 0.10,  # 10% relative change → monitor
-        "alert_pct_change": 0.20,  # 20% relative change → alert
+        "monitor_pct_change": 0.10,  # 10% relative change -> monitor
+        "alert_pct_change": 0.20,  # 20% relative change -> alert
     },
-    # ── Composition / chi-squared ─────────────────────────────────────────────
+    # -- Composition / chi-squared ---------------------------------------------
     "composition": {
         "chi2_alpha": 0.05,
         "min_expected_freq": 5,
         "alert_fraction_delta": 0.05,  # fallback when scipy absent
-        # Cramér's V thresholds — applied when chi-sq is significant to prevent
+        # Cramér's V thresholds -- applied when chi-sq is significant to prevent
         # large-n datasets from inflating everything to alert.
-        "cramers_v_alert_threshold": 0.30,  # V >= 0.30 → alert
-        "cramers_v_monitor_threshold": 0.10,  # 0.10 <= V < 0.30 → monitor
+        "cramers_v_alert_threshold": 0.30,  # V >= 0.30 -> alert
+        "cramers_v_monitor_threshold": 0.10,  # 0.10 <= V < 0.30 -> monitor
     },
-    # ── Policy calibration health ─────────────────────────────────────────────
+    # -- Policy calibration health ---------------------------------------------
     "policy_health": {
         "regulatory_cap_rate_alert": 0.20,
         "thin_file_abs_change_alert": 0.05,
@@ -85,16 +85,16 @@ DEFAULT_DRIFT_CONFIG: dict[str, Any] = {
         "kyc_block_relative_monitor": 0.20,
         "usage_inactive_relative_monitor": 0.20,
         # Relative-change checks are suppressed when ref_rate < this floor
-        # to prevent spurious alerts from tiny baselines (e.g. 0.1% → 0.3%
+        # to prevent spurious alerts from tiny baselines (e.g. 0.1% -> 0.3%
         # is a 200% relative change but both are operationally negligible).
         "min_relative_baseline": 0.02,
     },
-    # ── Cap driver composition ─────────────────────────────────────────────────
+    # -- Cap driver composition -------------------------------------------------
     "cap_driver": {
         "chi2_alpha": 0.05,
-        "dominant_shift_alert": 0.15,  # 15 pp shift in top driver → alert
+        "dominant_shift_alert": 0.15,  # 15 pp shift in top driver -> alert
     },
-    # ── Input features monitored per category ─────────────────────────────────
+    # -- Input features monitored per category ---------------------------------
     "input_features": {
         "capacity": [
             "avg_daily_balance_30d",
@@ -124,7 +124,7 @@ DEFAULT_DRIFT_CONFIG: dict[str, Any] = {
             "recent_penalty_events_1m",
         ],
     },
-    # ── Output features monitored ─────────────────────────────────────────────
+    # -- Output features monitored ---------------------------------------------
     "output_features": {
         "limits": [
             "assigned_limit",
@@ -137,7 +137,7 @@ DEFAULT_DRIFT_CONFIG: dict[str, Any] = {
         ],
         "risk": ["risk_score"],
     },
-    # ── Categorical columns for composition monitoring ─────────────────────────
+    # -- Categorical columns for composition monitoring -------------------------
     "composition_features": [
         "risk_tier",
         "combined_top_driver",
@@ -152,9 +152,9 @@ def _get_drift_config(config: dict[str, Any] | None) -> dict[str, Any]:
     return config if config is not None else DEFAULT_DRIFT_CONFIG
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # RESULT DATA CLASSES
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 
 @dataclass
@@ -172,7 +172,7 @@ class FeatureDriftResult:
 @dataclass
 class CompositionDriftResult:
     feature: str
-    ref_distribution: dict[str, float]  # category → proportion
+    ref_distribution: dict[str, float]  # category -> proportion
     cur_distribution: dict[str, float]
     chi2_statistic: float | None
     chi2_pvalue: float | None
@@ -246,9 +246,9 @@ class DriftReport:
         }
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # CORE STATISTICAL PRIMITIVES
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 
 def _psi_severity(psi: float, cfg: dict[str, Any]) -> str:
@@ -273,7 +273,7 @@ def _compute_psi(
         return 0.0
 
     if np.std(ref) < epsilon:
-        return 0.0  # constant column — no distributional information
+        return 0.0  # constant column -- no distributional information
 
     # Quantile-based bin edges from reference population (robust to skew)
     quantiles = np.linspace(0, 100, n_bins + 1)
@@ -417,7 +417,7 @@ def _compute_chi2(
 
 
 def _compute_cramers_v(chi2_stat: float, n_total: int, n_categories: int) -> float:
-    """Bias-corrected Cramér's V for a 2×k contingency table.
+    """Bias-corrected Cramér's V for a 2xk contingency table.
 
     Subtracts the expected chi-square under the null so that V stays near 0
     for large-n datasets with negligible real effects.
@@ -438,9 +438,9 @@ def _aggregate_severity(results_lists: list) -> str:
     return _RANK_SEVERITY[max_rank]
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # SINGLE-FEATURE DRIFT HELPER
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 
 def _monitor_single_feature(
@@ -465,7 +465,7 @@ def _monitor_single_feature(
     n_unique = len(np.unique(ref_clean)) if len(ref_clean) > 0 else 0
     if n_unique < _LOW_CARDINALITY_THRESHOLD:
         logger.debug(
-            "_monitor_single_feature: %s has %d unique values — using categorical PSI",
+            "_monitor_single_feature: %s has %d unique values -- using categorical PSI",
             feature,
             n_unique,
         )
@@ -505,9 +505,9 @@ def _monitor_single_feature(
     )
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# CATEGORY 1 — INPUT DISTRIBUTION DRIFT
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
+# CATEGORY 1 -- INPUT DISTRIBUTION DRIFT
+# -----------------------------------------------------------------------------
 
 
 def monitor_input_drift(
@@ -544,9 +544,9 @@ def monitor_input_drift(
     return results, skipped
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# CATEGORY 2 — OUTPUT DISTRIBUTION DRIFT
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
+# CATEGORY 2 -- OUTPUT DISTRIBUTION DRIFT
+# -----------------------------------------------------------------------------
 
 
 def _mean_limit_by_tier(
@@ -612,9 +612,9 @@ def monitor_output_drift(
     return results, skipped
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# CATEGORY 3 — POPULATION COMPOSITION DRIFT
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
+# CATEGORY 3 -- POPULATION COMPOSITION DRIFT
+# -----------------------------------------------------------------------------
 
 
 def _discretize_agent_tier_multiplier(series: pd.Series) -> pd.Series:
@@ -677,7 +677,7 @@ def _monitor_categorical(
         n_total = ref_total + cur_total
         cramers_v = _compute_cramers_v(chi2, n_total, len(all_cats))
         # Effect-size tiering: large-n datasets can be statistically significant
-        # with negligible real impact — use V to distinguish alert from monitor.
+        # with negligible real impact -- use V to distinguish alert from monitor.
         if cramers_v >= comp_cfg["cramers_v_alert_threshold"]:
             severity = SEVERITY_ALERT
         elif cramers_v >= comp_cfg["cramers_v_monitor_threshold"]:
@@ -687,7 +687,7 @@ def _monitor_categorical(
             # (common at n > 10,000 where even 1 pp shifts become detectable)
             severity = SEVERITY_STABLE
     elif sig is None:
-        # scipy absent or expected-freq too sparse — fall back to fraction-delta
+        # scipy absent or expected-freq too sparse -- fall back to fraction-delta
         severity = (
             SEVERITY_ALERT
             if max_abs_shift >= comp_cfg["alert_fraction_delta"] * 2
@@ -737,9 +737,9 @@ def monitor_composition_drift(
     return results, skipped
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# CATEGORY 4 — POLICY CALIBRATION HEALTH
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
+# CATEGORY 4 -- POLICY CALIBRATION HEALTH
+# -----------------------------------------------------------------------------
 
 
 def _flag_rate(df: pd.DataFrame, col: str) -> float:
@@ -918,9 +918,9 @@ def monitor_policy_health(
     return results
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# CATEGORY 5 — CAP DRIVER COMPOSITION DRIFT ("silent recalibration")
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
+# CATEGORY 5 -- CAP DRIVER COMPOSITION DRIFT ("silent recalibration")
+# -----------------------------------------------------------------------------
 
 
 def _detect_silent_recalibration(
@@ -979,9 +979,9 @@ def monitor_cap_driver_drift(
     return results, skipped
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # MAIN ENTRY POINT
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 
 def run_drift_monitor(
@@ -1040,11 +1040,11 @@ def run_drift_monitor(
     )
 
     summary = report.summary_dict()
-    logger.info("run_drift_monitor: complete — %s", summary)
+    logger.info("run_drift_monitor: complete -- %s", summary)
 
     if overall == SEVERITY_ALERT:
         logger.warning(
-            "run_drift_monitor: ALERT — overall drift severity is alert. "
+            "run_drift_monitor: ALERT -- overall drift severity is alert. "
             "Review top_input_alerts=%s top_output_alerts=%s top_policy_alerts=%s",
             summary["top_input_alerts"],
             summary["top_output_alerts"],

@@ -31,7 +31,7 @@ DATE_COLS: list[str] = [
 ]
 
 # ======================================================================== #
-# Feature blacklist — columns that must never enter the model feature set
+# Feature blacklist -- columns that must never enter the model feature set
 # ======================================================================== #
 
 PD_FEATURE_BLACKLIST: frozenset[str] = frozenset(
@@ -85,14 +85,14 @@ PD_FEATURE_BLACKLIST: frozenset[str] = frozenset(
         "cluster_id_k6",
         "cluster_round2",
         "cluster_id_gmm",
-        # Scorecard outputs — derived PD proxies, must not feed into the model
+        # Scorecard outputs -- derived PD proxies, must not feed into the model
         "never_loan_points",
         "never_loan_score_0_100",
         "never_loan_pd_like",
         "never_loan_top_drivers",
-        # Business-process co-definition proxy — binary alias of net_exposure_6M
+        # Business-process co-definition proxy -- binary alias of net_exposure_6M
         "currently_outstanding_flag",
-        # Sample-selection filter — present in repayments CSV, must never enter features
+        # Sample-selection filter -- present in repayments CSV, must never enter features
         "outcome_observed_30d",
         "outcome_observed_30D",
     }

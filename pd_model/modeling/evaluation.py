@@ -1,5 +1,5 @@
 """
-Model evaluation utilities — decile tables, segment AUCs, model comparison.
+Model evaluation utilities -- decile tables, segment AUCs, model comparison.
 
 All functions are pure (no globals, no print statements). Results are returned
 as DataFrames or dicts; callers decide what to log or persist.
@@ -80,8 +80,8 @@ def build_decile_tables(
     -------
     dict with keys:
         "seg_col"     : name of segment column used
-        "seg_summary" : DataFrame — one row per segment with n, bad_rate, auc
-        "overall"     : DataFrame — decile table over all rows
+        "seg_summary" : DataFrame -- one row per segment with n, bad_rate, auc
+        "overall"     : DataFrame -- decile table over all rows
         "by_segment"  : dict[segment_name -> decile DataFrame]
     """
     df_work = df.copy()

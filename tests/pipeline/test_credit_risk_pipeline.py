@@ -1,7 +1,7 @@
 """
 Tests for the CreditRisk end-to-end pipeline integration.
 
-These tests use synthetic DataFrames and a mock PD model — no trained artifacts
+These tests use synthetic DataFrames and a mock PD model -- no trained artifacts
 are required. They verify:
 
   1. cal_pd flows through compute_risk_cap() correctly (short-circuit path).
@@ -33,9 +33,9 @@ from extrafloat.engine.run_extrafloat_limit_engine import (
 )
 from pd_model.exceptions import DataAlignmentError
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Helpers
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 
 def _minimal_features_df(n: int = 5, seed: int = 42) -> pd.DataFrame:
@@ -84,9 +84,9 @@ def _minimal_features_df(n: int = 5, seed: int = 42) -> pd.DataFrame:
     )
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 1. compute_risk_cap — cal_pd short-circuit path
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
+# 1. compute_risk_cap -- cal_pd short-circuit path
+# -----------------------------------------------------------------------------
 
 
 class TestComputeRiskCapCalPdPath:
@@ -110,7 +110,7 @@ class TestComputeRiskCapCalPdPath:
         # Force signals to produce a very different risk_score (all-zero = 0.0)
         df["on_time_repayment_rate"] = 0.0
         df["lifetime_default_rate"] = 1.0
-        # But cal_pd says 0.20 → risk_score should be 0.80, not 0.0
+        # But cal_pd says 0.20 -> risk_score should be 0.80, not 0.0
         df["cal_pd"] = 0.20
 
         result = compute_risk_cap(df)
@@ -126,15 +126,15 @@ class TestComputeRiskCapCalPdPath:
     def test_risk_cap_is_clipped_within_global_bounds(self):
         cfg = _get_config(None)
         df = _minimal_features_df(n=5)
-        df["cal_pd"] = 0.01  # very safe → high risk_score → high risk_cap
+        df["cal_pd"] = 0.01  # very safe -> high risk_score -> high risk_cap
         result = compute_risk_cap(df, config=cfg)
         assert (result["risk_cap"] <= cfg["global_ceiling_limit"]).all()
         assert (result["risk_cap"] >= cfg["global_floor_limit"]).all()
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 2. compute_risk_cap — 7-signal fallback path
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
+# 2. compute_risk_cap -- 7-signal fallback path
+# -----------------------------------------------------------------------------
 
 
 class TestComputeRiskCapFallback:
@@ -159,9 +159,9 @@ class TestComputeRiskCapFallback:
         assert (result["risk_score"] <= 1.0).all()
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # 3. FINAL_OUTPUT_COLUMNS includes cal_pd
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 
 def test_final_output_columns_includes_cal_pd():
@@ -178,9 +178,9 @@ def test_cal_pd_present_in_trimmed_output():
     assert "assigned_limit" in result.columns
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # 4. Full engine run with cal_pd
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 
 class TestEngineWithCalPd:
@@ -210,20 +210,20 @@ class TestEngineWithCalPd:
 
     def test_tier_1_assigned_to_low_cal_pd_agents(self):
         df = _minimal_features_df(n=10)
-        df["cal_pd"] = 0.05  # risk_score = 0.95 → tier_1 (≥ 0.85)
+        df["cal_pd"] = 0.05  # risk_score = 0.95 -> tier_1 (>= 0.85)
         result = run_extrafloat_limit_engine(df, keep_intermediate=True)
         assert (result["risk_tier"] == "tier_1").all()
 
     def test_tier_4_assigned_to_high_cal_pd_agents(self):
         df = _minimal_features_df(n=10)
-        df["cal_pd"] = 0.90  # risk_score = 0.10 → tier_4 (< 0.35)
+        df["cal_pd"] = 0.90  # risk_score = 0.10 -> tier_4 (< 0.35)
         result = run_extrafloat_limit_engine(df, keep_intermediate=True)
         assert (result["risk_tier"] == "tier_4").all()
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # 5. Pipeline join: agents missing cal_pd fall back to 7-signal blend
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 
 def test_partial_cal_pd_coverage():
@@ -239,9 +239,9 @@ def test_partial_cal_pd_coverage():
     np.testing.assert_allclose(result.loc[:4, "risk_score"].values, 0.85, atol=1e-9)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # 6. run_credit_risk_pipeline integration smoke test (mocked PD model)
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 
 def _make_pd_scored(msisdn_list):
@@ -342,9 +342,9 @@ def test_inference_receives_raw_data_with_agent_msisdn(tmp_path):
     assert "msisdn" not in captured["df_raw"].columns
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # 7. Experience factor NOT applied on the cal_pd path (fix 3)
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 
 def test_experience_factor_not_applied_on_cal_pd_path():
@@ -375,21 +375,21 @@ def test_experience_factor_not_applied_on_cal_pd_path():
         atol=1e-6,
         err_msg=(
             "risk_cap must be identical for thin-file and experienced agents "
-            "when cal_pd is the same — experience_factor must not be applied "
+            "when cal_pd is the same -- experience_factor must not be applied "
             "on the cal_pd path"
         ),
     )
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # 8. Preflight artifact check (fix 2)
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 
 def test_preflight_raises_on_missing_artifacts(tmp_path):
     from run_credit_risk_pipeline import _REQUIRED_ARTIFACTS, _check_artifacts
 
-    # Empty artifacts dir — all files missing
+    # Empty artifacts dir -- all files missing
     with pytest.raises(FileNotFoundError) as exc_info:
         _check_artifacts(tmp_path)
 
@@ -407,7 +407,7 @@ def test_preflight_passes_when_all_artifacts_present(tmp_path):
 
     for fname in _REQUIRED_ARTIFACTS:
         if fname == "model_metadata.json":
-            # Empty checksums — use allow_unverified=True (dev/test mode)
+            # Empty checksums -- use allow_unverified=True (dev/test mode)
             (tmp_path / fname).write_text(_json.dumps({}))
         else:
             (tmp_path / fname).touch()
@@ -416,13 +416,13 @@ def test_preflight_passes_when_all_artifacts_present(tmp_path):
     _check_artifacts(tmp_path, allow_unverified=True)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 8. pd_decile — population-relative risk rank from cal_pd
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
+# 8. pd_decile -- population-relative risk rank from cal_pd
+# -----------------------------------------------------------------------------
 
 
 def test_pd_decile_computed_when_cal_pd_present():
-    """pd_decile (1–10) is present and correctly ordered when cal_pd is available."""
+    """pd_decile (1-10) is present and correctly ordered when cal_pd is available."""
     from extrafloat.engine.extrafloat_limit_engine_caps import apply_policy_adjustments
 
     n = 50
@@ -451,7 +451,7 @@ def test_pd_decile_nan_when_cal_pd_absent():
     n = 20
     rng = np.random.default_rng(7)
     df = _minimal_features_df(n=n, seed=7)
-    # Provide risk_score directly (no cal_pd — simulates 7-signal path)
+    # Provide risk_score directly (no cal_pd -- simulates 7-signal path)
     df["risk_score"] = rng.uniform(0.1, 0.9, n)
     df["combined_cap"] = rng.uniform(100_000, 2_000_000, n)
     df["agent_profile"] = "Gold"
@@ -469,9 +469,9 @@ def test_pd_decile_in_final_output_columns():
     assert "pd_decile" in FINAL_OUTPUT_COLUMNS
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 9. F5 — Calibration fail-closed
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
+# 9. F5 -- Calibration fail-closed
+# -----------------------------------------------------------------------------
 
 
 def test_calibration_exception_propagates():
@@ -483,7 +483,7 @@ def test_calibration_exception_propagates():
     rng = np.random.default_rng(42)
     df = pd.DataFrame(rng.uniform(0, 1, (n, len(feature_cols))), columns=feature_cols)
     df["agent_msisdn"] = [f"256{i:09d}" for i in range(n)]
-    df["thin_file_flag"] = 0  # all thick-file → triggers calibration path
+    df["thin_file_flag"] = 0  # all thick-file -> triggers calibration path
 
     mock_xgb = MagicMock()
     mock_xgb.predict_proba.return_value = np.column_stack([np.full(n, 0.8), np.full(n, 0.2)])
@@ -581,9 +581,9 @@ def test_score_source_fallback_when_cal_pd_absent(tmp_path):
     )
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 10. F6 — Join integrity
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
+# 10. F6 -- Join integrity
+# -----------------------------------------------------------------------------
 
 
 def test_join_raises_on_duplicate_engine_msisdn(tmp_path):
@@ -718,16 +718,16 @@ def test_msisdn_dot_zero_normalized(tmp_path):
             artifacts_dir=str(tmp_path),
         )
 
-    # All agents must have cal_pd — normalisation resolved the mismatch
+    # All agents must have cal_pd -- normalisation resolved the mismatch
     assert result["cal_pd"].notna().all(), (
         "MSISDN .0-suffix normalisation failed: some agents have no cal_pd "
         "despite matching canonical MSISDNs in PD output"
     )
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Checksum integrity tests (NF2)
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 
 def test_checksum_passes_with_valid_artifacts(tmp_path):

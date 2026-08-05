@@ -3,7 +3,7 @@ Alert generation from drift reports.
 
 Checks PSI/CSI against configurable thresholds and surfaces alerts via:
   - Structured JSON alert file (always written when output_path provided)
-  - Slack webhook POST (optional — pass webhook_url)
+  - Slack webhook POST (optional -- pass webhook_url)
   - Structured log messages (always)
 
 Typical usage in a scheduled job
@@ -158,7 +158,7 @@ def write_alert_report(
     Persist the alert payload as JSON.
 
     The ``raw_report`` key (which contains a DataFrame) is excluded to keep
-    the file portable — use ``drift_report["csi_table"].to_csv(...)`` separately
+    the file portable -- use ``drift_report["csi_table"].to_csv(...)`` separately
     if the full CSI table is needed alongside the alert.
     """
     output_path = Path(output_path)
@@ -166,7 +166,7 @@ def write_alert_report(
 
     payload = {k: v for k, v in alerts.items() if k != "raw_report"}
     output_path.write_text(json.dumps(payload, indent=2, default=str))
-    logger.info("Alert report written → %s", output_path)
+    logger.info("Alert report written -> %s", output_path)
 
 
 def send_slack_alert(message: str, webhook_url: str) -> bool:
@@ -193,7 +193,7 @@ def send_slack_alert(message: str, webhook_url: str) -> bool:
             headers={"Content-Type": "application/json"},
             method="POST",
         )
-        with urllib.request.urlopen(req, timeout=10) as resp:  # nosec B310 — URL is the Slack webhook from SLACK_WEBHOOK env var, not user-supplied input
+        with urllib.request.urlopen(req, timeout=10) as resp:  # nosec B310 -- URL is the Slack webhook from SLACK_WEBHOOK env var, not user-supplied input
             success = resp.status == 200
         if success:
             logger.info("Slack alert sent successfully")
@@ -201,7 +201,7 @@ def send_slack_alert(message: str, webhook_url: str) -> bool:
             logger.warning("Slack webhook returned non-200 status")
         return success
     except Exception as exc:
-        logger.warning("Slack alert failed — continuing without notification: %s", exc)
+        logger.warning("Slack alert failed -- continuing without notification: %s", exc)
         return False
 
 
@@ -231,7 +231,7 @@ def _format_message(
     has_critical: bool,
 ) -> str:
     header = f"[{'CRITICAL' if has_critical else 'WARNING' if n_feat_warning else 'OK'}] "
-    header += f"PD Model Drift Report — {report_date}"
+    header += f"PD Model Drift Report -- {report_date}"
 
     psi_str = f"{score_psi:.4f}" if score_psi is not None and not np.isnan(score_psi) else "n/a"
     lines = [

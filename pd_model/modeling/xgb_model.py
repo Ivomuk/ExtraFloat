@@ -40,12 +40,12 @@ def build_monotone_constraints(
     Derive monotone constraint direction (+1 / -1 / 0) per feature from the
     sign of Spearman rank correlation with the target.
 
-    +1  → higher feature value → higher predicted probability (risk-increasing)
-    -1  → higher feature value → lower predicted probability (risk-decreasing)
-     0  → no monotone constraint (correlation is near-zero or undefined)
+    +1  -> higher feature value -> higher predicted probability (risk-increasing)
+    -1  -> higher feature value -> lower predicted probability (risk-decreasing)
+     0  -> no monotone constraint (correlation is near-zero or undefined)
 
     A feature gets constraint 0 if fewer than 30 non-null paired observations
-    are available or if the correlation is within ±0.05 of zero.
+    are available or if the correlation is within +/-0.05 of zero.
     """
     constraints: list[int] = []
     y_arr = pd.to_numeric(pd.Series(y_train), errors="coerce").values
@@ -95,7 +95,7 @@ def train_xgb(
     Fit an XGBClassifier and return scored DataFrames for train and val.
 
     X_train / X_val must NOT contain agent_msisdn, thin_file_flag, or
-    bad_state — those must be provided separately in the meta columns.
+    bad_state -- those must be provided separately in the meta columns.
     The caller is responsible for extracting feature-only matrices before
     calling this function.
 

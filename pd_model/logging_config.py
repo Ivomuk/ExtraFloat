@@ -73,7 +73,7 @@ def install_pii_filter() -> None:
     """Install PIIRedactingFilter on all current root logger handlers.
 
     Call once at application startup after ``logging.basicConfig()`` to protect
-    loggers that propagate to root — extrafloat modules, run_* entry-point scripts,
+    loggers that propagate to root -- extrafloat modules, run_* entry-point scripts,
     and any third-party library logger.
 
     Idempotent: a second call will not add a duplicate filter to a handler that

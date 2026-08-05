@@ -81,14 +81,14 @@ class ModelConfig:
     winsor_q_low: float = 0.005  # lower winsorization quantile
     winsor_q_high: float = 0.995  # upper winsorization quantile
     neg_frac_threshold: float = 0.01  # fraction of negatives that triggers signed-log
-    finite_frac_min: float = 0.98  # minimum finite fraction; below this → revert
+    finite_frac_min: float = 0.98  # minimum finite fraction; below this -> revert
     min_unique_post_transform: int = 2  # minimum distinct non-null values post-transform
 
     # ------------------------------------------------------------------ #
     # Scorecard normalisation
     # ------------------------------------------------------------------ #
-    scorecard_norm_q_low: float = 0.01  # 1st percentile for 0–100 normalisation
-    scorecard_norm_q_high: float = 0.99  # 99th percentile for 0–100 normalisation
+    scorecard_norm_q_low: float = 0.01  # 1st percentile for 0-100 normalisation
+    scorecard_norm_q_high: float = 0.99  # 99th percentile for 0-100 normalisation
 
     # ------------------------------------------------------------------ #
     # Leakage detection

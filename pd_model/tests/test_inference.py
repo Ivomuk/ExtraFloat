@@ -146,7 +146,7 @@ class TestScoreNewAgents:
         df = pd.DataFrame(rng.normal(0, 1, (n, 3)), columns=[f"feat_{i}" for i in range(3)])
         df[feature_config.AGENT_KEY] = [f"msisdn_{i}" for i in range(n)]
         df[feature_config.THIN_FILE_COL] = 0
-        # Should not raise — missing features filled with NaN
+        # Should not raise -- missing features filled with NaN
         result = score_new_agents(df, artifacts)
         assert result.shape[0] == n
 

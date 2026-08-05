@@ -9,10 +9,10 @@ from pd_model.exceptions import PolicyConfigurationError
 
 logger = logging.getLogger(__name__)
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # DEFAULT CONFIGURATION
-# Market: Uganda (UG) — Bank of Uganda supervised mobile money
-# ─────────────────────────────────────────────────────────────────────────────
+# Market: Uganda (UG) -- Bank of Uganda supervised mobile money
+# -----------------------------------------------------------------------------
 
 DEFAULT_CAP_CONFIG = {
     "global_floor_limit": 0.0,
@@ -20,7 +20,7 @@ DEFAULT_CAP_CONFIG = {
     "rounding": {
         "round_to_nearest": 100.0,
     },
-    # ── Capacity cap ──────────────────────────────────────────────────────────
+    # -- Capacity cap ----------------------------------------------------------
     "capacity": {
         # Input multipliers
         "balance_multiplier": 0.80,
@@ -40,12 +40,12 @@ DEFAULT_CAP_CONFIG = {
         "activity_inactive_floor": 0.35,
         "activity_active_weight": 0.65,
     },
-    # ── Experience / trust ramp ───────────────────────────────────────────────
+    # -- Experience / trust ramp -----------------------------------------------
     "experience": {
         "min_experience_factor": 0.30,
         "minimum_total_loans_for_full_trust": 10.0,
     },
-    # ── Recent usage cap ──────────────────────────────────────────────────────
+    # -- Recent usage cap ------------------------------------------------------
     "recent_usage": {
         # Activity gate
         "minimum_activity_required": 100.0,
@@ -64,9 +64,9 @@ DEFAULT_CAP_CONFIG = {
         "repayment_ratio_cap": 1.00,
         "repayment_ratio_floor_weight": 0.55,
     },
-    # ── Cap combination weights ───────────────────────────────────────────────
+    # -- Cap combination weights -----------------------------------------------
     "combination": {
-        # Standard-file weights — must sum to 1.0
+        # Standard-file weights -- must sum to 1.0
         "capacity_weight": 0.40,
         "recent_usage_weight": 0.25,
         "prior_exposure_weight": 0.15,  # was missing; caused silent fallback to 0.10
@@ -82,7 +82,7 @@ DEFAULT_CAP_CONFIG = {
         "prior_limit_max_upside": 1.25,
         "prior_limit_max_downside": 0.75,
     },
-    # ── Risk cap ──────────────────────────────────────────────────────────────
+    # -- Risk cap --------------------------------------------------------------
     "risk": {
         "base_limit": 1_000_000.0,
         "on_time_weight": 0.30,
@@ -99,7 +99,7 @@ DEFAULT_CAP_CONFIG = {
         "min_score": 0.0,
         "max_score": 1.0,
     },
-    # ── Prior exposure cap ────────────────────────────────────────────────────
+    # -- Prior exposure cap ----------------------------------------------------
     "prior_exposure": {
         "avg_weight": 0.60,
         "max_weight": 0.55,
@@ -107,20 +107,20 @@ DEFAULT_CAP_CONFIG = {
         "max_multiplier": 1.05,
         "ratio_penalty_above_max": 0.85,
         # Fraction of current_loan_size used as cap for brand-new borrowers
-        # (no prior loan history). Single value — 0.50 is the intended rate.
+        # (no prior loan history). Single value -- 0.50 is the intended rate.
         "new_to_credit_factor": 0.50,
         "growth_ratio_floor": 0.75,
         "growth_ratio_ceiling": 1.15,
         "recent_performance_floor": 0.70,
         "recent_performance_ceiling": 1.00,
     },
-    # ── Policy adjustments ────────────────────────────────────────────────────
+    # -- Policy adjustments ----------------------------------------------------
     "policy": {
-        # Risk-tier score cutoffs (MIN thresholds — higher score = better borrower).
-        # tier_1 (best)  : score >= risk_tier_1_score_min  → multiplier 1.00
-        # tier_2         : score >= risk_tier_2_score_min  → multiplier 0.85
-        # tier_3         : score >= risk_tier_3_score_min  → multiplier 0.65
-        # tier_4 (worst) : score <  risk_tier_3_score_min  → multiplier 0.40
+        # Risk-tier score cutoffs (MIN thresholds -- higher score = better borrower).
+        # tier_1 (best)  : score >= risk_tier_1_score_min  -> multiplier 1.00
+        # tier_2         : score >= risk_tier_2_score_min  -> multiplier 0.85
+        # tier_3         : score >= risk_tier_3_score_min  -> multiplier 0.65
+        # tier_4 (worst) : score <  risk_tier_3_score_min  -> multiplier 0.40
         "risk_tier_1_score_min": 0.85,
         "risk_tier_2_score_min": 0.60,
         "risk_tier_3_score_min": 0.35,
@@ -138,14 +138,14 @@ DEFAULT_CAP_CONFIG = {
         "active_borrower_min_limit": 500.0,
         "active_borrower_min_activity_amount": 1.0,
     },
-    # ── Agent-tier effective ceiling ──────────────────────────────────────────
-    # Single source of truth for agent tier → ceiling multiplier mapping.
+    # -- Agent-tier effective ceiling ------------------------------------------
+    # Single source of truth for agent tier -> ceiling multiplier mapping.
     # multiplier = tier_limit / global_ceiling_limit (1,000,000 UGX).
     # Consumed by prepare_transaction_capacity_features() to stamp the
     # agent_tier_ceiling_multiplier column; then applied by compute_capacity_cap()
     # and apply_policy_adjustments() via that column.
     #
-    # Key ordering matters — tiers dict is matched with substring logic
+    # Key ordering matters -- tiers dict is matched with substring logic
     # (k in agent_profile.lower()), so longer/more-specific keys must
     # precede shorter ones: "silver class" before "silver",
     # "new bronze" before "bronze".
@@ -161,16 +161,16 @@ DEFAULT_CAP_CONFIG = {
             "silver": 0.25,  #   250,000 / 1,000,000
             "new bronze": 0.05,  #    50,000 / 1,000,000  ← before "bronze"
             "bronze": 0.10,  #   100,000 / 1,000,000
-            "unknown": 0.05,  #    50,000 / 1,000,000  — conservative fallback
+            "unknown": 0.05,  #    50,000 / 1,000,000  -- conservative fallback
         },
     },
-    # ── Seasonality attenuation ───────────────────────────────────────────────
+    # -- Seasonality attenuation -----------------------------------------------
     # Attenuates capacity_cap during peak months (Jan, Aug, Sep, Dec) so
     # throughput spikes don't permanently inflate limits.
     "seasonality": {
         "peak_season_capacity_attenuation": 0.85,
     },
-    # ── Regulatory cap — Bank of Uganda (BoU) ────────────────────────────────
+    # -- Regulatory cap -- Bank of Uganda (BoU) --------------------------------
     # Applied at finalize_limits() as the hard regulatory ceiling.
     "regulatory": {
         "enabled": True,
@@ -180,9 +180,9 @@ DEFAULT_CAP_CONFIG = {
     },
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # INTERNAL HELPERS
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 
 def _get_config(config):
@@ -273,9 +273,9 @@ def _fill_missing_caps(df, cfg):
     return df
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # 1. RISK CAP
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 
 def compute_risk_cap(features_df, config=None):
@@ -287,7 +287,7 @@ def compute_risk_cap(features_df, config=None):
     if "cal_pd" in df.columns and df["cal_pd"].notna().any():
         # PD model pipeline path: use calibrated PD score from the upstream model.
         # cal_pd is probability of default (high = risky); invert so high risk_score = safe.
-        # The experience ramp is NOT applied here — thin-file handling is already
+        # The experience ramp is NOT applied here -- thin-file handling is already
         # embedded in cal_pd via the scorecard's never_loan_pd_like path.
         risk_score = _clip_series(
             1.0 - _safe_series(df, "cal_pd", 0.5),
@@ -296,7 +296,7 @@ def compute_risk_cap(features_df, config=None):
         )
         risk_cap = risk_score * risk_cfg["base_limit"]
         logger.info(
-            "compute_risk_cap: cal_pd path — mean_cal_pd=%.4f, mean_risk_score=%.4f",
+            "compute_risk_cap: cal_pd path -- mean_cal_pd=%.4f, mean_risk_score=%.4f",
             float(_safe_series(df, "cal_pd", 0.5).mean()),
             float(risk_score.mean()),
         )
@@ -338,7 +338,7 @@ def compute_risk_cap(features_df, config=None):
         risk_cap = risk_score * risk_cfg["base_limit"]
 
         # Experience ramp: scale down the cap for agents with few loans.
-        # Applied in the fallback path only — the PD model already accounts
+        # Applied in the fallback path only -- the PD model already accounts
         # for loan history depth via thin-file routing and feature engineering.
         exp_cfg = cfg["experience"]
         experience_factor = _clip_series(
@@ -353,16 +353,16 @@ def compute_risk_cap(features_df, config=None):
     df["risk_score"] = risk_score
     df["risk_cap"] = risk_cap
     logger.info(
-        "compute_risk_cap: done — mean_risk_score=%.3f, mean_risk_cap=%.1f",
+        "compute_risk_cap: done -- mean_risk_score=%.3f, mean_risk_cap=%.1f",
         float(risk_score.mean()),
         float(risk_cap.mean()),
     )
     return df
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # 2. CAPACITY CAP
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 
 def compute_capacity_cap(features_df, config=None):
@@ -371,9 +371,9 @@ def compute_capacity_cap(features_df, config=None):
     df = features_df.copy()
     logger.info("compute_capacity_cap: input rows = %d", len(df))
 
-    # ─────────────────────────────────────────────────────────────
+    # -------------------------------------------------------------
     # 1. ROBUST INPUT MAPPING + DATA QUALITY TRACKING
-    # ─────────────────────────────────────────────────────────────
+    # -------------------------------------------------------------
 
     def _mapped_series(primary, fallback):
         if primary in df.columns:
@@ -406,9 +406,9 @@ def compute_capacity_cap(features_df, config=None):
     vol_30, vol_30_src = _mapped_series("avg_monthly_txn_volume_30d", "total_txn_value_1m")
     vol_90, vol_90_src = _mapped_series("avg_monthly_txn_volume_90d", "total_txn_value_1m")
 
-    # ─────────────────────────────────────────────────────────────
+    # -------------------------------------------------------------
     # 2. TRUE TEMPORAL BLENDING (NO FAKE DUPLICATION)
-    # ─────────────────────────────────────────────────────────────
+    # -------------------------------------------------------------
 
     def _blend(s30, s90, src30, src90):
         same_source = src30 == src90
@@ -425,9 +425,9 @@ def compute_capacity_cap(features_df, config=None):
     active_customers = _blend(cust_30, cust_90, cust_30_src, cust_90_src)
     txn_volume = _blend(vol_30, vol_90, vol_30_src, vol_90_src)
 
-    # ─────────────────────────────────────────────────────────────
+    # -------------------------------------------------------------
     # 3. COMPONENT CONSTRUCTION (PURE CAPACITY)
-    # ─────────────────────────────────────────────────────────────
+    # -------------------------------------------------------------
 
     balance_component = avg_balance * cap_cfg["balance_multiplier"] * cap_cfg["balance_weight"]
     revenue_component = monthly_revenue * cap_cfg["revenue_multiplier"] * cap_cfg["revenue_weight"]
@@ -445,12 +445,12 @@ def compute_capacity_cap(features_df, config=None):
         + volume_component
     )
 
-    # ─────────────────────────────────────────────────────────────
+    # -------------------------------------------------------------
     # 4. AGENT-TIER EFFECTIVE CEILING
-    # Each agent's ceiling = global_ceiling × agent_tier_ceiling_multiplier.
+    # Each agent's ceiling = global_ceiling x agent_tier_ceiling_multiplier.
     # The multiplier is computed in prepare_transaction_capacity_features()
     # and stored in the features DataFrame.
-    # ─────────────────────────────────────────────────────────────
+    # -------------------------------------------------------------
 
     agent_tier_cfg = cfg.get("agent_tier", {})
     global_ceiling = cfg["global_ceiling_limit"]
@@ -471,11 +471,11 @@ def compute_capacity_cap(features_df, config=None):
         dtype="float64",
     )
 
-    # ─────────────────────────────────────────────────────────────
+    # -------------------------------------------------------------
     # 5. LOG SCALING (STRUCTURAL CAPACITY)
     # Uses per-row effective_ceiling so Silver/Bronze agents are
     # constrained relative to their tier ceiling.
-    # ─────────────────────────────────────────────────────────────
+    # -------------------------------------------------------------
 
     # Median effective ceiling is used as the log-scaling denominator so that
     # all rows share the same log-base, making capacity scores comparable across
@@ -506,9 +506,9 @@ def compute_capacity_cap(features_df, config=None):
     # ✅ TRUE CAPACITY (pure, no policy)
     capacity_structural = scaled_capacity.copy()
 
-    # ─────────────────────────────────────────────────────────────
+    # -------------------------------------------------------------
     # 5. LIGHT ACTIVITY ADJUSTMENT (SOFT POLICY)
-    # ─────────────────────────────────────────────────────────────
+    # -------------------------------------------------------------
 
     operational_flag = _clip_series(_safe_series(df, "operational_activity_flag", 0.0), 0.0, 1.0)
 
@@ -524,11 +524,11 @@ def compute_capacity_cap(features_df, config=None):
         global_ceiling,
     )
 
-    # ─────────────────────────────────────────────────────────────
+    # -------------------------------------------------------------
     # 6. SEASONALITY ATTENUATION
     # Peak months (Jan, Aug, Sep, Dec) can inflate transaction volumes.
     # Apply a configurable haircut so spikes don't permanently raise limits.
-    # ─────────────────────────────────────────────────────────────
+    # -------------------------------------------------------------
 
     season_cfg = cfg.get("seasonality", {})
     peak_attenuation = float(season_cfg.get("peak_season_capacity_attenuation", 1.0))
@@ -549,9 +549,9 @@ def compute_capacity_cap(features_df, config=None):
     else:
         df["capacity_season_multiplier"] = pd.Series(1.0, index=df.index, dtype="float64")
 
-    # ─────────────────────────────────────────────────────────────
+    # -------------------------------------------------------------
     # 7. DATA QUALITY SIGNAL
-    # ─────────────────────────────────────────────────────────────
+    # -------------------------------------------------------------
 
     source_frame = pd.DataFrame(
         {
@@ -573,9 +573,9 @@ def compute_capacity_cap(features_df, config=None):
     df["capacity_missing_inputs"] = (source_frame == "missing").sum(axis=1)
     df["capacity_fallback_inputs"] = (source_frame == "fallback").sum(axis=1)
 
-    # ─────────────────────────────────────────────────────────────
+    # -------------------------------------------------------------
     # 7. INTERPRETABILITY
-    # ─────────────────────────────────────────────────────────────
+    # -------------------------------------------------------------
 
     component_frame = pd.DataFrame(
         {
@@ -595,9 +595,9 @@ def compute_capacity_cap(features_df, config=None):
         total_signal > 0, component_frame.idxmax(axis=1), "no_capacity_signal"
     )
 
-    # ─────────────────────────────────────────────────────────────
+    # -------------------------------------------------------------
     # 8. OUTPUT
-    # ─────────────────────────────────────────────────────────────
+    # -------------------------------------------------------------
 
     df["capacity_balance_component"] = balance_component
     df["capacity_revenue_component"] = revenue_component
@@ -621,16 +621,16 @@ def compute_capacity_cap(features_df, config=None):
             n_fallback,
         )
     logger.info(
-        "compute_capacity_cap: done — mean_capacity_cap=%.1f, peak_season_rows=%d",
+        "compute_capacity_cap: done -- mean_capacity_cap=%.1f, peak_season_rows=%d",
         float(capacity_cap.mean()),
         int((df.get("is_peak_season_flag", pd.Series(0)) > 0).sum()),
     )
     return df
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # 3. RECENT USAGE CAP
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 
 def compute_recent_usage_cap(features_df, config=None):
@@ -783,7 +783,7 @@ def compute_recent_usage_cap(features_df, config=None):
     df["recent_usage_cap"] = recent_usage_cap
 
     logger.info(
-        "compute_recent_usage_cap: done — active_rows=%d/%d, mean_recent_usage_cap=%.1f",
+        "compute_recent_usage_cap: done -- active_rows=%d/%d, mean_recent_usage_cap=%.1f",
         int(active_mask.sum()),
         len(df),
         float(recent_usage_cap.mean()),
@@ -791,9 +791,9 @@ def compute_recent_usage_cap(features_df, config=None):
     return df
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # 4. PRIOR EXPOSURE CAP
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 
 def compute_prior_exposure_cap(features_df, config=None):
@@ -951,16 +951,16 @@ def compute_prior_exposure_cap(features_df, config=None):
     df["prior_exposure_cap"] = prior_exposure_cap
 
     logger.info(
-        "compute_prior_exposure_cap: done — new_to_credit_rows=%d, mean_prior_exposure_cap=%.1f",
+        "compute_prior_exposure_cap: done -- new_to_credit_rows=%d, mean_prior_exposure_cap=%.1f",
         int(is_new_to_credit.sum()),
         float(prior_exposure_cap.mean()),
     )
     return df
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # 5. COMBINE CAPS
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 
 def combine_caps(features_df, config=None):
@@ -1243,16 +1243,16 @@ def combine_caps(features_df, config=None):
             len(df),
         )
     logger.info(
-        "combine_caps: done — mean_combined_cap=%.1f, median_combined_cap=%.1f",
+        "combine_caps: done -- mean_combined_cap=%.1f, median_combined_cap=%.1f",
         float(combined_cap.mean()),
         float(combined_cap.median()),
     )
     return df
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # 6. POLICY ADJUSTMENT
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 
 def apply_policy_adjustments(features_df, config=None):
@@ -1263,7 +1263,7 @@ def apply_policy_adjustments(features_df, config=None):
     df = features_df.copy()
     logger.info("apply_policy_adjustments: input rows = %d", len(df))
 
-    # ── Per-row effective ceiling: global ceiling × agent-tier multiplier ──
+    # -- Per-row effective ceiling: global ceiling x agent-tier multiplier --
     agent_tier_cfg = cfg.get("agent_tier", {})
     global_ceiling = cfg["global_ceiling_limit"]
 
@@ -1506,9 +1506,9 @@ def apply_policy_adjustments(features_df, config=None):
     return df
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # 7. ORCHESTRATION
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 
 def run_limit_caps(features_df, config=None):

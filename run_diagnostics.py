@@ -402,7 +402,7 @@ def run_diagnostics(args: argparse.Namespace) -> None:
                 print(f"  CI width      : {_width:.4f}")
                 if _width > 0.15:
                     print("  *** WARNING: CI is wide -- point estimate has high variance."
-                          f" Report as ~{_point_auc:.2f} ± {_width/2:.2f}, not a precise figure ***")
+                          f" Report as ~{_point_auc:.2f} +/- {_width/2:.2f}, not a precise figure ***")
                 elif _width > 0.08:
                     print("  NOTE: moderate CI width -- treat point estimate as approximate")
                 else:

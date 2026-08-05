@@ -6,11 +6,11 @@ PSI measures distributional shift between training (2025-09-30) and validation
 on a population that looks very different from what it was trained on.
 
 Industry thresholds:
-    PSI < 0.10  — stable, distribution is similar
-    0.10 ≤ PSI < 0.25  — moderate shift, investigate
-    PSI ≥ 0.25  — severe shift, model may not generalise
+    PSI < 0.10  -- stable, distribution is similar
+    0.10 <= PSI < 0.25  -- moderate shift, investigate
+    PSI >= 0.25  -- severe shift, model may not generalise
 
-A very high AUC on a severely shifted population is suspicious — it may mean the
+A very high AUC on a severely shifted population is suspicious -- it may mean the
 validation set coincidentally separates better, not that the model generalises well.
 
 To run on real data:

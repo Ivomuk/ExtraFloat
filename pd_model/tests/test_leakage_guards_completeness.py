@@ -7,10 +7,10 @@ from the model feature set by one of:
   - Pattern match in LEAKAGE_PATTERNS, DPD_BLOCK_PATTERNS, or ID_LIKE_PATTERNS
 
 Critical coverage:
-  - `currently_outstanding_flag` (= net_exposure_6M > 0) — business-process
+  - `currently_outstanding_flag` (= net_exposure_6M > 0) -- business-process
     co-definition proxy. Must be in PD_FEATURE_BLACKLIST. NOT caught by any pattern.
-  - `future_penalties_30d` — forward-looking, caught by 'future' and 'penalt' patterns.
-  - `outcome_observed_30d` — sample-selection column, caught by 'outcome' pattern.
+  - `future_penalties_30d` -- forward-looking, caught by 'future' and 'penalt' patterns.
+  - `outcome_observed_30d` -- sample-selection column, caught by 'outcome' pattern.
 
 The test for `currently_outstanding_flag` acts as a regression guard: it fails
 on the pre-fix codebase and passes after the column is added to the blacklist.
@@ -75,7 +75,7 @@ class TestBlacklistCompleteness:
         excluded, reason = _is_excluded_by_any_guard("future_penalties_30d")
         assert excluded, (
             f"'future_penalties_30d' not excluded (reason: {reason}). "
-            "This is a post-snapshot column — pure label leakage."
+            "This is a post-snapshot column -- pure label leakage."
         )
         assert reason == "leakage_pattern", f"Expected exclusion via leakage_pattern, got: {reason}"
 
@@ -89,7 +89,7 @@ class TestBlacklistCompleteness:
         excluded, reason = _is_excluded_by_any_guard("outcome_observed_30d")
         assert excluded, (
             f"'outcome_observed_30d' not excluded (reason: {reason}). "
-            "This is the sample-selection filter column — must not enter model features."
+            "This is the sample-selection filter column -- must not enter model features."
         )
 
     def test_bad_state_variants_excluded(self):

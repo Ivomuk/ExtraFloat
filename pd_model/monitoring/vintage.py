@@ -2,7 +2,7 @@
 Vintage / cohort analysis for credit model ongoing monitoring.
 
 Tracks bad rate by disbursement month as loans mature (Months on Book = MOB).
-This is the standard credit model monitoring tool — it answers "does the model's
+This is the standard credit model monitoring tool -- it answers "does the model's
 risk ranking hold up as loans season?"
 
 Definitions
@@ -22,7 +22,7 @@ Usage
                                 disbursement_col="disbursement_date",
                                 observation_col="observation_date",
                                 outcome_col="is_bad")
-    matrix = build_cohort_matrix(vtbl)   # cohort × MOB pivot of bad rates
+    matrix = build_cohort_matrix(vtbl)   # cohort x MOB pivot of bad rates
 """
 
 from __future__ import annotations
@@ -119,7 +119,7 @@ def build_vintage_table(
 
 
 # ======================================================================== #
-# Cohort × MOB pivot matrix
+# Cohort x MOB pivot matrix
 # ======================================================================== #
 
 
@@ -128,7 +128,7 @@ def build_cohort_matrix(
     value_col: str = "cumulative_bad_rate",
 ) -> pd.DataFrame:
     """
-    Pivot vintage table to a cohort × MOB matrix.
+    Pivot vintage table to a cohort x MOB matrix.
 
     Rows    = cohort_month (origination month)
     Columns = MOB (0, 1, 2, …)

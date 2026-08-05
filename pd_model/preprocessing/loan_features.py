@@ -1,12 +1,12 @@
 """
-Phase 2.2 — Loan repayment features, labelling, and leakage audit.
+Phase 2.2 -- Loan repayment features, labelling, and leakage audit.
 
 Provides:
-- ``classify_agent_loan_status``   – converts has_ever_loan to has_loan_history flag
-- ``add_thin_file_flags``          – adds thin_file_flag and thin_file_pd_prior
-- ``compute_bad_flags``            – computes hard_bad_flag and bad_state (30-day target)
-- ``leakage_audit_phase_2_2``      – correlation / dominance leakage scan
-- ``run_phase_2_2_repayment_pd_features`` – orchestrates repayment feature merge
+- ``classify_agent_loan_status``   - converts has_ever_loan to has_loan_history flag
+- ``add_thin_file_flags``          - adds thin_file_flag and thin_file_pd_prior
+- ``compute_bad_flags``            - computes hard_bad_flag and bad_state (30-day target)
+- ``leakage_audit_phase_2_2``      - correlation / dominance leakage scan
+- ``run_phase_2_2_repayment_pd_features`` - orchestrates repayment feature merge
 """
 
 from __future__ import annotations
@@ -97,8 +97,8 @@ def add_thin_file_flags(
 def compute_bad_flags(df_pd: pd.DataFrame) -> pd.DataFrame:
     """
     Compute:
-    - ``hard_bad_flag``  – short-term monitoring flag (repayment coverage + penalties)
-    - ``bad_state``      – PD target (forward-looking 30-day bad indicator)
+    - ``hard_bad_flag``  - short-term monitoring flag (repayment coverage + penalties)
+    - ``bad_state``      - PD target (forward-looking 30-day bad indicator)
 
     ``bad_state_30D`` must already exist (generated upstream by SQL / data pipeline).
 
@@ -113,7 +113,7 @@ def compute_bad_flags(df_pd: pd.DataFrame) -> pd.DataFrame:
     """
     df = df_pd.copy()
 
-    # Hard bad flag — monitoring signal
+    # Hard bad flag -- monitoring signal
     repayment_coverage_1M = df.get("repayment_coverage_1M", pd.Series(1, index=df.index))
     penalties_1M = df.get("penalties_1M", pd.Series(0, index=df.index))
     repayment_val_1M = df.get("repayment_val_1M", pd.Series(1, index=df.index))
@@ -122,7 +122,7 @@ def compute_bad_flags(df_pd: pd.DataFrame) -> pd.DataFrame:
         (repayment_coverage_1M < 0.3) & (penalties_1M > 0) & (repayment_val_1M == 0)
     ).astype(int)
 
-    # PD target — forward-looking 30-day
+    # PD target -- forward-looking 30-day
     if "bad_state_30D" not in df.columns:
         raise RuntimeError(
             "[compute_bad_flags] Missing required column 'bad_state_30D' "
@@ -161,10 +161,10 @@ def leakage_audit_phase_2_2(
     """
     Run four leakage checks on the modelling DataFrame:
 
-    1. **TARGET_LEAKAGE**   – label-related columns present in feature table.
-    2. **TIME_LEAKAGE**     – transaction timestamps post-dating the snapshot.
-    3. **LABEL_PROXY**      – features with |corr| > threshold against ``bad_state``.
-    4. **BINARY_DOMINANCE** – binary columns where bad-rate jump exceeds threshold.
+    1. **TARGET_LEAKAGE**   - label-related columns present in feature table.
+    2. **TIME_LEAKAGE**     - transaction timestamps post-dating the snapshot.
+    3. **LABEL_PROXY**      - features with |corr| > threshold against ``bad_state``.
+    4. **BINARY_DOMINANCE** - binary columns where bad-rate jump exceeds threshold.
 
     Args:
         df_pd:               Modelling DataFrame.
@@ -305,7 +305,7 @@ def leakage_audit_phase_2_2(
                     )
 
     # ------------------------------------------------------------------ #
-    # Report — downgrade blacklisted columns from HIGH to INFO
+    # Report -- downgrade blacklisted columns from HIGH to INFO
     # ------------------------------------------------------------------ #
     audit_report = pd.DataFrame(audit_rows)
 
@@ -316,7 +316,7 @@ def leakage_audit_phase_2_2(
         if n_downgraded > 0:
             logger.info(
                 "leakage_audit: %d HIGH finding(s) downgraded to INFO "
-                "(columns already in PD_FEATURE_BLACKLIST — intentionally excluded from model)",
+                "(columns already in PD_FEATURE_BLACKLIST -- intentionally excluded from model)",
                 n_downgraded,
             )
         audit_report.loc[blacklisted_mask & (audit_report["severity"] == "HIGH"), "severity"] = "INFO"
@@ -327,15 +327,15 @@ def leakage_audit_phase_2_2(
             tmp = audit_report.copy()
             tmp["_ord"] = tmp["severity"].map(sev_order).fillna(9).astype(int)
             tmp = tmp.sort_values(["_ord", "check", "column"]).drop(columns=["_ord"])
-            logger.warning("LEAKAGE AUDIT — %d findings:\n%s", len(tmp), tmp.to_string(index=False))
+            logger.warning("LEAKAGE AUDIT -- %d findings:\n%s", len(tmp), tmp.to_string(index=False))
         else:
-            logger.info("Leakage audit passed — no red flags detected")
+            logger.info("Leakage audit passed -- no red flags detected")
 
     if hard_fail and not audit_report.empty:
         high_df = audit_report[audit_report["severity"] == "HIGH"].copy()
         if not high_df.empty:
             high_df = high_df.sort_values(["check", "column"])
-            lines = ["HARD LEAKAGE DETECTED — FIX BEFORE MODELING"]
+            lines = ["HARD LEAKAGE DETECTED -- FIX BEFORE MODELING"]
             lines.append(f"HIGH findings ({len(high_df)}):")
             for _, row in high_df.iterrows():
                 lines.append(f"  - {row['check']} | {row['column']} | {row['message']}")
@@ -440,7 +440,7 @@ def run_phase_2_2_repayment_pd_features(
         total = len(raw)
 
         # Try YYYYMMDD integer format first (e.g. 20251115 stored as int64 or
-        # "20251115" as string) — generic pd.to_datetime treats integers as
+        # "20251115" as string) -- generic pd.to_datetime treats integers as
         # nanoseconds since epoch producing 1970-era dates, so check this first.
         looks_yyyymmdd = (
             pd.to_numeric(raw, errors="coerce").between(20000101, 21001231, inclusive="both").fillna(False)
@@ -465,7 +465,7 @@ def run_phase_2_2_repayment_pd_features(
 
         if parse_rate < 0.99:
             logger.warning(
-                "run_phase_2_2: snapshot_dt parse rate %.1f%% (format: %s) — %d/%d rows unparsed",
+                "run_phase_2_2: snapshot_dt parse rate %.1f%% (format: %s) -- %d/%d rows unparsed",
                 parse_rate * 100,
                 parsed_fmt,
                 total - parsed_count,
@@ -748,7 +748,7 @@ def run_phase_2_2_repayment_pd_features(
 
     dup_pd_post = df_pd_out.duplicated(subset=["agent_msisdn", "snapshot_dt"], keep=False).sum()
     if int(dup_pd_post) != 0:
-        raise DataAlignmentError("[run_phase_2_2] PD duplicated after merge — merge keys not unique")
+        raise DataAlignmentError("[run_phase_2_2] PD duplicated after merge -- merge keys not unique")
 
     # Derive has_ever_loan: agent has loan history if any disbursement volume
     # column is non-zero. Falls back to 0 (thin-file) if no disbursement cols exist.
@@ -761,10 +761,10 @@ def run_phase_2_2_repayment_pd_features(
         disb_arr = df_pd_out[disb_vol_cols].apply(pd.to_numeric, errors="coerce").fillna(0)
         df_pd_out["has_ever_loan"] = (disb_arr.max(axis=1) > 0).astype(int)
     else:
-        # No disbursement columns — treat all as thin-file
+        # No disbursement columns -- treat all as thin-file
         df_pd_out["has_ever_loan"] = 0
     logger.info(
-        "run_phase_2_2: has_ever_loan — thick-file=%d | thin-file=%d",
+        "run_phase_2_2: has_ever_loan -- thick-file=%d | thin-file=%d",
         int(df_pd_out["has_ever_loan"].sum()),
         int((df_pd_out["has_ever_loan"] == 0).sum()),
     )

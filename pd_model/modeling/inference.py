@@ -1,5 +1,5 @@
 """
-Inference module — score new agents not seen during training.
+Inference module -- score new agents not seen during training.
 
 Loads serialized artifacts (models + calibration map + feature order) and
 runs the complete pipeline end-to-end on raw agent DataFrames.
@@ -157,7 +157,7 @@ def align_features(
     """
     Align a transformed DataFrame to the exact feature order used at training.
 
-    - Features in feature_order but missing from df_transformed → filled with NaN
+    - Features in feature_order but missing from df_transformed -> filled with NaN
       (and a warning is logged for each)
     - Extra columns not in feature_order are silently dropped
 
@@ -217,11 +217,11 @@ def score_new_agents(
                         never_loan_pd_like etc. (indexed like df_transformed).
                         If None, meta columns are extracted from df_transformed.
     cfg               : ModelConfig
-    champion          : "xgb" or "lgb" — whose cal_pd is promoted to ``cal_pd``
+    champion          : "xgb" or "lgb" -- whose cal_pd is promoted to ``cal_pd``
                         and used to determine ``final_policy_bucket``
     compute_shap      : if True, compute SHAP values for the champion model and
-                        append adverse_reason_1/2/3 columns (default False —
-                        adds ~1–3s per 10k agents; requires shap package)
+                        append adverse_reason_1/2/3 columns (default False --
+                        adds ~1-3s per 10k agents; requires shap package)
     n_adverse_reasons : number of top adverse action reasons to include (default 3)
 
     Returns
@@ -276,7 +276,7 @@ def score_new_agents(
 
     thick_mask = ~thin_mask
 
-    # Calibrate and apply policy for thick-file agents — both models independently
+    # Calibrate and apply policy for thick-file agents -- both models independently
     if thick_mask.sum() > 0:
         for model_key, score_col, thresh in [
             ("xgb", "xgb_raw_score", artifacts.xgb_policy_thresholds),
@@ -285,7 +285,7 @@ def score_new_agents(
             cal_pd_col = f"{model_key}_cal_pd"
             thick_df = out.loc[thick_mask].copy()
             thick_df = thick_df.rename(columns={score_col: feature_config.RAW_SCORE_COL})
-            thick_df["bad_state"] = 0  # placeholder — not available at inference time
+            thick_df["bad_state"] = 0  # placeholder -- not available at inference time
 
             thick_cal = attach_cal_pd(thick_df, artifacts.cal_map, model_key, cfg=cfg)
             out.loc[thick_mask, cal_pd_col] = thick_cal[feature_config.CAL_PD_COL].values
@@ -339,7 +339,7 @@ def score_new_agents(
                 n_adverse_reasons,
             )
         except Exception as exc:
-            logger.warning("SHAP computation failed — skipping adverse reasons: %s", exc)
+            logger.warning("SHAP computation failed -- skipping adverse reasons: %s", exc)
 
     return out
 
@@ -357,7 +357,7 @@ def run_inference_pipeline(
     champion: str = "xgb",
 ) -> pd.DataFrame:
     """
-    Full end-to-end inference: raw data → feature engineering → scoring.
+    Full end-to-end inference: raw data -> feature engineering -> scoring.
 
     This is the entry point for scoring new agents at deployment time.
     It runs the exact same feature engineering steps as the training pipeline.
@@ -388,10 +388,10 @@ def run_inference_pipeline(
 
     logger.info("run_inference_pipeline: %d raw agents", df_raw.shape[0])
 
-    # Phase 2.1 — transaction behaviour features
+    # Phase 2.1 -- transaction behaviour features
     df = run_phase_2_1_richer_tx_behaviour(df_raw.copy(), cfg=cfg)
 
-    # Phase 2.2 — loan repayment features (optional)
+    # Phase 2.2 -- loan repayment features (optional)
     if repayment_df is not None:
         df, _ = run_phase_2_2_repayment_pd_features(df, repayment_df, cfg=cfg, verbose=False)
     df = classify_agent_loan_status(df)

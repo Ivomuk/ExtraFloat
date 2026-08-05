@@ -41,7 +41,7 @@ def train_lgbm(
     Fit an LGBMClassifier and return scored DataFrames for train and val.
 
     X_train / X_val must NOT contain agent_msisdn, thin_file_flag, or
-    bad_state — those must be provided separately in the meta columns.
+    bad_state -- those must be provided separately in the meta columns.
 
     Parameters
     ----------

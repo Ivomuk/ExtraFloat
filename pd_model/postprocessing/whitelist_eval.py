@@ -4,7 +4,7 @@ Whitelist / blacklist evaluation for thin-file scorecard agents.
 Preserves all algorithms from file11.txt exactly:
   - MSISDN key normalisation (strip ".0" suffix)
   - Blacklist > whitelist deduplication
-  - AUC via Mann–Whitney U (no sklearn dependency)
+  - AUC via Mann-Whitney U (no sklearn dependency)
   - Decile lift table with deterministic tie-break
   - Cutoff sweep at percentile grid
 
@@ -82,13 +82,13 @@ def load_and_merge_lists(
 
 
 # ======================================================================== #
-# AUC via Mann–Whitney U
+# AUC via Mann-Whitney U
 # ======================================================================== #
 
 
 def _mann_whitney_auc(scores: np.ndarray, labels: np.ndarray) -> float:
     """
-    Compute AUC via Mann–Whitney U statistic (no sklearn).
+    Compute AUC via Mann-Whitney U statistic (no sklearn).
     Preserves the algorithm from file11.txt exactly.
     """
     ranks = pd.Series(scores).rank(method="average")
@@ -208,12 +208,12 @@ def run_whitelist_blacklist_eval(
     Returns
     -------
     dict with keys:
-        auc              : overall AUC (Mann–Whitney) on full labeled set
+        auc              : overall AUC (Mann-Whitney) on full labeled set
         auc_perf_filtered: AUC after excluding non-performance blacklist reasons
-        decile_table     : DataFrame — 10-decile lift table (all labeled)
-        lift_table       : DataFrame — 10-decile forced equal-size table
+        decile_table     : DataFrame -- 10-decile lift table (all labeled)
+        lift_table       : DataFrame -- 10-decile forced equal-size table
                            (deterministic tie-break, perf-filtered)
-        cutoff_sweep     : DataFrame — percentile sweep table (perf-filtered)
+        cutoff_sweep     : DataFrame -- percentile sweep table (perf-filtered)
         eval_df          : merged scored + list labels DataFrame
         perf_eval_df     : eval_df after filtering non-performance reasons
     """

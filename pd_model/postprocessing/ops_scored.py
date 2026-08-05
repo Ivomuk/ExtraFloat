@@ -1,5 +1,5 @@
 """
-Unified ops_scored table — thick-file PD model output + thin-file scorecard output.
+Unified ops_scored table -- thick-file PD model output + thin-file scorecard output.
 
 Preserves all logic from file10.txt exactly:
   - Concatenates thick-file and thin-file rows
@@ -49,7 +49,7 @@ def build_ops_scored_table(
     df_pd_sc               : scorecard DataFrame (contains never_loan_* columns)
     thin_op_quantile       : thin-file approval quantile on never_loan_pd_like.
                              Agents with pd_like <= this quantile are approved.
-                             Default 0.50 → approve the 50% with lowest pd_like.
+                             Default 0.50 -> approve the 50% with lowest pd_like.
 
     Returns
     -------
@@ -130,7 +130,7 @@ def build_exec_summary(
     operating_point_col: str = "final_approved",
 ) -> pd.DataFrame:
     """
-    Executive-ready 2×2 Approved / Declined summary.
+    Executive-ready 2x2 Approved / Declined summary.
 
     Returns
     -------
@@ -201,7 +201,7 @@ def build_bucket_summary(
     cal_pd_col: str = feature_config.CAL_PD_COL,
 ) -> pd.DataFrame:
     """
-    Group-by final_policy_bucket × thin_file_flag → n, obs_bad_rate, avg_cal_pd.
+    Group-by final_policy_bucket x thin_file_flag -> n, obs_bad_rate, avg_cal_pd.
     """
     grp_cols = [feature_config.POLICY_BUCKET_COL, feature_config.THIN_FILE_COL]
     grp_cols_present = [c for c in grp_cols if c in ops_scored.columns]

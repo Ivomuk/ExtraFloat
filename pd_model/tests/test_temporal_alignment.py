@@ -3,7 +3,7 @@ Test 3: Temporal alignment verification.
 
 Confirms that:
 1. Training snapshot (2025-09-30) and validation snapshot (2025-11-15) are
-   properly separated — val is after the training outcome window closes.
+   properly separated -- val is after the training outcome window closes.
 2. Rolling feature windows (m1 through m6) are all strictly pre-snapshot.
 3. LEAKAGE_PATTERNS catches forward-looking column names.
 4. Legitimate pre-snapshot columns are NOT caught by leakage guards.
@@ -40,14 +40,14 @@ class TestSnapshotDateBoundaries:
         assert TRAIN_SNAPSHOT < outcome_start, "Snapshot must be before outcome window start"
 
     def test_m5_window_entirely_before_snapshot(self):
-        """m5 rolling window (120–150 days pre-snapshot) must not overlap the snapshot date."""
+        """m5 rolling window (120-150 days pre-snapshot) must not overlap the snapshot date."""
         m5_end = TRAIN_SNAPSHOT - pd.Timedelta(days=120)
         m5_start = TRAIN_SNAPSHOT - pd.Timedelta(days=150)
         assert m5_end < TRAIN_SNAPSHOT, "m5 window end must be strictly before snapshot"
         assert m5_start < TRAIN_SNAPSHOT, "m5 window start must be before snapshot"
 
     def test_all_monthly_windows_pre_snapshot(self):
-        """All six rolling windows (m1–m6) must end before or at the snapshot date."""
+        """All six rolling windows (m1-m6) must end before or at the snapshot date."""
         window_ends = {
             "m1": TRAIN_SNAPSHOT - pd.Timedelta(days=0),   # ends at snapshot
             "m2": TRAIN_SNAPSHOT - pd.Timedelta(days=30),

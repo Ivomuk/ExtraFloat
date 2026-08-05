@@ -49,7 +49,7 @@ class TestBuildPdCalibrationMap:
         df = _scored_df()
         cal_map = build_pd_calibration_map(df, "xgb", cfg=_TEST_CFG)
         pd_vals = cal_map.sort_values("score_min")["pd"].values
-        # Isotonic — should be non-decreasing (ascending_risk=True for this data)
+        # Isotonic -- should be non-decreasing (ascending_risk=True for this data)
         if bool(cal_map["ascending_risk"].iloc[0]):
             assert all(pd_vals[i] <= pd_vals[i + 1] + 1e-9 for i in range(len(pd_vals) - 1))
 

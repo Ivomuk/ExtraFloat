@@ -2,7 +2,7 @@
 Test 5: Agent overlap across training and validation snapshots.
 
 An agent appearing in BOTH training (2025-09-30) AND validation (2025-11-15)
-snapshots is acceptable for a cross-sectional model — it is the same entity
+snapshots is acceptable for a cross-sectional model -- it is the same entity
 measured at two different points in time. However, very high overlap (>95%)
 means the OOT validation is not truly independent.
 

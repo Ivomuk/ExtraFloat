@@ -5,16 +5,16 @@ Pytest test suite for the ExtraFloat mobile-money credit limit pipeline.
 
 Covers all 10 requested test scenarios:
   1.  prepare_transaction_capacity_features() with sample data
-  2a. prepare_borrower_limit_features() — all-null edge case
-  2b. prepare_borrower_limit_features() — new-to-credit edge case
+  2a. prepare_borrower_limit_features() -- all-null edge case
+  2b. prepare_borrower_limit_features() -- new-to-credit edge case
   3.  build_extrafloat_limit_engine_features() alias columns exist
-  4.  compute_risk_cap() — score range 0-1, risk_cap bounded
-  5.  compute_capacity_cap() — primary and fallback paths
-  6.  compute_recent_usage_cap() — activity gate, penalty haircut
-  7.  compute_prior_exposure_cap() — new-to-credit vs existing
-  8.  combine_caps() — thin-file vs standard weighting
-  9.  apply_policy_adjustments() — tier classification, proven-good override
-  10. End-to-end: features → caps → assigned_limit sensible values
+  4.  compute_risk_cap() -- score range 0-1, risk_cap bounded
+  5.  compute_capacity_cap() -- primary and fallback paths
+  6.  compute_recent_usage_cap() -- activity gate, penalty haircut
+  7.  compute_prior_exposure_cap() -- new-to-credit vs existing
+  8.  combine_caps() -- thin-file vs standard weighting
+  9.  apply_policy_adjustments() -- tier classification, proven-good override
+  10. End-to-end: features -> caps -> assigned_limit sensible values
 """
 
 from copy import deepcopy
@@ -43,9 +43,9 @@ from pd_model.exceptions import PolicyConfigurationError
 _THIN_FILE_THRESHOLD = DEFAULT_CAP_CONFIG.get("combination", {}).get("thin_file_threshold", 3)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # HELPER FACTORIES
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 
 def _txn_row(**overrides) -> dict:
@@ -183,7 +183,7 @@ def _features(**overrides) -> pd.DataFrame:
     and the full pipeline. Represents a healthy, mid-file borrower.
     """
     row = {
-        # ── risk cap inputs ──────────────────────────────────────────────────
+        # -- risk cap inputs --------------------------------------------------
         "on_time_repayment_rate": 0.80,
         "lifetime_default_rate": 0.05,
         "default_rate_last_10_loans": 0.05,
@@ -192,7 +192,7 @@ def _features(**overrides) -> pd.DataFrame:
         "cure_time_volatility": 6.0,
         "repayment_stability_score": 0.70,
         "total_loans": 5.0,
-        # ── capacity cap inputs — PRIMARY 30d/90d signals ────────────────────
+        # -- capacity cap inputs -- PRIMARY 30d/90d signals --------------------
         "avg_daily_balance_30d": 37646.15,
         "avg_daily_balance_90d": 37646.15,
         "avg_monthly_revenue_30d": 2868.0,
@@ -209,26 +209,26 @@ def _features(**overrides) -> pd.DataFrame:
         "recent_credit_active_flag": 1.0,
         "is_peak_season_flag": 0.0,
         "agent_tier_ceiling_multiplier": 0.25,  # Silver Class: 250,000 / 1,000,000
-        # ── recent usage cap inputs ──────────────────────────────────────────
+        # -- recent usage cap inputs ------------------------------------------
         "recent_disbursement_amount_1m": 5000.0,
         "recent_disbursement_amount_3m": 10000.0,
         "recent_repayment_amount_1m": 5100.0,
         "recent_repayment_amount_3m": 10200.0,
         "recent_repayment_coverage_1m": 1.0,
         "recent_penalty_events_1m": 0.0,
-        # ── prior exposure cap inputs ────────────────────────────────────────
+        # -- prior exposure cap inputs ----------------------------------------
         "avg_prior_loan_size": 5000.0,
         "max_prior_loan_size": 8000.0,
         "current_loan_size": 5000.0,
         "recent_repayment_performance": 0.95,
-        # ── combine caps inputs ──────────────────────────────────────────────
+        # -- combine caps inputs ----------------------------------------------
         "capacity_cap": 15000.0,
         "recent_usage_cap": 8000.0,
         "prior_exposure_cap": 7000.0,
         "risk_cap": 20000.0,
         "is_thin_file": 0.0,
         "prior_limit": 0.0,
-        # ── policy adjustment inputs ─────────────────────────────────────────
+        # -- policy adjustment inputs -----------------------------------------
         "combined_cap": 10000.0,
         "risk_score": 0.20,
         "is_active_borrower": 1.0,
@@ -237,15 +237,15 @@ def _features(**overrides) -> pd.DataFrame:
     return pd.DataFrame([row])
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# TEST 1: prepare_transaction_capacity_features — sample data
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
+# TEST 1: prepare_transaction_capacity_features -- sample data
+# -----------------------------------------------------------------------------
 
 
 def test_prepare_transaction_capacity_features_sample_data():
     """
     agent_msisdn is renamed to msisdn; PRIMARY 30d/90d signals are derived;
-    operational_activity_flag is binary; Silver Class → multiplier 0.85.
+    operational_activity_flag is binary; Silver Class -> multiplier 0.85.
     """
     df = pd.DataFrame([_txn_row()])
     result = prepare_transaction_capacity_features(df)
@@ -287,13 +287,13 @@ def test_prepare_transaction_capacity_features_sample_data():
     assert result["operational_activity_flag"].isin([0, 1]).all()
     assert row["operational_activity_flag"] == 1  # vol_1m=14 > 0
 
-    # Silver Class → 0.25  (250,000 / 1,000,000)
+    # Silver Class -> 0.25  (250,000 / 1,000,000)
     assert row["agent_tier_ceiling_multiplier"] == pytest.approx(0.25)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# TEST 2a: prepare_borrower_limit_features — all-null optional fields
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
+# TEST 2a: prepare_borrower_limit_features -- all-null optional fields
+# -----------------------------------------------------------------------------
 
 
 def test_prepare_borrower_limit_features_all_null_optional():
@@ -341,9 +341,9 @@ def test_prepare_borrower_limit_features_all_null_optional():
     assert result.iloc[0]["msisdn"] == "256785"
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# TEST 2b: prepare_borrower_limit_features — new-to-credit borrower
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
+# TEST 2b: prepare_borrower_limit_features -- new-to-credit borrower
+# -----------------------------------------------------------------------------
 
 
 def test_prepare_borrower_limit_features_new_to_credit():
@@ -385,9 +385,9 @@ def test_prepare_borrower_limit_features_new_to_credit():
     assert r["exposure_tolerance_proxy"] == pytest.approx(0.0)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# TEST 3: build_extrafloat_limit_engine_features — alias columns
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
+# TEST 3: build_extrafloat_limit_engine_features -- alias columns
+# -----------------------------------------------------------------------------
 
 
 def test_build_extrafloat_limit_engine_features_alias_columns():
@@ -423,9 +423,9 @@ def test_build_extrafloat_limit_engine_features_alias_columns():
     assert r["is_thin_file"] == 0  # total_loans=5 >= 3
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# TEST 4: compute_risk_cap — score range [0,1], risk_cap bounded
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
+# TEST 4: compute_risk_cap -- score range [0,1], risk_cap bounded
+# -----------------------------------------------------------------------------
 
 
 def test_compute_risk_cap_score_bounds():
@@ -481,16 +481,16 @@ def test_compute_risk_cap_score_bounds():
     )
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# TEST 5: compute_capacity_cap — primary path and fallback path
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
+# TEST 5: compute_capacity_cap -- primary path and fallback path
+# -----------------------------------------------------------------------------
 
 
 def test_compute_capacity_cap_primary_and_fallback():
     """
-    Primary path: avg_daily_balance_30d present → capacity_cap > 0,
+    Primary path: avg_daily_balance_30d present -> capacity_cap > 0,
                   capacity_fallback_inputs == 0.
-    Fallback path: only legacy columns (average_balance etc.) →
+    Fallback path: only legacy columns (average_balance etc.) ->
                    capacity_cap > 0, capacity_fallback_inputs > 0.
     """
     # Primary
@@ -520,15 +520,15 @@ def test_compute_capacity_cap_primary_and_fallback():
     assert float(result_fallback["capacity_fallback_inputs"].iloc[0]) > 0.0
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# TEST 6: compute_recent_usage_cap — activity gate and penalty haircut
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
+# TEST 6: compute_recent_usage_cap -- activity gate and penalty haircut
+# -----------------------------------------------------------------------------
 
 
 def test_compute_recent_usage_cap_activity_gate_and_penalty():
     """
     Activity gate zeros the cap when blended total < 100.
-    Penalty haircut: 2 events → multiplier = 0.80 → cap ~20% lower.
+    Penalty haircut: 2 events -> multiplier = 0.80 -> cap ~20% lower.
 
     Blended formula: 0.7*1m + 0.3*3m (both horizons affect the gate).
     """
@@ -551,7 +551,7 @@ def test_compute_recent_usage_cap_activity_gate_and_penalty():
         recent_repayment_amount_3m=5000.0,
         recent_penalty_events_1m=0.0,
     )
-    # Active, 2 penalty events → penalty_mult = clip(1 - 2*0.10, 0, 1) = 0.80
+    # Active, 2 penalty events -> penalty_mult = clip(1 - 2*0.10, 0, 1) = 0.80
     active_penalty = _features(
         recent_disbursement_amount_1m=5000.0,
         recent_disbursement_amount_3m=5000.0,
@@ -574,14 +574,14 @@ def test_compute_recent_usage_cap_activity_gate_and_penalty():
     assert abs(cap_penalty / cap_clean - 0.80) < 0.05
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# TEST 7: compute_prior_exposure_cap — new-to-credit vs existing
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
+# TEST 7: compute_prior_exposure_cap -- new-to-credit vs existing
+# -----------------------------------------------------------------------------
 
 
 def test_compute_prior_exposure_cap_new_vs_existing():
     """
-    New-to-credit (avg_prior=0, max_prior=0): cap = current_loan × 0.50.
+    New-to-credit (avg_prior=0, max_prior=0): cap = current_loan x 0.50.
     Existing borrower (avg_prior=5000, max_prior=8000): cap > new-to-credit cap.
     """
     new_df = _features(
@@ -593,7 +593,7 @@ def test_compute_prior_exposure_cap_new_vs_existing():
     result_new = compute_prior_exposure_cap(new_df)
     cap_new = float(result_new["prior_exposure_cap"].iloc[0])
 
-    # 5000 × 0.50 (new_to_credit_factor)
+    # 5000 x 0.50 (new_to_credit_factor)
     assert cap_new == pytest.approx(2500.0, abs=1.0)
     assert result_new["prior_exposure_reason"].iloc[0] == "new_to_credit_proxy_cap"
 
@@ -610,9 +610,9 @@ def test_compute_prior_exposure_cap_new_vs_existing():
     assert result_existing["prior_exposure_reason"].iloc[0] != "new_to_credit_proxy_cap"
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# TEST 8: combine_caps — thin-file vs standard weighting
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
+# TEST 8: combine_caps -- thin-file vs standard weighting
+# -----------------------------------------------------------------------------
 
 
 def test_combine_caps_thin_file_vs_standard():
@@ -633,7 +633,7 @@ def test_combine_caps_thin_file_vs_standard():
         "prior_limit": 0.0,
     }
 
-    # Scenario A — guardrail binds; check pre-guardrail difference
+    # Scenario A -- guardrail binds; check pre-guardrail difference
     thin_A = combine_caps(_features(is_thin_file=1.0, risk_cap=2000.0, **base))
     std_A = combine_caps(_features(is_thin_file=0.0, risk_cap=2000.0, **base))
 
@@ -643,7 +643,7 @@ def test_combine_caps_thin_file_vs_standard():
     assert std_pre == pytest.approx(8400.0, abs=1.0)
     assert thin_pre < std_pre
 
-    # Scenario B — guardrail doesn't bind; reason column distinguishes thin vs standard
+    # Scenario B -- guardrail doesn't bind; reason column distinguishes thin vs standard
     thin_B = combine_caps(_features(is_thin_file=1.0, risk_cap=30000.0, **base))
     std_B = combine_caps(_features(is_thin_file=0.0, risk_cap=30000.0, **base))
 
@@ -651,21 +651,21 @@ def test_combine_caps_thin_file_vs_standard():
     assert std_B["combined_reason"].iloc[0] == "standard_weighting_applied"
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# TEST 9: apply_policy_adjustments — tier classification, proven-good override
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
+# TEST 9: apply_policy_adjustments -- tier classification, proven-good override
+# -----------------------------------------------------------------------------
 
 
 def test_apply_policy_adjustments_tier_and_proven_good():
     """
-    Tier 1 (score >= 0.85) → multiplier 1.00; tier_4 (score < 0.35) → multiplier 0.40.
-    Proven-good override (loans≥3, on_time≥0.90, lifetime_default≤0.05) floors
+    Tier 1 (score >= 0.85) -> multiplier 1.00; tier_4 (score < 0.35) -> multiplier 0.40.
+    Proven-good override (loans>=3, on_time>=0.90, lifetime_default<=0.05) floors
     policy_cap at 85% of combined_cap, overriding lower tier multipliers.
     """
     combined = 10000.0
     df = pd.DataFrame(
         [
-            # Tier 1: score >= 0.85 → multiplier 1.00 (best borrower, no penalty)
+            # Tier 1: score >= 0.85 -> multiplier 1.00 (best borrower, no penalty)
             {
                 "risk_score": 0.90,
                 "combined_cap": combined,
@@ -677,7 +677,7 @@ def test_apply_policy_adjustments_tier_and_proven_good():
                 "recent_repayment_amount_1m": 5000.0,
                 "agent_tier_ceiling_multiplier": 1.0,
             },
-            # Tier 4: score < 0.35 → multiplier 0.40 (worst borrower, 60% cut)
+            # Tier 4: score < 0.35 -> multiplier 0.40 (worst borrower, 60% cut)
             {
                 "risk_score": 0.20,
                 "combined_cap": combined,
@@ -689,7 +689,7 @@ def test_apply_policy_adjustments_tier_and_proven_good():
                 "recent_repayment_amount_1m": 5000.0,
                 "agent_tier_ceiling_multiplier": 1.0,
             },
-            # Tier 3 (0.35 <= score < 0.60) but proven-good → floor override
+            # Tier 3 (0.35 <= score < 0.60) but proven-good -> floor override
             # raw_cap = 10000 * 0.65 = 6500; proven_floor = 10000 * 0.85 = 8500
             {
                 "risk_score": 0.50,
@@ -714,7 +714,7 @@ def test_apply_policy_adjustments_tier_and_proven_good():
     tier4_cap = float(result["policy_cap"].iloc[1])
     assert tier1_cap > tier4_cap  # 10000 > 4000
 
-    # Proven-good: policy_cap must be ≥ 85% of combined_cap
+    # Proven-good: policy_cap must be >= 85% of combined_cap
     proven_cap = float(result["policy_cap"].iloc[2])
     proven_floor = combined * 0.85
     assert proven_cap >= proven_floor - 1.0
@@ -722,9 +722,9 @@ def test_apply_policy_adjustments_tier_and_proven_good():
     assert result["policy_reason"].iloc[2] == "proven_good_floor_override"
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# TEST 10: End-to-end — features → caps → assigned_limit
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
+# TEST 10: End-to-end -- features -> caps -> assigned_limit
+# -----------------------------------------------------------------------------
 
 
 def test_run_extrafloat_limit_engine_end_to_end():
@@ -756,9 +756,9 @@ def test_run_extrafloat_limit_engine_end_to_end():
     )
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# _validate_config — PolicyConfigurationError
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
+# _validate_config -- PolicyConfigurationError
+# -----------------------------------------------------------------------------
 
 
 def test_invalid_tier_thresholds_raise_policy_error():

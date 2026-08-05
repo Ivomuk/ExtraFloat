@@ -19,9 +19,9 @@ from pd_model.preprocessing.transformations import (
     get_and_classify_pd_features,
 )
 
-# ──────────────────────────────────────────────────────────────────────────────
+# ------------------------------------------------------------------------------
 # Fixtures
-# ──────────────────────────────────────────────────────────────────────────────
+# ------------------------------------------------------------------------------
 
 
 def _make_train_df(n: int = 150, seed: int = 42) -> pd.DataFrame:
@@ -49,7 +49,7 @@ def _make_val_df_extreme(n: int = 50, seed: int = 99) -> pd.DataFrame:
             "agent_msisdn": [f"agent_val_{i}" for i in range(n)],
             "snapshot_dt": pd.to_datetime("2025-11-30"),
             "bad_state": rng.integers(0, 2, n),
-            # 100× the training range — would push winsorization bounds far out
+            # 100x the training range -- would push winsorization bounds far out
             "average_balance": rng.uniform(500_000, 5_000_000, n),
             "net_cash_flow_3m": rng.uniform(-50_000, 50_000, n),
             "vol_share_1m_of_3m": rng.uniform(0.0, 1.5, n),
@@ -81,9 +81,9 @@ def _fit_on_train(df_train: pd.DataFrame):
     return df_trans, pruned, report, fitted_params
 
 
-# ──────────────────────────────────────────────────────────────────────────────
+# ------------------------------------------------------------------------------
 # Tests
-# ──────────────────────────────────────────────────────────────────────────────
+# ------------------------------------------------------------------------------
 
 
 def test_transform_report_unaffected_by_val_data():
@@ -93,7 +93,7 @@ def test_transform_report_unaffected_by_val_data():
 
     _, _, report_train_only, _ = _fit_on_train(df_train)
 
-    # Fit on combined — this is the LEAKY path that the NF1 fix prevents in training
+    # Fit on combined -- this is the LEAKY path that the NF1 fix prevents in training
     df_combined = pd.concat([df_train, df_val], ignore_index=True)
     pd_features, log_cols, cap_cols, _, signed_log_cols, _ = get_and_classify_pd_features(df_combined)
     _, _, report_combined, _ = _fit_on_train(df_combined)
@@ -102,12 +102,12 @@ def test_transform_report_unaffected_by_val_data():
     train_hi = report_train_only.set_index("feature")["hi"].dropna()
     combined_hi = report_combined.set_index("feature")["hi"].dropna()
     shared = train_hi.index.intersection(combined_hi.index)
-    assert len(shared) > 0, "No capped features found — test is vacuous"
+    assert len(shared) > 0, "No capped features found -- test is vacuous"
 
     # At least one feature must have a higher combined-hi (extreme val values raised the bound)
     any_inflated = any(combined_hi[f] > train_hi[f] * 2 for f in shared if not pd.isna(combined_hi.get(f)))
     assert any_inflated, (
-        "Extreme validation values did not inflate combined clip bounds — "
+        "Extreme validation values did not inflate combined clip bounds -- "
         "test may not be effective at detecting leakage"
     )
 
@@ -170,7 +170,7 @@ def test_val_extreme_values_clipped_to_training_bounds():
     )
 
     # Verify: after applying fitted_params, val values lie within training hi-bound
-    # (post log-transform) by checking max val ≤ max train on each feature.
+    # (post log-transform) by checking max val <= max train on each feature.
     df_train_trans, _, _, _ = _fit_on_train(df_train)
     shared_num_cols = [
         c

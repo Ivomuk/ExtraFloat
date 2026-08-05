@@ -6,7 +6,7 @@ Feature engineering pipeline for the ExtraFloat credit limit engine.
 Prepares three input data sources and merges them into a single flat
 feature DataFrame ready for ``run_extrafloat_limit_engine()``.
 
-Market: Uganda (UG) — Bank of Uganda supervised mobile money.
+Market: Uganda (UG) -- Bank of Uganda supervised mobile money.
 """
 
 from __future__ import annotations
@@ -20,26 +20,26 @@ from extrafloat.engine.extrafloat_limit_engine_caps import DEFAULT_CAP_CONFIG
 
 logger = logging.getLogger(__name__)
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # UGANDA PEAK-SEASON MONTHS  (East Africa / Bank of Uganda context)
 # Jan = school fees, Aug/Sep = harvest + back-to-school, Dec = Christmas
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 PEAK_SEASON_MONTHS: frozenset[int] = frozenset({1, 8, 9, 12})
 
 # Agent tier ceiling multipliers are defined in DEFAULT_CAP_CONFIG["agent_tier"]["tiers"]
-# in extrafloat_limit_engine_caps.py — single source of truth for business policy.
+# in extrafloat_limit_engine_caps.py -- single source of truth for business policy.
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # STABILITY NORMALISATION
 # stability_proxy (on_time_streak - default_streak) is unbounded.
 # Clip to [0, STABILITY_NORM_UPPER] then divide to produce a [0, 1] score.
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 STABILITY_NORM_UPPER: float = 10.0
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # REQUIRED COLUMN SCHEMAS
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 BORROWER_LIMIT_REQUIRED_COLUMNS: list[str] = [
     "msisdn",
@@ -88,13 +88,13 @@ BORROWER_LIMIT_REQUIRED_COLUMNS: list[str] = [
 # Full multi-horizon schema derived from transaction_capacity_features_sample.txt
 # agent_msisdn is automatically renamed to msisdn in prepare_transaction_capacity_features.
 TRANSACTION_CAPACITY_REQUIRED_COLUMNS: list[str] = [
-    "msisdn",  # or agent_msisdn — renamed in prepare step
+    "msisdn",  # or agent_msisdn -- renamed in prepare step
     "snapshot_dt",
     "agent_profile",
     "account_balance",
     "average_balance",
     "commission",
-    # Cash-out: volume, value, customers, commissions — 3 horizons
+    # Cash-out: volume, value, customers, commissions -- 3 horizons
     "cash_out_vol_1m",
     "cash_out_vol_3m",
     "cash_out_vol_6m",
@@ -107,7 +107,7 @@ TRANSACTION_CAPACITY_REQUIRED_COLUMNS: list[str] = [
     "cash_out_comm_1m",
     "cash_out_comm_3m",
     "cash_out_comm_6m",
-    # Cash-in: volume, value, customers, commissions — 3 horizons
+    # Cash-in: volume, value, customers, commissions -- 3 horizons
     "cash_in_vol_1m",
     "cash_in_vol_3m",
     "cash_in_vol_6m",
@@ -120,7 +120,7 @@ TRANSACTION_CAPACITY_REQUIRED_COLUMNS: list[str] = [
     "cash_in_comm_1m",
     "cash_in_comm_3m",
     "cash_in_comm_6m",
-    # Payment: volume, value, customers, commissions — 3 horizons
+    # Payment: volume, value, customers, commissions -- 3 horizons
     "payment_vol_1m",
     "payment_vol_3m",
     "payment_vol_6m",
@@ -133,7 +133,7 @@ TRANSACTION_CAPACITY_REQUIRED_COLUMNS: list[str] = [
     "payment_comm_1m",
     "payment_comm_3m",
     "payment_comm_6m",
-    # Aggregate totals — 3 horizons
+    # Aggregate totals -- 3 horizons
     "cust_1m",
     "cust_3m",
     "cust_6m",
@@ -159,9 +159,9 @@ LOAN_SUMMARY_REQUIRED_COLUMNS: list[str] = [
 ]
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # INTERNAL HELPERS
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 
 def _check_required_columns(
@@ -224,9 +224,9 @@ def _col(df: pd.DataFrame, name: str, default: float = 0.0) -> pd.Series:
     return pd.Series(default, index=df.index, dtype="float64")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # 1. BORROWER LIMIT FEATURES
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 
 def prepare_borrower_limit_features(
@@ -249,12 +249,12 @@ def prepare_borrower_limit_features(
 
     df = borrower_limit_df.copy()
 
-    # ── Column standardisation ──
+    # -- Column standardisation --
     if "phonenumber" in df.columns and "msisdn" not in df.columns:
         df = df.rename(columns={"phonenumber": "msisdn"})
     df["msisdn"] = _standardize_msisdn(df["msisdn"])
 
-    # ── KYC verification (optional column, defaults to verified) ──
+    # -- KYC verification (optional column, defaults to verified) --
     if "kyc_verified_flag" in df.columns:
         df["kyc_verified_flag"] = (
             pd.to_numeric(df["kyc_verified_flag"], errors="coerce").fillna(0).clip(0, 1).astype(int)
@@ -263,19 +263,19 @@ def prepare_borrower_limit_features(
         if n_unverified > 0:
             logger.warning(
                 "prepare_borrower_limit_features: %d borrowers have "
-                "kyc_verified_flag=0 — these will be blocked (assigned_limit=0).",
+                "kyc_verified_flag=0 -- these will be blocked (assigned_limit=0).",
                 n_unverified,
             )
     else:
-        logger.info("kyc_verified_flag column absent — all borrowers treated as verified.")
+        logger.info("kyc_verified_flag column absent -- all borrowers treated as verified.")
         df["kyc_verified_flag"] = 1
 
     df["is_kyc_blocked"] = (df["kyc_verified_flag"] == 0).astype(int)
 
-    # ── Datetime coercion ──
+    # -- Datetime coercion --
     df = _coerce_datetime(df, ["first_loan_ts", "latest_loan_ts", "latest_disbursement_ts"])
 
-    # ── Numeric coercion ──
+    # -- Numeric coercion --
     numeric_cols = [
         "total_loans",
         "total_disbursed_amount",
@@ -315,7 +315,7 @@ def prepare_borrower_limit_features(
     ]
     df = _coerce_numeric(df, numeric_cols)
 
-    # ── Clip rates to [0, 1] ──
+    # -- Clip rates to [0, 1] --
     rate_cols = [
         "lifetime_on_time_24h_rate",
         "lifetime_on_time_26h_rate",
@@ -333,7 +333,7 @@ def prepare_borrower_limit_features(
         if col in df.columns:
             df[col] = df[col].clip(lower=0, upper=1)
 
-    # ── Clip non-negative cols ──
+    # -- Clip non-negative cols --
     non_neg_cols = [
         "total_loans",
         "total_disbursed_amount",
@@ -364,7 +364,7 @@ def prepare_borrower_limit_features(
     if "latest_requestid" in df.columns:
         df["latest_requestid"] = df["latest_requestid"].astype(str)
 
-    # ── Deduplicate: keep most recent record per borrower ──
+    # -- Deduplicate: keep most recent record per borrower --
     df = df.sort_values(
         ["msisdn", "latest_disbursement_ts", "latest_requestid"],
         ascending=[True, False, False],
@@ -372,16 +372,16 @@ def prepare_borrower_limit_features(
     )
     n_before = len(df)
     df = df.drop_duplicates(subset=["msisdn"], keep="first")
-    logger.info("prepare_borrower_limit_features: deduped %d → %d rows", n_before, len(df))
+    logger.info("prepare_borrower_limit_features: deduped %d -> %d rows", n_before, len(df))
 
-    # ── Tenure and recency ──
+    # -- Tenure and recency --
     df["borrower_tenure_days"] = (df["latest_loan_ts"] - df["first_loan_ts"]).dt.days.clip(lower=0)
     _as_of = (
         pd.Timestamp(as_of_date).normalize() if as_of_date is not None else pd.Timestamp.today().normalize()
     )
     df["days_since_latest_loan"] = (_as_of - df["latest_loan_ts"].dt.normalize()).dt.days.clip(lower=0)
 
-    # ── Composite features ──
+    # -- Composite features --
     df["exposure_tolerance_proxy"] = df[
         [
             "avg_prior_loan_size",
@@ -403,9 +403,9 @@ def prepare_borrower_limit_features(
     return df
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # 2. TRANSACTION CAPACITY FEATURES
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 
 def prepare_transaction_capacity_features(
@@ -418,7 +418,7 @@ def prepare_transaction_capacity_features(
     Computes the 30d and 90d primary signals that ``compute_capacity_cap()``
     needs as PRIMARY columns, eliminating all fallback paths.
 
-    Handles ``agent_msisdn`` → ``msisdn`` rename automatically.
+    Handles ``agent_msisdn`` -> ``msisdn`` rename automatically.
     """
     logger.info(
         "prepare_transaction_capacity_features: input rows = %d",
@@ -427,10 +427,10 @@ def prepare_transaction_capacity_features(
 
     df = transaction_capacity_df.copy()
 
-    # ── Rename agent_msisdn → msisdn if needed ──
+    # -- Rename agent_msisdn -> msisdn if needed --
     if "agent_msisdn" in df.columns and "msisdn" not in df.columns:
         df = df.rename(columns={"agent_msisdn": "msisdn"})
-        logger.info("Renamed agent_msisdn → msisdn.")
+        logger.info("Renamed agent_msisdn -> msisdn.")
 
     _check_required_columns(df, TRANSACTION_CAPACITY_REQUIRED_COLUMNS, "transaction_capacity_features")
 
@@ -488,7 +488,7 @@ def prepare_transaction_capacity_features(
     df = _coerce_numeric(df, numeric_cols, fill_value=0.0)
     df = _clip_lower_zero(df, numeric_cols)
 
-    # ── Aggregate if multiple rows per (msisdn, snapshot_dt) ──
+    # -- Aggregate if multiple rows per (msisdn, snapshot_dt) --
     agg_map: dict[str, str] = {
         "agent_profile": "last",
         "account_balance": "max",
@@ -511,17 +511,17 @@ def prepare_transaction_capacity_features(
     }
     df = df.groupby(["msisdn", "snapshot_dt"], as_index=False).agg(agg_map)
 
-    # ── Derived revenue (sum of commissions across transaction categories) ──
+    # -- Derived revenue (sum of commissions across transaction categories) --
     for h in ("1m", "3m", "6m"):
         df[f"revenue_{h}"] = df[f"cash_out_comm_{h}"] + df[f"cash_in_comm_{h}"] + df[f"payment_comm_{h}"]
 
-    # ── Total transaction values per horizon ──
+    # -- Total transaction values per horizon --
     for h in ("1m", "3m", "6m"):
         df[f"total_txn_value_{h}"] = (
             df[f"cash_out_value_{h}"] + df[f"cash_in_value_{h}"] + df[f"payment_value_{h}"]
         )
 
-    # ── PRIMARY 30d / 90d signals for compute_capacity_cap() ──
+    # -- PRIMARY 30d / 90d signals for compute_capacity_cap() --
     # Naming matches the PRIMARY column names the caps engine expects,
     # so no fallback paths are triggered.
     df["avg_daily_balance_30d"] = df["average_balance"]
@@ -542,13 +542,13 @@ def prepare_transaction_capacity_features(
     df["avg_monthly_txn_volume_30d"] = df["total_txn_value_1m"]
     df["avg_monthly_txn_volume_90d"] = df["total_txn_value_3m"] / 3.0
 
-    # ── Legacy 1m derived metrics (kept for output and reference) ──
+    # -- Legacy 1m derived metrics (kept for output and reference) --
     df["avg_value_per_txn_1m"] = _safe_divide(df["total_txn_value_1m"], df["vol_1m"])
     df["revenue_to_throughput_1m"] = _safe_divide(df["revenue_1m"], df["total_txn_value_1m"])
     df["revenue_to_balance_1m"] = _safe_divide(df["revenue_1m"], df["average_balance"])
     df["customer_to_volume_ratio_1m"] = _safe_divide(df["cust_1m"], df["vol_1m"])
 
-    # Weighted capacity proxy (reference signal — not used directly by caps)
+    # Weighted capacity proxy (reference signal -- not used directly by caps)
     df["capacity_proxy_1m"] = (
         0.35 * df["average_balance"].fillna(0)
         + 0.25 * df["revenue_1m"].fillna(0)
@@ -557,12 +557,12 @@ def prepare_transaction_capacity_features(
         + 0.10 * df["cash_out_value_1m"].fillna(0)
     )
 
-    # ── Operational activity flag ──
+    # -- Operational activity flag --
     df["operational_activity_flag"] = (
         (df["vol_1m"] > 0) | (df["cust_1m"] > 0) | (df["total_txn_value_1m"] > 0)
     ).astype(int)
 
-    # ── Agent tier ceiling multiplier ──
+    # -- Agent tier ceiling multiplier --
     # Tier map and fallback come from DEFAULT_CAP_CONFIG (single source of truth).
     _tier_cfg = DEFAULT_CAP_CONFIG.get("agent_tier", {})
     _tier_map = _tier_cfg.get("tiers", {})
@@ -579,9 +579,9 @@ def prepare_transaction_capacity_features(
     return df
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # 3. LOAN SUMMARY RECENT FEATURES
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 
 def prepare_loan_summary_recent_features(
@@ -652,9 +652,9 @@ def prepare_loan_summary_recent_features(
     return df
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # TEMPORAL CONSISTENCY VALIDATION
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 
 def _validate_temporal_alignment(
@@ -689,9 +689,9 @@ def _validate_temporal_alignment(
                 )
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # 4. MAIN FEATURE BUILDER
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 
 def build_extrafloat_limit_engine_features(
@@ -710,19 +710,19 @@ def build_extrafloat_limit_engine_features(
     """
     logger.info("build_extrafloat_limit_engine_features: starting")
 
-    # ── Prepare each source ──
+    # -- Prepare each source --
     borrower_df = prepare_borrower_limit_features(borrower_limit_df, as_of_date=as_of_date)
     transaction_df = prepare_transaction_capacity_features(transaction_capacity_df)
     loan_df = prepare_loan_summary_recent_features(loan_summary_df)
 
-    # ── Temporal consistency check (non-blocking) ──
+    # -- Temporal consistency check (non-blocking) --
     _validate_temporal_alignment(transaction_df, loan_df)
 
-    # ── Merge: borrower × transaction on msisdn ──
+    # -- Merge: borrower x transaction on msisdn --
     merged = borrower_df.merge(transaction_df, on="msisdn", how="left")
-    logger.info("After borrower × transaction merge: %d rows", len(merged))
+    logger.info("After borrower x transaction merge: %d rows", len(merged))
 
-    # ── Merge: result × loan summary on [msisdn, snapshot_dt] ──
+    # -- Merge: result x loan summary on [msisdn, snapshot_dt] --
     # Strict exact-date join is intentional: a nearest-date tolerance merge
     # would silently pull stale loan features without surfacing which snapshot
     # was used. Misaligned snapshots should be fixed upstream; the warning
@@ -730,7 +730,7 @@ def build_extrafloat_limit_engine_features(
     merged = merged.merge(loan_df, on=["msisdn", "snapshot_dt"], how="left")
     logger.info("After loan summary merge: %d rows", len(merged))
 
-    # Diagnose unmatched loan rows — exact snapshot_dt match required, so
+    # Diagnose unmatched loan rows -- exact snapshot_dt match required, so
     # snapshots off by even one day will silently zero-fill all loan features.
     _loan_cols = [c for c in loan_df.columns if c not in ("msisdn", "snapshot_dt")]
     if _loan_cols:
@@ -739,19 +739,19 @@ def build_extrafloat_limit_engine_features(
             logger.warning(
                 "build_extrafloat_limit_engine_features: %d/%d rows have no loan "
                 "summary match (all loan features will default to 0). "
-                "Check snapshot_dt alignment — merge requires exact date equality.",
+                "Check snapshot_dt alignment -- merge requires exact date equality.",
                 _unmatched,
                 len(merged),
             )
 
-    # ── Post-merge deduplication (keeps most recent snapshot per borrower) ──
+    # -- Post-merge deduplication (keeps most recent snapshot per borrower) --
     n_before = len(merged)
     merged = merged.sort_values(
         ["msisdn", "snapshot_dt"], ascending=[True, False], na_position="last"
     ).drop_duplicates(subset=["msisdn"], keep="first")
-    logger.info("Post-merge dedup: %d → %d rows", n_before, len(merged))
+    logger.info("Post-merge dedup: %d -> %d rows", n_before, len(merged))
 
-    # ── Zero-fill all merged numeric columns ──
+    # -- Zero-fill all merged numeric columns --
     zero_fill = [
         "account_balance",
         "average_balance",
@@ -815,7 +815,7 @@ def build_extrafloat_limit_engine_features(
             _tier_default
         )
 
-    # ── Cross-source composite features ──
+    # -- Cross-source composite features --
     merged["size_tolerance_gap"] = _col(merged, "exposure_tolerance_proxy") - _col(
         merged, "utilization_proxy_1m"
     )
@@ -833,14 +833,14 @@ def build_extrafloat_limit_engine_features(
         (_col(merged, "operational_activity_flag") > 0) & (_col(merged, "recent_credit_active_flag") > 0)
     ).astype(int)
 
-    # ── Seasonality flag (Uganda / East Africa: Jan, Aug, Sep, Dec) ──
+    # -- Seasonality flag (Uganda / East Africa: Jan, Aug, Sep, Dec) --
     if "snapshot_dt" in merged.columns:
         months = pd.to_datetime(merged["snapshot_dt"], errors="coerce").dt.month
         merged["is_peak_season_flag"] = months.isin(PEAK_SEASON_MONTHS).fillna(False).astype(int)
     else:
         merged["is_peak_season_flag"] = 0
 
-    # ── Alias columns — align with caps engine expected column names ──
+    # -- Alias columns -- align with caps engine expected column names --
     # All aliases are explicitly computed here so the caps engine
     # always finds its expected column names in the output.
 
@@ -852,7 +852,7 @@ def build_extrafloat_limit_engine_features(
 
     merged["avg_cure_time_hours"] = _col(merged, "avg_prior_hours_to_cure")
 
-    # Normalise stability_proxy (unbounded) → [0, 1]
+    # Normalise stability_proxy (unbounded) -> [0, 1]
     stability_raw = _col(merged, "stability_proxy")
     merged["repayment_stability_score"] = (
         stability_raw.clip(lower=0, upper=STABILITY_NORM_UPPER) / STABILITY_NORM_UPPER
@@ -874,7 +874,7 @@ def build_extrafloat_limit_engine_features(
     merged["is_active_borrower"] = _col(merged, "recent_credit_active_flag").astype(int)
 
     logger.info(
-        "build_extrafloat_limit_engine_features: done — rows=%d, cols=%d",
+        "build_extrafloat_limit_engine_features: done -- rows=%d, cols=%d",
         len(merged),
         len(merged.columns),
     )

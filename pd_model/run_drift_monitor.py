@@ -1,5 +1,5 @@
 """
-Drift monitoring CLI — designed to be called on a scheduled cadence
+Drift monitoring CLI -- designed to be called on a scheduled cadence
 (cron, Airflow, GitHub Actions, etc.).
 
 What it does
@@ -25,8 +25,8 @@ Typical cron entry (daily at 06:00 UTC)
 
 Exit codes
 ----------
-0 — no alerts or warnings only
-1 — at least one CRITICAL alert (score PSI ≥ 0.25 or ≥1 feature CSI ≥ 0.25)
+0 -- no alerts or warnings only
+1 -- at least one CRITICAL alert (score PSI >= 0.25 or >=1 feature CSI >= 0.25)
 """
 
 from __future__ import annotations
@@ -90,7 +90,7 @@ def run_drift_monitor(
             if c in monitoring_df.columns and c != score_col
         ]
         logger.warning(
-            "feature_order.json not found — monitoring %d numeric columns",
+            "feature_order.json not found -- monitoring %d numeric columns",
             len(feature_cols),
         )
 
@@ -118,13 +118,13 @@ def run_drift_monitor(
     # Write CSI table alongside alert
     csi_path = output_dir / f"csi_table_{date_str}.csv"
     drift_report["csi_table"].to_csv(csi_path, index=False)
-    logger.info("CSI table written → %s", csi_path)
+    logger.info("CSI table written -> %s", csi_path)
 
     # Optional Slack notification
     if slack_webhook and alerts["has_warning"]:
         send_slack_alert(alerts["message"], webhook_url=slack_webhook)
     elif slack_webhook:
-        logger.info("No warnings — Slack notification suppressed")
+        logger.info("No warnings -- Slack notification suppressed")
 
     logger.info("Drift monitor complete: has_critical=%s", alerts["has_critical"])
     return alerts

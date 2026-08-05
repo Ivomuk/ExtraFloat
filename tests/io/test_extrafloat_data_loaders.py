@@ -13,9 +13,9 @@ from extrafloat.io.extrafloat_data_loaders import (
     load_transaction_capacity_features,
 )
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # HELPERS
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 
 def _write_csv(tmp_path, filename, df):
@@ -107,9 +107,9 @@ def _borrower_df(**extra_cols):
     return pd.DataFrame(base)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # TRANSACTION CAPACITY
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 
 def test_load_transaction_missing_file():
@@ -133,7 +133,7 @@ def test_load_transaction_tbl_dt_renamed_to_snapshot_dt(tmp_path):
 
 def test_load_transaction_snapshot_dt_kept_when_present(tmp_path):
     raw = _txn_df()
-    raw["snapshot_dt"] = raw["tbl_dt"]  # both present — snapshot_dt wins
+    raw["snapshot_dt"] = raw["tbl_dt"]  # both present -- snapshot_dt wins
     p = _write_csv(tmp_path, "txn.csv", raw)
     df = load_transaction_capacity_features(p)
     assert "snapshot_dt" in df.columns
@@ -145,7 +145,7 @@ def test_load_transaction_all_columns_preserved(tmp_path):
     raw = _txn_df()
     p = _write_csv(tmp_path, "txn.csv", raw)
     df = load_transaction_capacity_features(p)
-    # Every source column (after rename) must be present — no subsetting
+    # Every source column (after rename) must be present -- no subsetting
     original_cols = {
         "msisdn" if c == "agent_msisdn" else ("snapshot_dt" if c == "tbl_dt" else c) for c in raw.columns
     }
@@ -158,9 +158,9 @@ def test_load_transaction_snapshot_dt_is_datetime(tmp_path):
     assert pd.api.types.is_datetime64_any_dtype(df["snapshot_dt"])
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # LOAN SUMMARY
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 
 def test_load_loan_summary_missing_file():
@@ -192,9 +192,9 @@ def test_load_loan_summary_dates_parsed(tmp_path):
         assert pd.api.types.is_datetime64_any_dtype(df[col]), f"{col} not datetime"
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # BORROWER LIMIT
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 
 def test_load_borrower_limit_missing_file():
@@ -211,7 +211,7 @@ def test_load_borrower_limit_phonenumber_renamed(tmp_path):
 
 def test_load_borrower_limit_msisdn_kept_when_present(tmp_path):
     raw = _borrower_df()
-    raw["msisdn"] = raw["phonenumber"]  # both present — msisdn wins
+    raw["msisdn"] = raw["phonenumber"]  # both present -- msisdn wins
     p = _write_csv(tmp_path, "borrow.csv", raw)
     df = load_borrower_limit_features(p)
     assert "msisdn" in df.columns

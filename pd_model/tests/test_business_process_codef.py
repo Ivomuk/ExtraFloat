@@ -7,17 +7,17 @@ when outstanding debt exists at reconciliation time, then:
 
     P(bad_state = 1 | outstanding = 1) >> P(bad_state = 1 | outstanding = 0)
 
-This is NOT temporal leakage — both the outstanding flag and the label are correctly
+This is NOT temporal leakage -- both the outstanding flag and the label are correctly
 dated to the pre-snapshot and post-snapshot periods respectively. However, it IS
 conceptual co-definition: the feature and the label share a common business-process
 ancestor (the lending and penalty enforcement system).
 
 Evidence of strong co-definition (warrants investigation):
   - bad_rate[outstanding=1] > 0.30  AND  bad_rate[outstanding=0] < 0.05
-  - lift for outstanding segment > 3×
+  - lift for outstanding segment > 3x
 
 Evidence that co-definition is tolerable (model learns real credit risk):
-  - bad_rate[outstanding=1] < 0.30 — being outstanding does NOT guarantee a penalty
+  - bad_rate[outstanding=1] < 0.30 -- being outstanding does NOT guarantee a penalty
   - Many features combine to explain variance not explained by net_exposure_6M alone
 
 The fix applied in this commit removes `currently_outstanding_flag` from the model
@@ -135,7 +135,7 @@ class TestBusinessProcessCodefinition:
         )
 
     def test_lift_exceeds_three_under_strong_codef(self):
-        """Under strong co-definition, lift for outstanding segment must exceed 3×."""
+        """Under strong co-definition, lift for outstanding segment must exceed 3x."""
         df = simulate_codef_scenario(
             n=5000,
             outstanding_to_bad_rate=0.60,
@@ -161,7 +161,7 @@ class TestBusinessProcessCodefinition:
         report = business_process_codef_report(df)
         for _, row in report.iterrows():
             assert 0.5 <= row["lift"] <= 2.0, (
-                f"Segment '{row['segment']}' lift={row['lift']:.2f} — "
+                f"Segment '{row['segment']}' lift={row['lift']:.2f} -- "
                 "expected near 1.0 when no co-definition exists"
             )
 
@@ -174,7 +174,7 @@ class TestBusinessProcessCodefinition:
         assert set(report["segment"]) == {"outstanding", "not_outstanding"}
 
     def test_report_edge_case_all_outstanding(self):
-        """Edge case: entire population outstanding — not_outstanding has n=0."""
+        """Edge case: entire population outstanding -- not_outstanding has n=0."""
         rng = np.random.default_rng(5)
         n = 100
         df = pd.DataFrame({

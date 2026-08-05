@@ -2,11 +2,11 @@
 Feature classification and transformation for PD modelling (Phase 2 / file4).
 
 Provides:
-- ``get_and_classify_pd_features``  – extract numeric candidates and classify into
+- ``get_and_classify_pd_features``  - extract numeric candidates and classify into
                                       LOG, SIGNED_LOG, CAP, or PROTECTED buckets.
-- ``apply_pd_transformations``       – apply bucket-appropriate transforms with
+- ``apply_pd_transformations``       - apply bucket-appropriate transforms with
                                       automatic reversion on failure.
-- ``prune_post_transform_features``  – drop degenerate (all-NaN / near-constant)
+- ``prune_post_transform_features``  - drop degenerate (all-NaN / near-constant)
                                       features after transformation.
 """
 
@@ -50,13 +50,13 @@ def get_and_classify_pd_features(
     buckets.
 
     Classification precedence (first match wins):
-    1. **Blacklist** / **ID-like** / **Leakage** / **DPD-ambiguous** → excluded
-    2. ``PROTECTED``     – flags, indicators, binary/ordinal; left raw
-    3. ``CAP ONLY``      – ratios, shares, growth rates; winsorize only
-    4. ``COUNT``         – volume counts; winsorize only (mapped to cap)
-    5. ``SIGNED LOG``    – net flows, deltas; sign(x)*log1p(|x|) + winsorize
-    6. ``LOG``           – amounts, balances, commissions; log1p + winsorize
-    7. Default          – PROTECTED (if none of the above matched)
+    1. **Blacklist** / **ID-like** / **Leakage** / **DPD-ambiguous** -> excluded
+    2. ``PROTECTED``     - flags, indicators, binary/ordinal; left raw
+    3. ``CAP ONLY``      - ratios, shares, growth rates; winsorize only
+    4. ``COUNT``         - volume counts; winsorize only (mapped to cap)
+    5. ``SIGNED LOG``    - net flows, deltas; sign(x)*log1p(|x|) + winsorize
+    6. ``LOG``           - amounts, balances, commissions; log1p + winsorize
+    7. Default          - PROTECTED (if none of the above matched)
 
     Args:
         df_pd:     Modelling DataFrame.
@@ -65,12 +65,12 @@ def get_and_classify_pd_features(
 
     Returns:
         Tuple of:
-        - ``pd_features``     – full list of accepted numeric candidates
-        - ``log_cols``        – LOG + CAP columns
-        - ``cap_cols``        – CAP ONLY columns
-        - ``protected_cols``  – PROTECTED (left raw) columns
-        - ``signed_log_cols`` – SIGNED LOG + CAP columns
-        - ``excluded_df``     – DataFrame of excluded columns with reasons
+        - ``pd_features``     - full list of accepted numeric candidates
+        - ``log_cols``        - LOG + CAP columns
+        - ``cap_cols``        - CAP ONLY columns
+        - ``protected_cols``  - PROTECTED (left raw) columns
+        - ``signed_log_cols`` - SIGNED LOG + CAP columns
+        - ``excluded_df``     - DataFrame of excluded columns with reasons
     """
     blacklist_lower = {str(c).strip().lower() for c in blacklist}
 
@@ -153,7 +153,7 @@ def get_and_classify_pd_features(
             logger.debug("%-40s -> %s", c, matched)
 
     logger.info(
-        "get_and_classify_pd_features: %d candidates → LOG=%d, SIGNED_LOG=%d, "
+        "get_and_classify_pd_features: %d candidates -> LOG=%d, SIGNED_LOG=%d, "
         "CAP=%d, PROTECTED=%d, excluded=%d",
         len(pd_features),
         len(log_cols),
@@ -555,9 +555,9 @@ def build_transformed_dataframe(
 
     Returns:
         Tuple of:
-        - ``df_pd_transformed`` – DataFrame with transformed numeric features
-        - ``pd_features_pruned`` – kept feature names after pruning
-        - ``transform_report`` – per-feature transformation action log
+        - ``df_pd_transformed`` - DataFrame with transformed numeric features
+        - ``pd_features_pruned`` - kept feature names after pruning
+        - ``transform_report`` - per-feature transformation action log
     """
     # 1) Downcast numeric features
     for col in [c for c in pd_features if c in df_pd.columns]:
@@ -577,7 +577,7 @@ def build_transformed_dataframe(
         fitted_params=fitted_params,
     )
 
-    # 3) Prune — skipped at inference (fitted_params present): the model's feature_order
+    # 3) Prune -- skipped at inference (fitted_params present): the model's feature_order
     #    is the authoritative list; pruning against the scoring batch would be batch-dependent.
     if fitted_params is not None:
         pd_features_pruned = [c for c in pd_features if c in df_numeric_transformed.columns]

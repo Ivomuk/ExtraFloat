@@ -5,7 +5,7 @@ Verifies that individual features cannot replicate the full model's 0.989 AUC
 on their own. A single feature with AUC > 0.90 signals either temporal leakage
 or business-process co-definition with the label.
 
-Clean result: top features individually produce AUC in the 0.55–0.85 range.
+Clean result: top features individually produce AUC in the 0.55-0.85 range.
 Leakage result: any feature with AUC > 0.90 warrants immediate investigation.
 
 To analyse the real training matrix:

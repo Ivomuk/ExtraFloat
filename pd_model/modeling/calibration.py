@@ -7,7 +7,7 @@ Preserves all algorithms from file9.txt exactly:
   - Paired bootstrap for AUC confidence intervals
   - Approval-rate policy tables
 
-No hardcoded export paths — callers pass output_dir if persistence is needed.
+No hardcoded export paths -- callers pass output_dir if persistence is needed.
 """
 
 from __future__ import annotations
@@ -55,7 +55,7 @@ def _standardize_scored_df(
     else:
         df[feature_config.AGENT_KEY] = df[feature_config.AGENT_KEY].astype(str)
 
-    # Score column — look for model-specific first, then generic
+    # Score column -- look for model-specific first, then generic
     score_col = None
     candidates = [f"{model_key}_score", "score", feature_config.RAW_SCORE_COL]
     for c in candidates:
@@ -97,7 +97,7 @@ def build_pd_calibration_map(
     Parameters
     ----------
     scored_df : DataFrame with bad_state (or y) and a score column
-    model_key : "xgb" or "lgb" — used to look up the score column
+    model_key : "xgb" or "lgb" -- used to look up the score column
     cfg       : ModelConfig
 
     Returns
@@ -203,7 +203,7 @@ def attach_cal_pd(
     """
     Interval-join calibration map onto scored_df to produce cal_pd column.
 
-    Fail-closed on cfg.cal_min_coverage — raises if too many rows are uncovered.
+    Fail-closed on cfg.cal_min_coverage -- raises if too many rows are uncovered.
 
     Returns
     -------
@@ -227,10 +227,10 @@ def attach_cal_pd(
     bin_lefts = cal_sub["score_min"].to_numpy()
     pd_lookup = cal_sub["pd"].to_numpy()
 
-    # searchsorted returns the insertion point — subtract 1 to get the bin index
+    # searchsorted returns the insertion point -- subtract 1 to get the bin index
     bin_idx = np.searchsorted(bin_lefts, score_vals, side="right") - 1
 
-    # Clip to valid range: index -1 → bin 0 (below minimum), index >= n_bins → last bin
+    # Clip to valid range: index -1 -> bin 0 (below minimum), index >= n_bins -> last bin
     bin_idx = np.clip(bin_idx, 0, len(bin_lefts) - 1)
 
     assigned_pd = pd_lookup[bin_idx]
@@ -270,7 +270,7 @@ def build_policy_tables(
     ----------
     scored_df_with_pd : DataFrame with cal_pd (and y) columns
     cfg               : ModelConfig (policy_operating_points not used here;
-                        grid is 5%–95% in 5pp steps)
+                        grid is 5%-95% in 5pp steps)
     prefer_pd         : if True, sort by cal_pd ascending (lower PD = approved first)
 
     Returns

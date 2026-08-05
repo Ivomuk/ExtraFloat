@@ -26,9 +26,9 @@ from extrafloat.monitoring.extrafloat_drift_monitor import (
     run_drift_monitor,
 )
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # HELPERS
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 
 def _engine_output_df(
@@ -117,13 +117,13 @@ def _engine_output_df(
     )
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# TEST 1 — PSI stable population
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
+# TEST 1 -- PSI stable population
+# -----------------------------------------------------------------------------
 
 
 def test_psi_stable_population():
-    """Same distribution → PSI < 0.10 (stable)."""
+    """Same distribution -> PSI < 0.10 (stable)."""
     rng = np.random.default_rng(42)
     ref = rng.normal(50_000, 10_000, 1000)
     cur = rng.normal(50_000, 10_000, 1000)
@@ -132,13 +132,13 @@ def test_psi_stable_population():
     assert psi < 0.10, f"Expected PSI < 0.10 for identical distributions, got {psi:.4f}"
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# TEST 2 — PSI moderate drift
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
+# TEST 2 -- PSI moderate drift
+# -----------------------------------------------------------------------------
 
 
 def test_psi_moderate_drift():
-    """Mean shifted by 0.35 std → PSI in monitor zone [0.10, 0.25)."""
+    """Mean shifted by 0.35 std -> PSI in monitor zone [0.10, 0.25)."""
     rng = np.random.default_rng(99)
     std = 10_000
     ref = rng.normal(50_000, std, 2000)
@@ -148,13 +148,13 @@ def test_psi_moderate_drift():
     assert 0.10 <= psi < 0.25, f"Expected PSI in [0.10, 0.25) for 0.35-std shift, got {psi:.4f}"
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# TEST 3 — PSI severe drift
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
+# TEST 3 -- PSI severe drift
+# -----------------------------------------------------------------------------
 
 
 def test_psi_severe_drift():
-    """Completely different distributions → PSI > 0.25 (alert)."""
+    """Completely different distributions -> PSI > 0.25 (alert)."""
     rng = np.random.default_rng(42)
     ref = rng.normal(50_000, 5_000, 2000)
     cur = rng.uniform(0, 400_000, 2000)
@@ -163,13 +163,13 @@ def test_psi_severe_drift():
     assert psi > 0.25, f"Expected PSI > 0.25 for severely different distributions, got {psi:.4f}"
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# TEST 4 — Population composition: no drift
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
+# TEST 4 -- Population composition: no drift
+# -----------------------------------------------------------------------------
 
 
 def test_population_composition_no_drift():
-    """Same tier mix in ref and cur → composition result is stable."""
+    """Same tier mix in ref and cur -> composition result is stable."""
     rng = np.random.default_rng(42)
     tier_mix = ["tier_1"] * 400 + ["tier_2"] * 300 + ["tier_3"] * 200 + ["tier_4"] * 100
     ref_df = pd.DataFrame({"risk_tier": rng.permutation(tier_mix)})
@@ -181,9 +181,9 @@ def test_population_composition_no_drift():
     assert tier_r.severity == SEVERITY_STABLE, f"Identical tier mix should be stable, got {tier_r.severity}"
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# TEST 5 — Population composition: drift detected
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
+# TEST 5 -- Population composition: drift detected
+# -----------------------------------------------------------------------------
 
 
 def test_population_composition_drift():
@@ -206,13 +206,13 @@ def test_population_composition_drift():
     )
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# TEST 6 — Policy calibration: regulatory cap alert
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
+# TEST 6 -- Policy calibration: regulatory cap alert
+# -----------------------------------------------------------------------------
 
 
 def test_policy_calibration_regulatory_cap_alert():
-    """More than 20% of rows hitting regulatory cap → alert."""
+    """More than 20% of rows hitting regulatory cap -> alert."""
     n = 500
     ref_df = pd.DataFrame({"regulatory_cap_applied": np.zeros(n, dtype=int)})
     cur_df = pd.DataFrame({"regulatory_cap_applied": np.array([1] * 120 + [0] * 380, dtype=int)})
@@ -224,13 +224,13 @@ def test_policy_calibration_regulatory_cap_alert():
     assert r.cur_rate == pytest.approx(0.24, abs=0.01)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# TEST 7 — Cap driver composition shift detected
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
+# TEST 7 -- Cap driver composition shift detected
+# -----------------------------------------------------------------------------
 
 
 def test_cap_driver_composition_shift():
-    """Binding cap shifts from capacity_component → risk_component: detected."""
+    """Binding cap shifts from capacity_component -> risk_component: detected."""
     ref_df = pd.DataFrame(
         {
             "combined_top_driver": (
@@ -261,9 +261,9 @@ def test_cap_driver_composition_shift():
     assert r.max_absolute_shift >= 0.35, f"Expected absolute shift >= 35 pp, got {r.max_absolute_shift:.4f}"
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# TEST 8 — DriftReport severity aggregation
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
+# TEST 8 -- DriftReport severity aggregation
+# -----------------------------------------------------------------------------
 
 
 def test_drift_report_severity_aggregation():
@@ -323,9 +323,9 @@ def test_drift_report_severity_aggregation():
     assert "f2" in summary["top_input_alerts"]
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# TEST 9 — Graceful degradation without scipy
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
+# TEST 9 -- Graceful degradation without scipy
+# -----------------------------------------------------------------------------
 
 
 def test_graceful_degradation_without_scipy():
@@ -358,16 +358,16 @@ def test_graceful_degradation_without_scipy():
         edm._SCIPY_AVAILABLE = original
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# TEST 10 — Full drift run with engine output
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
+# TEST 10 -- Full drift run with engine output
+# -----------------------------------------------------------------------------
 
 
 def test_full_drift_run_with_engine_output():
     """End-to-end: build two synthetic output DataFrames, run run_drift_monitor,
     verify DriftReport is fully populated and structurally valid."""
     ref_df = _engine_output_df(n=300, rng_seed=1, balance_mean=50_000, assigned_limit_mean=80_000)
-    # Cur window: slight input shift (higher balances → some output shift)
+    # Cur window: slight input shift (higher balances -> some output shift)
     cur_df = _engine_output_df(n=300, rng_seed=2, balance_mean=65_000, assigned_limit_mean=90_000)
 
     report = run_drift_monitor(ref_df, cur_df, monitor_inputs=True, monitor_outputs=True)
@@ -396,16 +396,16 @@ def test_full_drift_run_with_engine_output():
     assert isinstance(summary["top_input_alerts"], list)
     assert isinstance(summary["top_output_alerts"], list)
 
-    # Identical ref == cur → overall must be stable
+    # Identical ref == cur -> overall must be stable
     same_report = run_drift_monitor(ref_df, ref_df, monitor_inputs=True, monitor_outputs=True)
     assert same_report.overall_severity == SEVERITY_STABLE, (
         "Identical ref and cur should produce stable overall severity"
     )
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# TEST 11 — Policy health near-zero baseline: no spurious monitor alert
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
+# TEST 11 -- Policy health near-zero baseline: no spurious monitor alert
+# -----------------------------------------------------------------------------
 
 
 def test_policy_health_near_zero_baseline():
@@ -427,9 +427,9 @@ def test_policy_health_near_zero_baseline():
     )
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# TEST 12 — PSI on low-cardinality column uses categorical path
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
+# TEST 12 -- PSI on low-cardinality column uses categorical path
+# -----------------------------------------------------------------------------
 
 
 def test_psi_low_cardinality_column():
@@ -457,19 +457,19 @@ def test_psi_low_cardinality_column():
     assert penalty_r.severity == SEVERITY_ALERT
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# TEST 13 — Cramér's V: significant chi-sq with tiny effect size → MONITOR
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
+# TEST 13 -- Cramér's V: significant chi-sq with tiny effect size -> MONITOR
+# -----------------------------------------------------------------------------
 
 
 def test_composition_cramer_v_small_effect_is_stable():
-    """Large n + statistically significant chi-sq but V ≈ 0.016 → STABLE, not ALERT.
+    """Large n + statistically significant chi-sq but V ≈ 0.016 -> STABLE, not ALERT.
 
     ref: tier_1=12000, tier_2=9000, tier_3=6000, tier_4=3000 (n=30000)
     cur: tier_1=11700, tier_2=9000, tier_3=6000, tier_4=3300 (n=30000)
     chi2 ≈ 18.1, p << 0.05 (significant), V ≈ 0.016 (below monitor threshold of 0.10).
 
-    Validates the 3-tier Cramér's V logic: sig + V < monitor_threshold → STABLE,
+    Validates the 3-tier Cramér's V logic: sig + V < monitor_threshold -> STABLE,
     preventing alert noise at large n where 1 pp shifts become detectable.
     """
     ref_df = pd.DataFrame(
@@ -490,12 +490,12 @@ def test_composition_cramer_v_small_effect_is_stable():
         assert tier_r.cramers_v < 0.10, (
             f"Expected tiny Cramér's V (< cramers_v_monitor_threshold=0.10), got {tier_r.cramers_v:.4f}"
         )
-        # V < monitor_threshold → STABLE (operationally negligible despite statistical significance)
+        # V < monitor_threshold -> STABLE (operationally negligible despite statistical significance)
         assert tier_r.severity == SEVERITY_STABLE, (
             f"Tiny effect size (V={tier_r.cramers_v:.4f}) should be STABLE, got {tier_r.severity}"
         )
     else:
-        # Without scipy: fallback to fraction-delta; ~1 pp shift → stable or monitor
+        # Without scipy: fallback to fraction-delta; ~1 pp shift -> stable or monitor
         assert tier_r.severity in (SEVERITY_STABLE, SEVERITY_MONITOR), (
             f"Without scipy, tiny shift should not alert, got {tier_r.severity}"
         )
