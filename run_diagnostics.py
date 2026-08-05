@@ -1,14 +1,14 @@
 """
 Leakage & AUC diagnostic script.
 
-Reruns pipeline data-prep (steps 1-7 only — no model training) to obtain
+Reruns pipeline data-prep (steps 1-7 only -- no model training) to obtain
 the real X_train / y_train feature matrix, then runs four diagnostic checks:
 
-  Check 1  — Single-feature AUC: does any feature alone reach > 0.90 AUC?
-  Check 2  — Spearman/Pearson correlation with label: any feature with |r| > 0.80?
-  Check 3  — Business-process co-definition: bad rate by outstanding-debt status
-  Check 4  — Thin-file vs thick-file population breakdown + scorecard AUC
-  Check 4b — Thin-file LR validation: bootstrap CI, decile table, coefficient signs
+  Check 1  -- Single-feature AUC: does any feature alone reach > 0.90 AUC?
+  Check 2  -- Spearman/Pearson correlation with label: any feature with |r| > 0.80?
+  Check 3  -- Business-process co-definition: bad rate by outstanding-debt status
+  Check 4  -- Thin-file vs thick-file population breakdown + scorecard AUC
+  Check 4b -- Thin-file LR validation: bootstrap CI, decile table, coefficient signs
 
 Usage (Windows CMD, same args as run_pipeline.py):
     python run_diagnostics.py ^
@@ -216,7 +216,7 @@ def run_diagnostics(args: argparse.Namespace) -> None:
     print(f"\n  ALERT features (AUC > 0.90): {len(alert_feats)}")
     print(f"  WARN  features (AUC > 0.85): {len(warn_feats)}")
     if not alert_feats.empty:
-        print("\n  *** ALERT — investigate these features for leakage or co-definition: ***")
+        print("\n  *** ALERT -- investigate these features for leakage or co-definition: ***")
         print(alert_feats[["feature", "auc"]].to_string(index=False))
 
     # ------------------------------------------------------------------ #
@@ -231,7 +231,7 @@ def run_diagnostics(args: argparse.Namespace) -> None:
     alert_corr = corr_report[corr_report["flag"] == "ALERT"]
     print(f"\n  ALERT features (|r| > 0.80): {len(alert_corr)}")
     if not alert_corr.empty:
-        print("\n  *** ALERT — high correlation with label: ***")
+        print("\n  *** ALERT -- high correlation with label: ***")
         print(alert_corr[["feature", "spearman_r", "pearson_r"]].to_string(index=False))
 
     # ------------------------------------------------------------------ #
@@ -264,7 +264,7 @@ def run_diagnostics(args: argparse.Namespace) -> None:
             print(f"\n  Outstanding agents bad rate : {out_br:.2%}")
             print(f"  Lift vs overall             : {out_lift:.2f}x")
             if out_br > 0.30:
-                print("  *** WARNING: bad rate > 30% when outstanding — strong co-definition ***")
+                print("  *** WARNING: bad rate > 30% when outstanding -- strong co-definition ***")
             elif out_br > 0.15:
                 print("  NOTE: moderate lift; net_exposure_6M is a strong but not deterministic signal")
             else:
@@ -311,7 +311,7 @@ def run_diagnostics(args: argparse.Namespace) -> None:
         y_all = pd.to_numeric(df_train_raw[label_col], errors="coerce")
 
         # Thin-file AUC: use the scorecard's own PD estimate (never_loan_pd_like)
-        # XGBoost does not score thin-file agents in production — the scorecard does.
+        # XGBoost does not score thin-file agents in production -- the scorecard does.
         scorecard_score_col = "never_loan_pd_like"
         if scorecard_score_col in df_train_raw.columns:
             sc_score = pd.to_numeric(df_train_raw[scorecard_score_col], errors="coerce")
@@ -326,7 +326,7 @@ def run_diagnostics(args: argparse.Namespace) -> None:
             print(f"  Scorecard AUC on thin-file agents  : '{scorecard_score_col}' not found in DataFrame")
 
         # Thick-file AUC: use the top XGBoost feature as a proxy for the model's signal
-        # (full model AUC requires running XGBoost — use top feature as lower-bound indicator)
+        # (full model AUC requires running XGBoost -- use top feature as lower-bound indicator)
         top_feat = auc_report.iloc[0]["feature"]
         if top_feat in df_train_raw.columns:
             x_feat = pd.to_numeric(df_train_raw[top_feat], errors="coerce")
@@ -335,7 +335,7 @@ def run_diagnostics(args: argparse.Namespace) -> None:
                 auc_thick = roc_auc_score(y_all[valid_thick], x_feat[valid_thick])
                 auc_thick = max(auc_thick, 1 - auc_thick)
                 print(f"  Top feature AUC on thick-file only : {auc_thick:.4f}  (n={valid_thick.sum():,})")
-                print(f"  (Full XGBoost AUC on thick-file would be higher — this is a single-feature lower bound)")
+                print(f"  (Full XGBoost AUC on thick-file would be higher -- this is a single-feature lower bound)")
 
         if n_thin > 0:
             print(f"\n  NOTE: {n_thin:,} thin-file agents ({n_thin/n_total:.1%}) go through the scorecard.")
@@ -376,10 +376,10 @@ def run_diagnostics(args: argparse.Namespace) -> None:
         n_pos_val  = int(_y_arr.sum())
 
         print(f"\n  [i] Bootstrap 95% CI  (n_thin_val={n_thin_val:,}, n_positives={n_pos_val})")
-        print(f"  {'─'*50}")
+        print(f"  {'-'*50}")
 
         if n_pos_val < 5:
-            print(f"  SKIP: only {n_pos_val} positives in thin-file val — AUC estimate unreliable")
+            print(f"  SKIP: only {n_pos_val} positives in thin-file val -- AUC estimate unreliable")
         else:
             _point_auc = float(roc_auc_score(_y_arr, _s_arr))
             rng = np.random.default_rng(42)
@@ -401,18 +401,18 @@ def run_diagnostics(args: argparse.Namespace) -> None:
                 print(f"  95% CI        : [{_ci_lo:.4f}, {_ci_hi:.4f}]")
                 print(f"  CI width      : {_width:.4f}")
                 if _width > 0.15:
-                    print("  *** WARNING: CI is wide — point estimate has high variance."
+                    print("  *** WARNING: CI is wide -- point estimate has high variance."
                           f" Report as ~{_point_auc:.2f} ± {_width/2:.2f}, not a precise figure ***")
                 elif _width > 0.08:
-                    print("  NOTE: moderate CI width — treat point estimate as approximate")
+                    print("  NOTE: moderate CI width -- treat point estimate as approximate")
                 else:
-                    print("  OK: CI is tight — point estimate is stable")
+                    print("  OK: CI is tight -- point estimate is stable")
             else:
                 print("  WARNING: bootstrap produced no valid samples")
 
-        # ── ii) Decile table ────────────────────────────────────────────
+        # -- ii) Decile table --------------------------------------------
         print(f"\n  [ii] Decile table  (thin-file val, sorted by LR score desc)")
-        print(f"  {'─'*50}")
+        print(f"  {'-'*50}")
 
         if n_pos_val < 5:
             print(f"  SKIP: too few positives ({n_pos_val}) for a meaningful decile table")
@@ -432,34 +432,34 @@ def run_diagnostics(args: argparse.Namespace) -> None:
             _dec_tbl["bad_rate_pct"] = (_dec_tbl["bad_rate"] * 100).round(3)
 
             print(f"  {'Decile':>7} {'n':>7} {'n_bad':>6} {'bad_rate%':>10} {'lift':>6}")
-            print(f"  {'─'*42}")
+            print(f"  {'-'*42}")
             for _, row in _dec_tbl.iterrows():
                 print(
                     f"  {int(row['decile']):>7} {int(row['n']):>7,} {int(row['n_bad']):>6}"
                     f" {row['bad_rate_pct']:>10.3f} {row['lift']:>6.2f}x"
                 )
-            print(f"  {'─'*42}")
+            print(f"  {'-'*42}")
             print(f"  Overall bad rate: {_overall_br*100:.3f}%")
 
             _top_lift = float(_dec_tbl.loc[_dec_tbl["decile"] == 1, "lift"].iloc[0]) \
                 if 1 in _dec_tbl["decile"].values else float("nan")
             if _top_lift >= 3.0:
-                print(f"  OK: top decile lift={_top_lift:.1f}x — model concentrates risk effectively")
+                print(f"  OK: top decile lift={_top_lift:.1f}x -- model concentrates risk effectively")
             elif _top_lift >= 1.5:
-                print(f"  NOTE: top decile lift={_top_lift:.1f}x — moderate concentration")
+                print(f"  NOTE: top decile lift={_top_lift:.1f}x -- moderate concentration")
             else:
-                print(f"  WARNING: top decile lift={_top_lift:.1f}x — model barely separates risk")
+                print(f"  WARNING: top decile lift={_top_lift:.1f}x -- model barely separates risk")
 
             # Check monotonicity (top 5 deciles should generally trend down)
             _top5_rates = _dec_tbl.loc[_dec_tbl["decile"] <= 5, "bad_rate"].tolist()
             _monotone = all(_top5_rates[i] >= _top5_rates[i+1] for i in range(len(_top5_rates)-1))
             if not _monotone:
                 print("  NOTE: bad rate is not strictly monotone across top 5 deciles"
-                      " (expected with small n — check if directional trend holds)")
+                      " (expected with small n -- check if directional trend holds)")
 
-        # ── iii) Coefficient signs ───────────────────────────────────────
+        # -- iii) Coefficient signs ---------------------------------------
         print(f"\n  [iii] LR coefficient signs  (are risk directions intuitive?)")
-        print(f"  {'─'*50}")
+        print(f"  {'-'*50}")
 
         _lr_step = _thin_lr_pipeline.named_steps["lr"]
         _coef_df = pd.DataFrame({
@@ -471,7 +471,7 @@ def run_diagnostics(args: argparse.Namespace) -> None:
         )
 
         print(f"  {'Feature':<40} {'Coeff':>8}  Direction")
-        print(f"  {'─'*60}")
+        print(f"  {'-'*60}")
         for _, row in _coef_df.iterrows():
             print(f"  {row['feature']:<40} {row['coefficient']:>8.4f}  {row['direction']}")
 
@@ -498,7 +498,7 @@ def run_diagnostics(args: argparse.Namespace) -> None:
 
         print()
         if _counterintuitive:
-            print("  *** WARNING: counterintuitive sign(s) — investigate before presenting: ***")
+            print("  *** WARNING: counterintuitive sign(s) -- investigate before presenting: ***")
             for msg in _counterintuitive:
                 print(msg)
         else:
@@ -527,7 +527,7 @@ def run_diagnostics(args: argparse.Namespace) -> None:
 
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        description="Leakage & AUC diagnostic — reruns data-prep only, no model training",
+        description="Leakage & AUC diagnostic -- reruns data-prep only, no model training",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     p.add_argument("--train-file",           required=True,  help="Training snapshot CSV")
