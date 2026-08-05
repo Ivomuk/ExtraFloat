@@ -504,6 +504,58 @@ def run_diagnostics(args: argparse.Namespace) -> None:
         else:
             print("  OK: all named risk/protective features have the expected sign")
 
+        # -- iv) Bad-rate-by-flag breakdown --------------------------------
+        print(f"\n  [iv] Bad-rate-by-flag breakdown  (thin-file TRAIN, binary features only)")
+        print(f"  Does the raw data agree with each LR coefficient direction?")
+        print(f"  {'-'*95}")
+        print(
+            f"  {'Feature':<40} {'n(0)':>7} {'BR%(0)':>7} {'n(1)':>7} {'BR%(1)':>7}"
+            f" {'LR says':>8} {'Data says':>10} {'Match':>6}"
+        )
+        print(f"  {'-'*95}")
+
+        _thin_tr_mask = pd.to_numeric(
+            df_train_raw.get(feature_config.THIN_FILE_COL, 0), errors="coerce"
+        ).eq(1)
+        _df_thin_tr  = df_train_raw[_thin_tr_mask].copy()
+        _y_thin_tr   = pd.to_numeric(
+            _df_thin_tr.get(feature_config.TARGET_COL, 0), errors="coerce"
+        )
+
+        _coef_lookup = dict(zip(_thin_lr_features, _lr_step.coef_[0]))
+
+        for _feat in _thin_lr_features:
+            if _feat not in _df_thin_tr.columns:
+                continue
+            _fvals = pd.to_numeric(_df_thin_tr[_feat], errors="coerce").fillna(0)
+            # Only show binary (0/1) features
+            if not set(_fvals.unique()).issubset({0, 1, 0.0, 1.0}):
+                continue
+
+            _m0 = _fvals == 0
+            _m1 = _fvals == 1
+            _n0, _n1 = int(_m0.sum()), int(_m1.sum())
+            _br0 = float(_y_thin_tr[_m0].mean()) * 100 if _n0 > 0 else float("nan")
+            _br1 = float(_y_thin_tr[_m1].mean()) * 100 if _n1 > 0 else float("nan")
+
+            _coef      = _coef_lookup.get(_feat, 0.0)
+            _lr_says   = "(+) riskier" if _coef > 0 else "(-) safer"
+            _data_says = "(+) riskier" if (
+                not np.isnan(_br1) and not np.isnan(_br0) and _br1 > _br0
+            ) else "(-) safer"
+            _match     = "OK" if _lr_says == _data_says else "WARN"
+
+            print(
+                f"  {_feat:<40} {_n0:>7,} {_br0:>7.3f} {_n1:>7,} {_br1:>7.3f}"
+                f" {_lr_says:>8} {_data_says:>10} {_match:>6}"
+            )
+
+        print(f"  {'-'*95}")
+        print(
+            "  BR%(0) = bad rate % when flag=0 | BR%(1) = bad rate % when flag=1\n"
+            "  WARN = LR coefficient direction contradicts the raw data -- consider dropping that feature"
+        )
+
     # ------------------------------------------------------------------ #
     # Summary
     # ------------------------------------------------------------------ #
