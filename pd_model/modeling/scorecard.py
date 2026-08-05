@@ -4,6 +4,9 @@ Thin-file (never-loan) scorecard for agents without loan history.
 Applies a points-based scorecard using Phase 2.1 transactional features,
 normalises to a 0-100 scale, and converts to a PD-like probability via a
 sigmoid transform.  Only applied to agents where ``thin_file_flag == 1``.
+
+Also provides ``fit_thin_file_lr`` / ``apply_thin_file_lr`` which replace the
+manual sigmoid with a regularised logistic regression fitted on training data.
 """
 
 from __future__ import annotations
@@ -20,6 +23,159 @@ from pd_model.config.model_config import (
 from pd_model.logging_config import get_logger
 
 logger = get_logger(__name__)
+
+# Features available in the raw (pre-transformation) DataFrame that the LR uses.
+# Mirror the inputs used by the manual scorecard so the same signals are available.
+_THIN_FILE_LR_FEATURES: list[str] = [
+    # Binary flags
+    "is_fully_inactive_6m",
+    "is_consecutively_inactive",
+    "sharp_volume_drop_flag",
+    "consistent_volume_decline_flag",
+    "activity_restart_flag",
+    "consistent_volume_growth_flag",
+    "low_balance_flag",
+    "balance_drawdown_flag",
+    "net_cash_flow_negative_flag",
+    "high_peer_dependency_flag",
+    "cust_concentration_flag",
+    "commission_without_activity_flag",
+    "commission_drop_flag",
+    # Continuous behavioural signals
+    "num_inactive_horizons",
+    "avg_balance_to_vol_3m_ratio",
+    "net_cash_flow_3m",
+    "vol_3m",
+    "commission_vs_cluster_mean_ratio",
+    "commission_per_vol_vs_cluster_ratio",
+    "vol_monthly_volatility_cv",
+]
+
+
+def fit_thin_file_lr(
+    df_train_raw: pd.DataFrame,
+    label_col: str = "bad_state",
+    feature_candidates: list[str] | None = None,
+    random_state: int = 42,
+    min_positives: int = 20,
+) -> tuple[object | None, list[str]]:
+    """Fit a balanced logistic regression on thin-file training agents.
+
+    Replaces the manually-tuned sigmoid with a data-driven model.  Strong L2
+    regularisation (C=0.1) compensates for the very low positive rate typical
+    in thin-file populations (~0.04%).
+
+    Args:
+        df_train_raw:      Raw training DataFrame containing ``thin_file_flag``,
+                           the label column, and behavioural features.
+        label_col:         Binary target column name.
+        feature_candidates:Columns to consider.  Defaults to ``_THIN_FILE_LR_FEATURES``.
+        random_state:      RNG seed for reproducibility.
+        min_positives:     Return ``(None, [])`` if fewer positives than this.
+
+    Returns:
+        ``(fitted_sklearn_pipeline, feature_cols)`` or ``(None, [])`` on failure.
+    """
+    from sklearn.impute import SimpleImputer
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.pipeline import Pipeline
+    from sklearn.preprocessing import StandardScaler
+
+    thin_flag = df_train_raw.get("thin_file_flag", pd.Series(0, index=df_train_raw.index))
+    thin_mask = pd.to_numeric(thin_flag, errors="coerce").fillna(0).eq(1)
+    df_thin = df_train_raw[thin_mask]
+
+    if label_col not in df_thin.columns:
+        logger.warning("fit_thin_file_lr: label_col '%s' not found — skipping LR fit", label_col)
+        return None, []
+
+    y = pd.to_numeric(df_thin[label_col], errors="coerce").fillna(0).astype(int)
+    n_pos = int(y.sum())
+    n_thin = len(y)
+
+    if n_pos < min_positives:
+        logger.warning(
+            "fit_thin_file_lr: only %d positives in %d thin-file train agents — "
+            "skipping LR fit (min_positives=%d)",
+            n_pos, n_thin, min_positives,
+        )
+        return None, []
+
+    candidates = feature_candidates if feature_candidates is not None else _THIN_FILE_LR_FEATURES
+    feature_cols = [c for c in candidates if c in df_thin.columns]
+
+    if not feature_cols:
+        logger.warning("fit_thin_file_lr: no candidate features found — skipping")
+        return None, []
+
+    X = df_thin[feature_cols].apply(pd.to_numeric, errors="coerce")
+
+    lr_pipeline = Pipeline([
+        ("imputer", SimpleImputer(strategy="median")),
+        ("scaler", StandardScaler()),
+        ("lr", LogisticRegression(
+            class_weight="balanced",
+            C=0.1,
+            max_iter=1000,
+            random_state=random_state,
+            solver="lbfgs",
+        )),
+    ])
+    lr_pipeline.fit(X, y)
+
+    try:
+        from sklearn.metrics import roc_auc_score
+        train_auc = float(roc_auc_score(y, lr_pipeline.predict_proba(X)[:, 1]))
+        logger.info(
+            "fit_thin_file_lr: n_thin=%d, n_pos=%d (%.3f%%), train_auc=%.4f, n_features=%d",
+            n_thin, n_pos, 100.0 * n_pos / max(n_thin, 1), train_auc, len(feature_cols),
+        )
+    except Exception:
+        logger.info(
+            "fit_thin_file_lr: fitted on %d thin-file agents (%d positives), n_features=%d",
+            n_thin, n_pos, len(feature_cols),
+        )
+
+    return lr_pipeline, feature_cols
+
+
+def apply_thin_file_lr(
+    df: pd.DataFrame,
+    lr_pipeline: object,
+    feature_cols: list[str],
+    thin_file_col: str = "thin_file_flag",
+) -> pd.DataFrame:
+    """Replace ``never_loan_pd_like`` for thin-file agents using the fitted LR.
+
+    Non-thin-file rows are left unchanged.  If any feature in ``feature_cols``
+    is missing from *df*, it is filled with NaN so the pipeline's ``SimpleImputer``
+    handles it as usual.
+
+    Returns a copy of *df* with ``never_loan_pd_like`` updated.
+    """
+    df = df.copy()
+    thin_flag = df.get(thin_file_col, pd.Series(0, index=df.index))
+    thin_mask = pd.to_numeric(thin_flag, errors="coerce").fillna(0).eq(1)
+
+    if not thin_mask.any():
+        return df
+
+    df_thin = df[thin_mask]
+    X = pd.DataFrame(index=df_thin.index)
+    for c in feature_cols:
+        X[c] = pd.to_numeric(df_thin[c], errors="coerce") if c in df_thin.columns else np.nan
+
+    y_prob = lr_pipeline.predict_proba(X)[:, 1]
+    df.loc[thin_mask, "never_loan_pd_like"] = y_prob
+
+    logger.info(
+        "apply_thin_file_lr: updated never_loan_pd_like for %d thin-file agents "
+        "(median=%.4f, p95=%.4f)",
+        int(thin_mask.sum()),
+        float(np.nanmedian(y_prob)),
+        float(np.nanpercentile(y_prob, 95)),
+    )
+    return df
 
 
 def add_never_loan_scorecard_from_phase_2_1(

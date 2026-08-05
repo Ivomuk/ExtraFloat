@@ -55,7 +55,11 @@ from pd_model.logging_config import configure_root_level, get_logger
 from pd_model.modeling.calibration import run_bootstrap_comparison, run_locked_policy_pipeline
 from pd_model.modeling.evaluation import compare_models_deciles
 from pd_model.modeling.lgbm_model import train_lgbm
-from pd_model.modeling.scorecard import add_never_loan_scorecard_from_phase_2_1
+from pd_model.modeling.scorecard import (
+    add_never_loan_scorecard_from_phase_2_1,
+    apply_thin_file_lr,
+    fit_thin_file_lr,
+)
 from pd_model.modeling.xgb_model import train_xgb
 from pd_model.postprocessing.ops_scored import build_exec_summary, build_ops_scored_table
 from pd_model.preprocessing.loan_features import (
@@ -185,6 +189,44 @@ def run_pipeline(args: argparse.Namespace) -> None:
         len(df_val_raw),
         train_cutoff.date(),
     )
+
+    # ------------------------------------------------------------------ #
+    # 5b) Fit thin-file logistic regression (train split only)
+    #
+    # Replaces the manual sigmoid with a data-driven balanced LR so the
+    # thin-file scorecard AUC improves beyond the 0.617 baseline.
+    # Applied before transformation so the fitted model uses raw features.
+    # ------------------------------------------------------------------ #
+    logger.info("=== Step 5b: Fit thin-file logistic regression ===")
+    _thin_lr_pipeline, _thin_lr_features = fit_thin_file_lr(
+        df_train_raw, label_col=feature_config.TARGET_COL
+    )
+    if _thin_lr_pipeline is not None:
+        df_train_raw = apply_thin_file_lr(df_train_raw, _thin_lr_pipeline, _thin_lr_features)
+        df_val_raw = apply_thin_file_lr(df_val_raw, _thin_lr_pipeline, _thin_lr_features)
+        logger.info("Step 5b: thin-file LR applied to train and val")
+        # Compute val AUC for the metadata
+        _thin_mask_val_lr = pd.to_numeric(
+            df_val_raw.get(feature_config.THIN_FILE_COL, 0), errors="coerce"
+        ).fillna(0).eq(1)
+        _thin_val_lr = df_val_raw[_thin_mask_val_lr]
+        if (
+            _thin_mask_val_lr.sum() > 1
+            and feature_config.TARGET_COL in _thin_val_lr.columns
+            and _thin_val_lr[feature_config.TARGET_COL].nunique() > 1
+        ):
+            from sklearn.metrics import roc_auc_score as _roc_auc_sc
+            _thin_lr_val_auc: float | None = float(
+                _roc_auc_sc(
+                    _thin_val_lr[feature_config.TARGET_COL].fillna(0).astype(int),
+                    _thin_val_lr["never_loan_pd_like"],
+                )
+            )
+            logger.info("Step 5b: thin-file LR val AUC=%.4f", _thin_lr_val_auc)
+        else:
+            _thin_lr_val_auc = None
+    else:
+        _thin_lr_val_auc = None
 
     (
         pd_features,
@@ -333,6 +375,27 @@ def run_pipeline(args: argparse.Namespace) -> None:
         float(xgb_val_select["bad_state"].mean()),
         float(xgb_val_cal["bad_state"].mean()),
     )
+
+    # Thick-file-only XGBoost AUC — removes population mixing effect so the
+    # reported metric reflects genuine credit-risk discrimination.
+    _thick_mask_sel = xgb_val_select[feature_config.THIN_FILE_COL].eq(0)
+    _xgb_sel_thick = xgb_val_select[_thick_mask_sel]
+    if _thick_mask_sel.sum() > 1 and _xgb_sel_thick["bad_state"].nunique() > 1:
+        from sklearn.metrics import roc_auc_score as _roc_auc_thick
+        _thick_val_auc: float | None = float(
+            _roc_auc_thick(_xgb_sel_thick["bad_state"], _xgb_sel_thick["raw_score"])
+        )
+        logger.info(
+            "XGBoost thick-file-only val AUC=%.4f (n=%d, bad_rate=%.4f)",
+            _thick_val_auc,
+            int(_thick_mask_sel.sum()),
+            float(_xgb_sel_thick["bad_state"].mean()),
+        )
+    else:
+        _thick_val_auc = None
+        logger.warning(
+            "XGBoost thick-file-only AUC: insufficient data (n=%d)", int(_thick_mask_sel.sum())
+        )
 
     # ------------------------------------------------------------------ #
     # 11) Bootstrap AUC comparison  (selection half only)
@@ -483,10 +546,12 @@ def run_pipeline(args: argparse.Namespace) -> None:
         "train_cutoff": str(train_cutoff.date()),
         "thin_file_train": int(thin_train.sum()),
         "thin_file_val": int(thin_val.sum()),
+        "thin_file_lr_val_auc": _thin_lr_val_auc,
         "champion": champion,
         "xgb_val_auc": float(cmp_summary.loc[cmp_summary["model"] == "xgb", "auc"].iloc[0])
         if "xgb" in cmp_summary["model"].values
         else None,
+        "xgb_val_auc_thick_only": _thick_val_auc,
         "lgb_val_auc": float(cmp_summary.loc[cmp_summary["model"] == "lgb", "auc"].iloc[0])
         if "lgb" in cmp_summary["model"].values
         else None,
