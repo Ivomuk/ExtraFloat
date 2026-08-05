@@ -90,6 +90,8 @@ PD_FEATURE_BLACKLIST: frozenset[str] = frozenset(
         "never_loan_score_0_100",
         "never_loan_pd_like",
         "never_loan_top_drivers",
+        # Business-process co-definition proxy — binary alias of net_exposure_6M
+        "currently_outstanding_flag",
     }
 )
 
