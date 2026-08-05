@@ -92,6 +92,9 @@ PD_FEATURE_BLACKLIST: frozenset[str] = frozenset(
         "never_loan_top_drivers",
         # Business-process co-definition proxy — binary alias of net_exposure_6M
         "currently_outstanding_flag",
+        # Sample-selection filter — present in repayments CSV, must never enter features
+        "outcome_observed_30d",
+        "outcome_observed_30D",
     }
 )
 
