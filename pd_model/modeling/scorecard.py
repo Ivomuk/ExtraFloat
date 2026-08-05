@@ -28,9 +28,9 @@ logger = get_logger(__name__)
 # Mirror the inputs used by the manual scorecard so the same signals are available.
 _THIN_FILE_LR_FEATURES: list[str] = [
     # Binary flags
-    "is_fully_inactive_6m",
-    "is_consecutively_inactive",
-    "sharp_volume_drop_flag",
+    # Removed: is_fully_inactive_6m, is_consecutively_inactive, sharp_volume_drop_flag
+    # Data shows flag=1 agents have near-zero bad rate (they cannot default if inactive/
+    # declining) — LR coefficients contradicted raw bad rates, indicating multicollinearity.
     "consistent_volume_decline_flag",
     "activity_restart_flag",
     "consistent_volume_growth_flag",
