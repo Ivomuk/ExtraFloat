@@ -750,8 +750,12 @@ def run_phase_2_2_repayment_pd_features(
     if int(dup_pd_post) != 0:
         raise DataAlignmentError("[run_phase_2_2] PD duplicated after merge -- merge keys not unique")
 
-    # Derive has_ever_loan: agent has loan history if any disbursement volume
-    # column is non-zero. Falls back to 0 (thin-file) if no disbursement cols exist.
+    # Derive has_ever_loan using distinct active months for daily loan products.
+    # An agent qualifies as thick-file only if they have disbursements in at
+    # least cfg.thin_file_min_active_months distinct calendar months. This
+    # avoids over-promoting agents who took many loans on a single day.
+    import re as _re
+
     disb_vol_cols = [
         c
         for c in repayment_numeric_features
@@ -759,15 +763,36 @@ def run_phase_2_2_repayment_pd_features(
     ]
     if disb_vol_cols:
         disb_arr = df_pd_out[disb_vol_cols].apply(pd.to_numeric, errors="coerce").fillna(0)
-        df_pd_out["has_ever_loan"] = (disb_arr.max(axis=1) > 0).astype(int)
+        monthly_cols = [c for c in disb_vol_cols if _re.search(r"_m\d+$", c.lower())]
+        min_months = cfg.thin_file_min_active_months if cfg is not None else 3
+        if monthly_cols:
+            active_months = (disb_arr[monthly_cols] > 0).sum(axis=1)
+            df_pd_out["distinct_loan_months"] = active_months
+            df_pd_out["has_ever_loan"] = (active_months >= min_months).astype(int)
+        else:
+            # No per-month columns present -- fall back to binary any-loan logic
+            df_pd_out["distinct_loan_months"] = (disb_arr.max(axis=1) > 0).astype(int)
+            df_pd_out["has_ever_loan"] = (disb_arr.max(axis=1) > 0).astype(int)
     else:
         # No disbursement columns -- treat all as thin-file
         df_pd_out["has_ever_loan"] = 0
+        df_pd_out["distinct_loan_months"] = 0
     logger.info(
         "run_phase_2_2: has_ever_loan -- thick-file=%d | thin-file=%d",
         int(df_pd_out["has_ever_loan"].sum()),
         int((df_pd_out["has_ever_loan"] == 0).sum()),
     )
+    if "distinct_loan_months" in df_pd_out.columns:
+        min_months = cfg.thin_file_min_active_months if cfg is not None else 3
+        logger.info(
+            "run_phase_2_2: thin-file threshold = %d distinct months | "
+            "agents with 0=%d, 1=%d, 2=%d, 3+=%d",
+            min_months,
+            int((df_pd_out["distinct_loan_months"] == 0).sum()),
+            int((df_pd_out["distinct_loan_months"] == 1).sum()),
+            int((df_pd_out["distinct_loan_months"] == 2).sum()),
+            int((df_pd_out["distinct_loan_months"] >= 3).sum()),
+        )
 
     # ------------------------------------------------------------------ #
     # Recompute labels now that penalty columns exist

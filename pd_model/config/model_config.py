@@ -74,6 +74,7 @@ class ModelConfig:
     # Thin-file policy
     # ------------------------------------------------------------------ #
     thin_file_pd_prior: float = 0.12  # fallback PD for agents with no loan history
+    thin_file_min_active_months: int = 3  # distinct calendar months with disbursement > 0
 
     # ------------------------------------------------------------------ #
     # Winsorization / transformation

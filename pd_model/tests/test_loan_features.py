@@ -9,6 +9,7 @@ from pd_model.preprocessing.loan_features import (
     classify_agent_loan_status,
     compute_bad_flags,
     leakage_audit_phase_2_2,
+    run_phase_2_2_repayment_pd_features,
 )
 
 
@@ -115,3 +116,66 @@ class TestLeakageAudit:
         df["label_proxy"] = df["bad_state"]
         report = leakage_audit_phase_2_2(df, hard_fail=False)
         assert "HIGH" in report["severity"].values
+
+
+class TestHasEverLoanDistinctMonths:
+    """has_ever_loan should use distinct active months, not raw loan count."""
+
+    def _base_pd_df(self, msisdn="256700000001"):
+        return pd.DataFrame(
+            {
+                "agent_msisdn": [msisdn],
+                "snapshot_dt": [pd.Timestamp("2025-11-15")],
+                "bad_state_30D": [0],
+                "repayment_coverage_1M": [0.0],
+                "penalties_1M": [0],
+                "repayment_val_1M": [0],
+            }
+        )
+
+    def _repayment_df(self, m1=0, m2=0, m3=0, msisdn="256700000001"):
+        return pd.DataFrame(
+            {
+                "agent_msisdn": [msisdn],
+                "snapshot_dt": [pd.Timestamp("2025-11-15")],
+                "disbursement_vol_m1": [m1],
+                "disbursement_vol_m2": [m2],
+                "disbursement_vol_m3": [m3],
+                "disbursement_val_1m": [float(m1 + m2 + m3) * 1000],
+            }
+        )
+
+    def test_all_loans_same_month_is_thin_file(self):
+        # 30 loans in month 1 only -> distinct_months=1 -> thin-file (has_ever_loan=0)
+        pd_df = self._base_pd_df()
+        rep_df = self._repayment_df(m1=30, m2=0, m3=0)
+        result, _ = run_phase_2_2_repayment_pd_features(pd_df, rep_df)
+        assert result["has_ever_loan"].iloc[0] == 0
+
+    def test_loans_across_3_months_is_thick_file(self):
+        # 1 loan each in m1, m2, m3 -> distinct_months=3 -> thick-file (has_ever_loan=1)
+        pd_df = self._base_pd_df()
+        rep_df = self._repayment_df(m1=1, m2=1, m3=1)
+        result, _ = run_phase_2_2_repayment_pd_features(pd_df, rep_df)
+        assert result["has_ever_loan"].iloc[0] == 1
+
+    def test_distinct_loan_months_col_present(self):
+        pd_df = self._base_pd_df()
+        rep_df = self._repayment_df(m1=5, m2=3, m3=0)
+        result, _ = run_phase_2_2_repayment_pd_features(pd_df, rep_df)
+        assert "distinct_loan_months" in result.columns
+        assert result["distinct_loan_months"].iloc[0] == 2
+
+    def test_fallback_when_no_monthly_cols(self):
+        # When only disbursement_val_1m is present (no _mN cols),
+        # any disbursement activity -> has_ever_loan=1 (original binary logic)
+        pd_df = self._base_pd_df()
+        rep_df = pd.DataFrame(
+            {
+                "agent_msisdn": ["256700000001"],
+                "snapshot_dt": [pd.Timestamp("2025-11-15")],
+                "disbursement_val_1m": [5000.0],
+            }
+        )
+        result, _ = run_phase_2_2_repayment_pd_features(pd_df, rep_df)
+        assert result["has_ever_loan"].iloc[0] == 1
