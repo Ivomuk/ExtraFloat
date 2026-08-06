@@ -22,6 +22,7 @@ Usage (Windows):
 """
 
 import argparse
+import hashlib
 import sys
 from pathlib import Path
 
@@ -209,8 +210,11 @@ def main():
         print("Ensure the repayment file contains disbursement_vol_m1 ... disbursement_vol_m6 columns.")
         sys.exit(1)
 
-    # -- Boundary analysis uses the full population
-    _boundary_table(df_all)
+    # -- Boundary analysis: defer until after ops_scored is loaded so we can use
+    #    the trained bad_state label rather than the raw Phase 2.2 label.
+    #    (Raw bad_state_30D in the val file can differ from the cleaned label used
+    #    in training, producing implausible bad rates like 70%.)
+    pass  # boundary table built below after ops_scored is loaded
 
     # -- Thick-file AUC slice uses ops_scored (thick-file agents with XGBoost scores)
     ops_path = Path(args.ops_scored)
@@ -246,20 +250,23 @@ def main():
     join_cols = [phase22_id, "distinct_loan_months", "total_loans_6m"]
     join_cols = [c for c in join_cols if c in df_all.columns]
 
-    # Normalise IDs on both sides: strip whitespace, drop .0 float suffix, cast to str
-    def _norm_id(s):
-        return s.astype(str).str.strip().str.replace(r"\.0$", "", regex=True)
+    # ops_scored agent_msisdn are SHA-256 prefixes (16 hex chars) written by
+    # run_pipeline.py for PII compliance. Hash Phase 2.2 raw MSISDNs to match.
+    def _sha256_16(s: pd.Series) -> pd.Series:
+        return s.astype(str).str.strip().str.replace(r"\.0$", "", regex=True).apply(
+            lambda x: hashlib.sha256(x.encode()).hexdigest()[:16]
+        )
 
     df_merge = df_all[join_cols].copy()
-    df_merge[phase22_id] = _norm_id(df_merge[phase22_id])
+    df_merge[phase22_id] = _sha256_16(df_merge[phase22_id])
     ops_thick = ops_thick.copy()
-    ops_thick[id_col] = _norm_id(ops_thick[id_col])
+    ops_thick[id_col] = ops_thick[id_col].astype(str).str.strip()
 
-    # Diagnostic: show sample IDs from each side before merging
-    sample_ops = ops_thick[id_col].dropna().unique()[:5].tolist()
-    sample_p22 = df_merge[phase22_id].dropna().unique()[:5].tolist()
-    print(f"  ID samples — ops_scored: {sample_ops}")
-    print(f"  ID samples — phase22:    {sample_p22}")
+    # Diagnostic: show sample IDs from each side
+    sample_ops = ops_thick[id_col].dropna().unique()[:3].tolist()
+    sample_p22 = df_merge[phase22_id].dropna().unique()[:3].tolist()
+    print(f"  ID samples — ops_scored (hashed): {sample_ops}")
+    print(f"  ID samples — phase22    (hashed): {sample_p22}")
 
     ops_thick = ops_thick.merge(
         df_merge.rename(columns={phase22_id: id_col}),
@@ -267,19 +274,27 @@ def main():
         how="left",
     )
 
-    missing = ops_thick["distinct_loan_months"].isna().sum()
-    if missing > 0:
-        pct = 100 * missing / len(ops_thick)
-        print(f"  Warning: {missing:,}/{len(ops_thick):,} ({pct:.1f}%) thick-file agents "
-              "unmatched after merge.")
-        if pct > 90:
-            print("  ID format mismatch likely. Check that val-file and ops-scored share "
-                  "the same agent_msisdn values.")
-        ops_thick = ops_thick.dropna(subset=["distinct_loan_months", "total_loans_6m"])
+    matched = ops_thick["distinct_loan_months"].notna().sum()
+    total = len(ops_thick)
+    print(f"  Merge result: {matched:,}/{total:,} thick-file agents matched ({100*matched/max(total,1):.1f}%)")
+    ops_thick = ops_thick.dropna(subset=["distinct_loan_months", "total_loans_6m"])
 
     if "bad_state" not in ops_thick.columns:
         print("ERROR: bad_state column not found in ops_scored — cannot compute AUC.")
         sys.exit(1)
+
+    # -- Boundary table: build from ops_scored bad_state + Phase 2.2 month/loan columns
+    # Merge ALL ops_scored agents (thin + thick) with Phase 2.2 month/loan columns.
+    ops_all = ops.copy()
+    ops_all[id_col] = ops_all[id_col].astype(str).str.strip()
+    ops_all = ops_all.merge(
+        df_merge.rename(columns={phase22_id: id_col}),
+        on=id_col,
+        how="left",
+    )
+    ops_all = ops_all.dropna(subset=["distinct_loan_months", "total_loans_6m", "bad_state"])
+    print(f"\n  Boundary table will use {len(ops_all):,} ops_scored agents with matched month/loan data")
+    _boundary_table(ops_all)
 
     _thick_auc_table(ops_thick, score_col)
 
