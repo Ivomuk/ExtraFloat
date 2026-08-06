@@ -312,14 +312,15 @@ def leakage_audit_phase_2_2(
     if not audit_report.empty and pd_feature_blacklist is not None:
         blacklist_low = {str(c).lower() for c in pd_feature_blacklist}
         blacklisted_mask = audit_report["column"].str.lower().isin(blacklist_low)
-        n_downgraded = int((blacklisted_mask & (audit_report["severity"] == "HIGH")).sum())
+        downgrade_mask = blacklisted_mask & audit_report["severity"].isin(["HIGH", "MEDIUM"])
+        n_downgraded = int(downgrade_mask.sum())
         if n_downgraded > 0:
             logger.info(
-                "leakage_audit: %d HIGH finding(s) downgraded to INFO "
+                "leakage_audit: %d HIGH/MEDIUM finding(s) downgraded to INFO "
                 "(columns already in PD_FEATURE_BLACKLIST -- intentionally excluded from model)",
                 n_downgraded,
             )
-        audit_report.loc[blacklisted_mask & (audit_report["severity"] == "HIGH"), "severity"] = "INFO"
+        audit_report.loc[downgrade_mask, "severity"] = "INFO"
 
     if verbose:
         if not audit_report.empty:

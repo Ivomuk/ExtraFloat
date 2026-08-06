@@ -117,6 +117,20 @@ class TestLeakageAudit:
         report = leakage_audit_phase_2_2(df, hard_fail=False)
         assert "HIGH" in report["severity"].values
 
+    def test_blacklisted_medium_downgraded_to_info(self):
+        # A column with high-but-not-perfect correlation produces MEDIUM severity.
+        # When that column is in the blacklist it should be downgraded to INFO.
+        rng = np.random.default_rng(3)
+        df = self._clean_df(200)
+        df["routing_col"] = df["bad_state"] + rng.uniform(0, 0.3, 200)
+        blacklist = frozenset({"routing_col"})
+        report = leakage_audit_phase_2_2(df, hard_fail=False, pd_feature_blacklist=blacklist)
+        routing_rows = report[report["column"] == "routing_col"]
+        assert not routing_rows.empty
+        assert (routing_rows["severity"] == "INFO").all(), (
+            f"Expected INFO for blacklisted MEDIUM column, got: {routing_rows['severity'].tolist()}"
+        )
+
 
 class TestHasEverLoanDistinctMonths:
     """has_ever_loan should use distinct active months, not raw loan count."""
