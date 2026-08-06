@@ -423,9 +423,29 @@ def main(argv=None):
         out_path.parent.mkdir(parents=True, exist_ok=True)
         result.to_csv(out_path, index=False)
         logger.info("Output written to %s (%d rows, %d columns)", out_path, len(result), len(result.columns))
-    else:
-        preview_cols = ["assigned_limit", "risk_tier", "cal_pd", "final_decision_reason"]
-        print(result[[c for c in preview_cols if c in result.columns]].to_string(index=False))
+
+    # Always print a screen summary regardless of whether --output was given
+    preview_cols = ["msisdn", "assigned_limit", "risk_tier", "cal_pd", "thin_file_flag", "final_decision_reason", "score_source"]
+    display = result[[c for c in preview_cols if c in result.columns]]
+    print("\n=== Credit Risk Pipeline Output ===")
+    print(f"Agents scored: {len(display)}")
+    if "risk_tier" in display.columns:
+        print("\nRisk tier distribution:")
+        print(display["risk_tier"].value_counts().to_string())
+    if "assigned_limit" in display.columns:
+        print(f"\nAssigned limit  mean={display['assigned_limit'].mean():,.0f}  "
+              f"min={display['assigned_limit'].min():,.0f}  "
+              f"max={display['assigned_limit'].max():,.0f}")
+    if "cal_pd" in display.columns:
+        print(f"Calibrated PD   mean={display['cal_pd'].mean():.4f}  "
+              f"min={display['cal_pd'].min():.4f}  "
+              f"max={display['cal_pd'].max():.4f}")
+    if "thin_file_flag" in display.columns:
+        thin_n = display["thin_file_flag"].sum()
+        thick_n = len(display) - thin_n
+        print(f"\nScoring model:  thick-file (XGBoost)={thick_n:,}  thin-file (LR)={thin_n:,}")
+    print("\nSample output (first 20 rows):")
+    print(display.head(20).to_string(index=False))
 
     return 0
 

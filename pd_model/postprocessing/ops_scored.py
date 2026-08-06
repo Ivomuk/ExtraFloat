@@ -26,6 +26,8 @@ _THIN_SCORECARD_COLS = [
     "never_loan_score_0_100",
     "never_loan_pd_like",
     "never_loan_top_drivers",
+    "bad_state",
+    "thin_file_flag",
 ]
 
 
@@ -168,7 +170,7 @@ def build_exec_summary(
 
     exec_tbl = pd.DataFrame(
         {
-            "segment": ["Overall", "Approved", "Declined", "Gap (Declined − Approved)"],
+            "segment": ["Overall", "Approved", "Declined", "Gap (Declined - Approved)"],
             "n": [total_n, approved_n, declined_n, np.nan],
             "share": [
                 1.0,
