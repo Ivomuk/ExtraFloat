@@ -199,7 +199,7 @@ def run_pipeline(args: argparse.Namespace) -> None:
     # ------------------------------------------------------------------ #
     logger.info("=== Step 5b: Fit thin-file logistic regression ===")
     _thin_lr_pipeline, _thin_lr_features = fit_thin_file_lr(
-        df_train_raw, label_col=feature_config.TARGET_COL
+        df_train_raw, df_val_raw=df_val_raw, label_col=feature_config.TARGET_COL
     )
     if _thin_lr_pipeline is not None:
         df_train_raw = apply_thin_file_lr(df_train_raw, _thin_lr_pipeline, _thin_lr_features)
@@ -501,6 +501,13 @@ def run_pipeline(args: argparse.Namespace) -> None:
     joblib.dump(lgb_model, lgb_path)
     logger.info("Saved XGBoost model -> %s", xgb_path)
     logger.info("Saved LightGBM model -> %s", lgb_path)
+
+    if _thin_lr_pipeline is not None:
+        lr_path = output_dir / "thin_file_lr.joblib"
+        lr_features_path = output_dir / "thin_file_lr_features.json"
+        joblib.dump(_thin_lr_pipeline, lr_path)
+        lr_features_path.write_text(json.dumps(_thin_lr_features, indent=2))
+        logger.info("Saved thin-file LR -> %s", lr_path)
 
     # transform_report for inference
     tr_path = output_dir / "transform_report.csv"

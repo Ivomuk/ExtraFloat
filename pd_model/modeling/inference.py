@@ -397,8 +397,21 @@ def run_inference_pipeline(
     df = classify_agent_loan_status(df)
     df = add_thin_file_flags(df, cfg=cfg)
 
-    # Thin-file scorecard
+    # Thin-file scorecard (sigmoid baseline)
     df = add_never_loan_scorecard_from_phase_2_1(df, cfg=cfg)
+
+    # Override never_loan_pd_like with calibrated LR probabilities if artifact exists
+    lr_path = Path(artifacts_dir) / "thin_file_lr.joblib"
+    lr_features_path = Path(artifacts_dir) / "thin_file_lr_features.json"
+    if lr_path.exists() and lr_features_path.exists():
+        from pd_model.modeling.scorecard import apply_thin_file_lr
+        _thin_lr_pipeline = joblib.load(lr_path)
+        _thin_lr_features = json.loads(lr_features_path.read_text())
+        df = apply_thin_file_lr(df, _thin_lr_pipeline, _thin_lr_features)
+        logger.info(
+            "run_inference_pipeline: applied calibrated thin-file LR (%d features)",
+            len(_thin_lr_features),
+        )
 
     # Feature transformation
     from pd_model.config import feature_config as fc

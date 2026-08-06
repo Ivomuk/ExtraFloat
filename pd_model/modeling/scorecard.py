@@ -54,6 +54,7 @@ _THIN_FILE_LR_FEATURES: list[str] = [
 
 def fit_thin_file_lr(
     df_train_raw: pd.DataFrame,
+    df_val_raw: pd.DataFrame | None = None,
     label_col: str = "bad_state",
     feature_candidates: list[str] | None = None,
     random_state: int = 42,
@@ -65,16 +66,26 @@ def fit_thin_file_lr(
     regularisation (C=0.1) compensates for the very low positive rate typical
     in thin-file populations (~0.04%).
 
+    When ``df_val_raw`` is supplied the raw LR probabilities are probability-
+    calibrated via isotonic regression (or Platt scaling when fewer than 50
+    positives are available) fitted on the val thin-file subset.  This corrects
+    the ~10-20x overestimation caused by ``class_weight='balanced'`` and
+    ensures that ``cal_pd`` reflects the true ~0.04% default rate rather than
+    the balanced-class ~0.5 artefact.
+
     Args:
-        df_train_raw:      Raw training DataFrame containing ``thin_file_flag``,
-                           the label column, and behavioural features.
-        label_col:         Binary target column name.
-        feature_candidates:Columns to consider.  Defaults to ``_THIN_FILE_LR_FEATURES``.
-        random_state:      RNG seed for reproducibility.
-        min_positives:     Return ``(None, [])`` if fewer positives than this.
+        df_train_raw:       Raw training DataFrame containing ``thin_file_flag``,
+                            the label column, and behavioural features.
+        df_val_raw:         Optional raw validation DataFrame used to fit a
+                            probability calibrator on held-out thin-file agents.
+        label_col:          Binary target column name.
+        feature_candidates: Columns to consider.  Defaults to ``_THIN_FILE_LR_FEATURES``.
+        random_state:       RNG seed for reproducibility.
+        min_positives:      Return ``(None, [])`` if fewer positives than this.
 
     Returns:
-        ``(fitted_sklearn_pipeline, feature_cols)`` or ``(None, [])`` on failure.
+        ``(fitted_pipeline_or_calibrated_classifier, feature_cols)`` or
+        ``(None, [])`` on failure.
     """
     from sklearn.impute import SimpleImputer
     from sklearn.linear_model import LogisticRegression
@@ -135,6 +146,42 @@ def fit_thin_file_lr(
             "fit_thin_file_lr: fitted on %d thin-file agents (%d positives), n_features=%d",
             n_thin, n_pos, len(feature_cols),
         )
+
+    # Probability calibration: correct the balanced-class overestimation using
+    # held-out val thin-file agents so cal_pd reflects the true default rate.
+    if df_val_raw is not None:
+        try:
+            from sklearn.calibration import CalibratedClassifierCV
+
+            thin_col = "thin_file_flag"
+            val_thin_flag = df_val_raw.get(thin_col, pd.Series(0, index=df_val_raw.index))
+            val_thin_mask = pd.to_numeric(val_thin_flag, errors="coerce").fillna(0).eq(1)
+            df_thin_val = df_val_raw.loc[val_thin_mask]
+
+            X_cal = df_thin_val[[c for c in feature_cols if c in df_thin_val.columns]].reindex(
+                columns=feature_cols
+            ).apply(pd.to_numeric, errors="coerce")
+            y_cal = pd.to_numeric(
+                df_thin_val.get(label_col, pd.Series(dtype=float)), errors="coerce"
+            ).fillna(0).astype(int)
+
+            n_pos_cal = int(y_cal.sum())
+            if n_pos_cal >= 10:
+                method = "isotonic" if n_pos_cal >= 50 else "sigmoid"
+                cal_clf = CalibratedClassifierCV(lr_pipeline, cv="prefit", method=method)
+                cal_clf.fit(X_cal, y_cal)
+                lr_pipeline = cal_clf
+                logger.info(
+                    "fit_thin_file_lr: calibrated (%s) on %d val thin-file agents, %d positives",
+                    method, len(y_cal), n_pos_cal,
+                )
+            else:
+                logger.warning(
+                    "fit_thin_file_lr: only %d positives in val thin-file -- skipping calibration",
+                    n_pos_cal,
+                )
+        except Exception as exc:
+            logger.warning("fit_thin_file_lr: calibration failed (%s) -- using uncalibrated LR", exc)
 
     return lr_pipeline, feature_cols
 
