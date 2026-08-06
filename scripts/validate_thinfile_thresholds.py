@@ -73,19 +73,50 @@ def _run_phase22(val_file, repayment_file, snapshot_date):
 # --------------------------------------------------------------------------- #
 
 MONTH_BINS = [(3, 3), (4, 4), (5, 5), (6, 99)]
-LOAN_BINS  = [(10, 14), (15, 19), (20, 29), (30, 9999)]
+
+
+def _build_loan_bins(series):
+    """Build 4 loan-count bins from the actual data distribution."""
+    vals = series.dropna()
+    if len(vals) == 0:
+        return []
+    mn, p25, p50, p75, mx = (
+        int(vals.min()), int(vals.quantile(0.25)),
+        int(vals.quantile(0.50)), int(vals.quantile(0.75)), int(vals.max()),
+    )
+    # Deduplicate breakpoints
+    breaks = sorted(set([mn, p25, p50, p75, mx]))
+    bins = []
+    for i, lo in enumerate(breaks[:-1]):
+        hi = breaks[i + 1] - 1
+        bins.append((lo, hi))
+    bins.append((breaks[-1], 999999))
+    return bins
 
 
 def _thick_auc_table(df, score_col):
+    # ── Diagnostic: show actual distribution before binning ──────────────────
+    print("\n── Distribution of distinct_loan_months and total_loans_6m (thick-file) ──\n")
+    for col in ["distinct_loan_months", "total_loans_6m"]:
+        s = pd.to_numeric(df[col], errors="coerce").dropna()
+        print(f"  {col}: min={s.min():.0f}  p25={s.quantile(.25):.0f}  "
+              f"p50={s.quantile(.50):.0f}  p75={s.quantile(.75):.0f}  max={s.max():.0f}  n={len(s):,}")
+
+    loan_bins = _build_loan_bins(pd.to_numeric(df["total_loans_6m"], errors="coerce"))
+    if not loan_bins:
+        print("  WARNING: total_loans_6m has no valid values — skipping cross-tab\n")
+        return
+
+    # ── Cross-tab ─────────────────────────────────────────────────────────────
     rows = []
     for m_lo, m_hi in MONTH_BINS:
         m_label = str(m_lo) if m_lo == m_hi else f"{m_lo}+"
         row = {"distinct_loan_months": m_label}
-        for l_lo, l_hi in LOAN_BINS:
-            l_label = f"{l_lo}-{l_hi}" if l_hi < 9999 else f"{l_lo}+"
+        for l_lo, l_hi in loan_bins:
+            l_label = f"{l_lo}-{l_hi}" if l_hi < 999999 else f"{l_lo}+"
             mask = (
                 df["distinct_loan_months"].between(m_lo, m_hi)
-                & df["total_loans_6m"].between(l_lo, l_hi)
+                & pd.to_numeric(df["total_loans_6m"], errors="coerce").between(l_lo, l_hi)
             )
             sub = df[mask]
             n = len(sub)
@@ -97,11 +128,11 @@ def _thick_auc_table(df, score_col):
         rows.append(row)
 
     print("\n╔══ AUC by distinct_loan_months × total_loans_6m (THICK-FILE val population) ══╗\n")
-    print("  Columns = total_loans_6m buckets\n")
+    print("  Columns = total_loans_6m buckets (auto-scaled to data distribution)\n")
     tbl = pd.DataFrame(rows).set_index("distinct_loan_months")
     print(tbl.to_string())
 
-    # Marginal by months
+    # ── Marginal by months ────────────────────────────────────────────────────
     print("\n── Marginal AUC by distinct_loan_months ──\n")
     marg = []
     for m_lo, m_hi in MONTH_BINS:
@@ -118,12 +149,12 @@ def _thick_auc_table(df, score_col):
         })
     print(pd.DataFrame(marg).to_string(index=False))
 
-    # Marginal by loans
+    # ── Marginal by loans ────────────────────────────────────────────────────
     print("\n── Marginal AUC by total_loans_6m ──\n")
     marg2 = []
-    for l_lo, l_hi in LOAN_BINS:
-        l_label = f"{l_lo}-{l_hi}" if l_hi < 9999 else f"{l_lo}+"
-        mask = df["total_loans_6m"].between(l_lo, l_hi)
+    for l_lo, l_hi in loan_bins:
+        l_label = f"{l_lo}-{l_hi}" if l_hi < 999999 else f"{l_lo}+"
+        mask = pd.to_numeric(df["total_loans_6m"], errors="coerce").between(l_lo, l_hi)
         sub = df[mask]
         if len(sub) == 0:
             continue
