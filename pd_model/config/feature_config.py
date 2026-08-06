@@ -75,6 +75,11 @@ PD_FEATURE_BLACKLIST: frozenset[str] = frozenset(
         # Thin-file / policy controls
         "thin_file_flag",
         "thin_file_pd_prior",
+        # Routing intermediates — derived from disbursement_vol_mN which are in the
+        # feature set; these summaries are redundant and cause spurious leakage flags
+        # because no-loan-history agents (bad_state≈0) always have value 0.
+        "distinct_loan_months",
+        "total_loans_6m",
         # Target aliases
         "target",
         # Outcome encoders
