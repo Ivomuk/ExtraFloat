@@ -246,16 +246,35 @@ def main():
     join_cols = [phase22_id, "distinct_loan_months", "total_loans_6m"]
     join_cols = [c for c in join_cols if c in df_all.columns]
 
+    # Normalise IDs on both sides: strip whitespace, drop .0 float suffix, cast to str
+    def _norm_id(s):
+        return s.astype(str).str.strip().str.replace(r"\.0$", "", regex=True)
+
+    df_merge = df_all[join_cols].copy()
+    df_merge[phase22_id] = _norm_id(df_merge[phase22_id])
+    ops_thick = ops_thick.copy()
+    ops_thick[id_col] = _norm_id(ops_thick[id_col])
+
+    # Diagnostic: show sample IDs from each side before merging
+    sample_ops = ops_thick[id_col].dropna().unique()[:5].tolist()
+    sample_p22 = df_merge[phase22_id].dropna().unique()[:5].tolist()
+    print(f"  ID samples — ops_scored: {sample_ops}")
+    print(f"  ID samples — phase22:    {sample_p22}")
+
     ops_thick = ops_thick.merge(
-        df_all[join_cols].rename(columns={phase22_id: id_col}),
+        df_merge.rename(columns={phase22_id: id_col}),
         on=id_col,
         how="left",
     )
 
     missing = ops_thick["distinct_loan_months"].isna().sum()
     if missing > 0:
-        print(f"  Warning: {missing:,}/{len(ops_thick):,} thick-file agents missing "
-              "distinct_loan_months after merge (snapshot key mismatch?)")
+        pct = 100 * missing / len(ops_thick)
+        print(f"  Warning: {missing:,}/{len(ops_thick):,} ({pct:.1f}%) thick-file agents "
+              "unmatched after merge.")
+        if pct > 90:
+            print("  ID format mismatch likely. Check that val-file and ops-scored share "
+                  "the same agent_msisdn values.")
         ops_thick = ops_thick.dropna(subset=["distinct_loan_months", "total_loans_6m"])
 
     if "bad_state" not in ops_thick.columns:
