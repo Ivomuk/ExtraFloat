@@ -288,9 +288,9 @@ def run_credit_risk_pipeline(
     # -- Stage 3: Engine feature engineering --------------------------------
     logger.info("Stage 3: building engine features")
     features_df = build_extrafloat_limit_engine_features(
-        df_txn=df_txn,
-        df_loan=df_loan,
-        df_borrower=df_borrower,
+        borrower_limit_df=df_borrower,
+        transaction_capacity_df=df_txn,
+        loan_summary_df=df_loan,
     )
     logger.info("Engine features: %d agents", len(features_df))
 
