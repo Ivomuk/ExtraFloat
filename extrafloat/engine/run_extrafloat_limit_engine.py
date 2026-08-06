@@ -49,6 +49,7 @@ OPTIONAL_BUT_EXPECTED_COLUMNS = [
 ]
 
 FINAL_OUTPUT_COLUMNS = [
+    "msisdn",
     "assigned_limit",
     "assigned_limit_pre_round",
     "final_decision_reason",
