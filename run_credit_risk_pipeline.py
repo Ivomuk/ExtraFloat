@@ -197,6 +197,7 @@ def run_credit_risk_pipeline(
     borrower_file: str | Path,
     artifacts_dir: str | Path,
     repayment_file: str | Path | None = None,
+    snapshot_date: str | int | None = None,
     champion: str = "xgb",
     keep_intermediate: bool = False,
     engine_config: dict | None = None,
@@ -253,10 +254,21 @@ def run_credit_risk_pipeline(
         len(df_borrower),
     )
 
+    # Tag both dataframes with snapshot_dt so Phase 2.2 can join them.
+    # Mirrors what run_pipeline._load_snapshot() does during training.
+    if snapshot_date is not None:
+        snap_ts = pd.to_datetime(str(snapshot_date), format="%Y%m%d", errors="coerce")
+        if pd.isna(snap_ts):
+            snap_ts = pd.to_datetime(str(snapshot_date), errors="coerce")
+        df_agent["snapshot_dt"] = snap_ts
+
     repayment_df = None
     if repayment_file is not None:
         repayment_df = pd.read_csv(repayment_file, sep=None, engine="python")
         logger.info("Repayment file loaded: %d rows", len(repayment_df))
+        if snapshot_date is not None:
+            if "snapshot_dt" not in repayment_df.columns and "tbl_dt" not in repayment_df.columns:
+                repayment_df["snapshot_dt"] = snap_ts
 
     # -- Stage 2: PD model scoring -------------------------------------------
     logger.info("Stage 2: running PD model inference (champion=%s)", champion)
@@ -387,6 +399,12 @@ def _parse_args(argv=None):
         default=None,
         help="Optional repayment history CSV for PD model Phase 2.2 features",
     )
+    p.add_argument(
+        "--snapshot-date",
+        default=None,
+        help="Snapshot date for the transaction file (YYYYMMDD). Required when using --repayment-file "
+             "so Phase 2.2 can join the two files on snapshot_dt.",
+    )
     p.add_argument("--output", default=None, help="Output CSV path (omit to print summary only)")
     p.add_argument("--champion", default="xgb", choices=["xgb", "lgb"])
     p.add_argument(
@@ -413,6 +431,7 @@ def main(argv=None):
         borrower_file=args.borrower_file,
         artifacts_dir=args.artifacts_dir,
         repayment_file=args.repayment_file,
+        snapshot_date=args.snapshot_date,
         champion=args.champion,
         keep_intermediate=args.keep_intermediate,
         allow_unverified_artifacts=args.allow_unverified_artifacts,
