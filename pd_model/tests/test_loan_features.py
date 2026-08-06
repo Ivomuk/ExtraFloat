@@ -195,3 +195,27 @@ class TestHasEverLoanDistinctMonths:
         )
         result, _ = run_phase_2_2_repayment_pd_features(pd_df, rep_df)
         assert result["has_ever_loan"].iloc[0] == 1
+
+    def test_value_columns_not_counted_in_total_loans(self):
+        # disbursement_val_m1 (monetary value in UGX) also ends in _m1 and matches
+        # the monthly column regex. It must NOT be included in total_loans_6m.
+        # Agent has 3 vol loans in m1/m2/m3 but 50,000 UGX value in m1 alone —
+        # total_loans_6m must be 3, not 50,003.
+        pd_df = self._base_pd_df()
+        rep_df = pd.DataFrame(
+            {
+                "agent_msisdn": ["256700000001"],
+                "snapshot_dt": [pd.Timestamp("2025-11-15")],
+                "disbursement_vol_m1": [1],
+                "disbursement_vol_m2": [1],
+                "disbursement_vol_m3": [1],
+                "disbursement_val_m1": [50000.0],  # UGX value — must not be summed into count
+                "disbursement_val_1m": [50000.0],
+            }
+        )
+        result, _ = run_phase_2_2_repayment_pd_features(pd_df, rep_df)
+        assert result["total_loans_6m"].iloc[0] == 3, (
+            f"total_loans_6m={result['total_loans_6m'].iloc[0]}; "
+            "disbursement_val_m1 (UGX value) must not be added to loan count"
+        )
+        assert result["distinct_loan_months"].iloc[0] == 3

@@ -235,6 +235,14 @@ def main():
     print(f"\nPhase 2.2 complete: {len(df_all):,} agents")
     print(f"  distinct_loan_months present: {'distinct_loan_months' in df_all.columns}")
     print(f"  total_loans_6m present:       {'total_loans_6m' in df_all.columns}")
+    # Show which monthly columns were found (helps diagnose val-vs-count mix-up)
+    import re as _re
+    rep_sample = pd.read_csv(args.repayment_file, nrows=0, low_memory=False)
+    disb_cols = [c for c in rep_sample.columns if "disbursement_vol" in c.lower() or "disbursement_val" in c.lower()]
+    all_monthly = [c for c in disb_cols if _re.search(r"_m\d+$", c.lower())]
+    vol_only = [c for c in all_monthly if "vol" in c.lower() and "val" not in c.lower()]
+    print(f"  repayment monthly columns found: {all_monthly}")
+    print(f"  count-only columns (used for total_loans_6m): {vol_only}")
 
     if "distinct_loan_months" not in df_all.columns or "total_loans_6m" not in df_all.columns:
         print("\nERROR: distinct_loan_months / total_loans_6m not produced by Phase 2.2.")

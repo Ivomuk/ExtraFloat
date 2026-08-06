@@ -764,11 +764,16 @@ def run_phase_2_2_repayment_pd_features(
     if disb_vol_cols:
         disb_arr = df_pd_out[disb_vol_cols].apply(pd.to_numeric, errors="coerce").fillna(0)
         monthly_cols = [c for c in disb_vol_cols if _re.search(r"_m\d+$", c.lower())]
+        # Separate count columns (disbursement_vol_mN) from value columns (disbursement_val_mN).
+        # total_loans_6m must sum only count columns; value columns are in UGX and would
+        # inflate the sum by orders of magnitude, making the >= 10 threshold unreachable.
+        vol_monthly_cols = [c for c in monthly_cols if "vol" in c.lower() and "val" not in c.lower()]
+        count_cols = vol_monthly_cols if vol_monthly_cols else monthly_cols
         min_months = cfg.thin_file_min_active_months if cfg is not None else 3
         min_loans = cfg.thin_file_min_lifetime_loans if cfg is not None else 10
         if monthly_cols:
-            active_months = (disb_arr[monthly_cols] > 0).sum(axis=1)
-            total_loans_6m = disb_arr[monthly_cols].sum(axis=1)
+            active_months = (disb_arr[count_cols] > 0).sum(axis=1)
+            total_loans_6m = disb_arr[count_cols].sum(axis=1)
             df_pd_out["distinct_loan_months"] = active_months
             df_pd_out["total_loans_6m"] = total_loans_6m
             df_pd_out["has_ever_loan"] = (
