@@ -322,30 +322,51 @@ def run_pipeline(args: argparse.Namespace) -> None:
     )
 
     # ------------------------------------------------------------------ #
-    # 9) Train XGBoost
+    # 9) Train XGBoost  (thick-file agents only)
     # ------------------------------------------------------------------ #
     logger.info("=== Step 9: Train XGBoost ===")
-    Xtr = X_train_trans[selected_features].copy()
-    Xva = X_val_trans[selected_features].copy()
 
-    # Attach meta cols to scored frames after training
-    xgb_model, xgb_train_scored, xgb_val_scored = train_xgb(Xtr, y_train, Xva, y_val, cfg=cfg)
-    # Attach agent meta
+    # Exclude thin-file agents before fitting. XGBoost handles NaN natively
+    # via default branch directions, so including thin-file agents (whose
+    # repayment features are all NaN) teaches the model to use missingness
+    # as a proxy for thin-file status rather than genuine credit risk.
+    thick_train_mask = thin_train.eq(0)
+    thick_val_mask = thin_val.eq(0)
+    logger.info(
+        "Thick-file population: train=%d/%d | val=%d/%d",
+        int(thick_train_mask.sum()), len(thin_train),
+        int(thick_val_mask.sum()), len(thin_val),
+    )
+
+    Xtr = X_train_trans.loc[thick_train_mask, selected_features].copy()
+    y_train_thick = y_train.loc[thick_train_mask]
+    Xva = X_val_trans.loc[thick_val_mask, selected_features].copy()
+    y_val_thick = y_val.loc[thick_val_mask]
+    agent_train_thick = agent_train.loc[thick_train_mask]
+    thin_train_thick = thin_train.loc[thick_train_mask]
+    agent_val_thick = agent_val.loc[thick_val_mask]
+    thin_val_thick = thin_val.loc[thick_val_mask]
+
+    xgb_model, xgb_train_scored, xgb_val_scored = train_xgb(
+        Xtr, y_train_thick, Xva, y_val_thick, cfg=cfg
+    )
     for scored_df, agent_ids, thin_flags in [
-        (xgb_train_scored, agent_train, thin_train),
-        (xgb_val_scored, agent_val, thin_val),
+        (xgb_train_scored, agent_train_thick, thin_train_thick),
+        (xgb_val_scored, agent_val_thick, thin_val_thick),
     ]:
         scored_df.insert(0, feature_config.AGENT_KEY, agent_ids.values)
         scored_df[feature_config.THIN_FILE_COL] = thin_flags.values
 
     # ------------------------------------------------------------------ #
-    # 10) Train LightGBM
+    # 10) Train LightGBM  (same thick-file Xtr / Xva)
     # ------------------------------------------------------------------ #
     logger.info("=== Step 10: Train LightGBM ===")
-    lgb_model, lgb_train_scored, lgb_val_scored = train_lgbm(Xtr, y_train, Xva, y_val, cfg=cfg)
+    lgb_model, lgb_train_scored, lgb_val_scored = train_lgbm(
+        Xtr, y_train_thick, Xva, y_val_thick, cfg=cfg
+    )
     for scored_df, agent_ids, thin_flags in [
-        (lgb_train_scored, agent_train, thin_train),
-        (lgb_val_scored, agent_val, thin_val),
+        (lgb_train_scored, agent_train_thick, thin_train_thick),
+        (lgb_val_scored, agent_val_thick, thin_val_thick),
     ]:
         scored_df.insert(0, feature_config.AGENT_KEY, agent_ids.values)
         scored_df[feature_config.THIN_FILE_COL] = thin_flags.values
