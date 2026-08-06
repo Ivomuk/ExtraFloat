@@ -765,18 +765,25 @@ def run_phase_2_2_repayment_pd_features(
         disb_arr = df_pd_out[disb_vol_cols].apply(pd.to_numeric, errors="coerce").fillna(0)
         monthly_cols = [c for c in disb_vol_cols if _re.search(r"_m\d+$", c.lower())]
         min_months = cfg.thin_file_min_active_months if cfg is not None else 3
+        min_loans = cfg.thin_file_min_lifetime_loans if cfg is not None else 10
         if monthly_cols:
             active_months = (disb_arr[monthly_cols] > 0).sum(axis=1)
+            total_loans_6m = disb_arr[monthly_cols].sum(axis=1)
             df_pd_out["distinct_loan_months"] = active_months
-            df_pd_out["has_ever_loan"] = (active_months >= min_months).astype(int)
+            df_pd_out["total_loans_6m"] = total_loans_6m
+            df_pd_out["has_ever_loan"] = (
+                (active_months >= min_months) & (total_loans_6m >= min_loans)
+            ).astype(int)
         else:
             # No per-month columns present -- fall back to binary any-loan logic
             df_pd_out["distinct_loan_months"] = (disb_arr.max(axis=1) > 0).astype(int)
+            df_pd_out["total_loans_6m"] = disb_arr.max(axis=1)
             df_pd_out["has_ever_loan"] = (disb_arr.max(axis=1) > 0).astype(int)
     else:
         # No disbursement columns -- treat all as thin-file
         df_pd_out["has_ever_loan"] = 0
         df_pd_out["distinct_loan_months"] = 0
+        df_pd_out["total_loans_6m"] = 0
     logger.info(
         "run_phase_2_2: has_ever_loan -- thick-file=%d | thin-file=%d",
         int(df_pd_out["has_ever_loan"].sum()),
@@ -784,14 +791,18 @@ def run_phase_2_2_repayment_pd_features(
     )
     if "distinct_loan_months" in df_pd_out.columns:
         min_months = cfg.thin_file_min_active_months if cfg is not None else 3
+        min_loans = cfg.thin_file_min_lifetime_loans if cfg is not None else 10
         logger.info(
-            "run_phase_2_2: thin-file threshold = %d distinct months | "
-            "agents with 0=%d, 1=%d, 2=%d, 3+=%d",
+            "run_phase_2_2: thin-file thresholds = %d distinct months AND %d loans | "
+            "months: 0=%d, 1=%d, 2=%d, 3+=%d | loans <10=%d, 10+=%d",
             min_months,
+            min_loans,
             int((df_pd_out["distinct_loan_months"] == 0).sum()),
             int((df_pd_out["distinct_loan_months"] == 1).sum()),
             int((df_pd_out["distinct_loan_months"] == 2).sum()),
             int((df_pd_out["distinct_loan_months"] >= 3).sum()),
+            int((df_pd_out["total_loans_6m"] < min_loans).sum()),
+            int((df_pd_out["total_loans_6m"] >= min_loans).sum()),
         )
 
     # ------------------------------------------------------------------ #

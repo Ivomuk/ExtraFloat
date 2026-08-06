@@ -153,18 +153,34 @@ class TestHasEverLoanDistinctMonths:
         assert result["has_ever_loan"].iloc[0] == 0
 
     def test_loans_across_3_months_is_thick_file(self):
-        # 1 loan each in m1, m2, m3 -> distinct_months=3 -> thick-file (has_ever_loan=1)
+        # 4 loans each in m1, m2, m3 -> distinct_months=3, total=12 >= 10 -> thick-file
+        pd_df = self._base_pd_df()
+        rep_df = self._repayment_df(m1=4, m2=4, m3=4)
+        result, _ = run_phase_2_2_repayment_pd_features(pd_df, rep_df)
+        assert result["has_ever_loan"].iloc[0] == 1
+
+    def test_3_months_but_too_few_loans_is_thin_file(self):
+        # 1 loan each in m1, m2, m3 -> distinct_months=3 but total=3 < 10 -> thin-file
         pd_df = self._base_pd_df()
         rep_df = self._repayment_df(m1=1, m2=1, m3=1)
         result, _ = run_phase_2_2_repayment_pd_features(pd_df, rep_df)
-        assert result["has_ever_loan"].iloc[0] == 1
+        assert result["has_ever_loan"].iloc[0] == 0
+
+    def test_10_loans_but_single_month_is_thin_file(self):
+        # 10 loans all in m1 -> total >= 10 but distinct_months=1 < 3 -> thin-file
+        pd_df = self._base_pd_df()
+        rep_df = self._repayment_df(m1=10, m2=0, m3=0)
+        result, _ = run_phase_2_2_repayment_pd_features(pd_df, rep_df)
+        assert result["has_ever_loan"].iloc[0] == 0
 
     def test_distinct_loan_months_col_present(self):
         pd_df = self._base_pd_df()
         rep_df = self._repayment_df(m1=5, m2=3, m3=0)
         result, _ = run_phase_2_2_repayment_pd_features(pd_df, rep_df)
         assert "distinct_loan_months" in result.columns
+        assert "total_loans_6m" in result.columns
         assert result["distinct_loan_months"].iloc[0] == 2
+        assert result["total_loans_6m"].iloc[0] == 8
 
     def test_fallback_when_no_monthly_cols(self):
         # When only disbursement_val_1m is present (no _mN cols),
