@@ -651,28 +651,43 @@ def test_combine_caps_thin_file_vs_standard():
     assert std_B["combined_reason"].iloc[0] == "standard_weighting_applied"
 
 
-def test_combine_caps_thin_file_tier_fraction():
+def test_combine_caps_thin_file_max_tier():
     """
-    thin_file_tier_fraction=0.40 caps thin-file agents at 40% of their tier ceiling.
-    Default fixture is Silver (agent_tier_ceiling_multiplier=0.25, ceiling=250,000).
-    Thin-file max = 0.40 * 250,000 = 100,000.
+    thin_file_max_tier="bronze" caps thin-file agents at the Bronze flat amount (100,000).
+    Agents already below Bronze keep their own category value — the cap never raises them.
 
-    A thin-file agent with a large risk_cap must be capped at 100,000.
-    A thick-file agent with identical inputs must NOT be capped.
+    Silver thin-file (ceiling 250,000) -> capped at 100,000 (Bronze flat).
+    New Bronze thin-file (ceiling 50,000) -> unchanged at 50,000 (already below Bronze).
+    Thick-file Silver -> uncapped.
     """
-    # Use a very large risk_cap so the weighted combined_cap >> 100,000
-    thin = combine_caps(_features(is_thin_file=1.0, risk_cap=900_000.0, prior_limit=0.0))
-    thick = combine_caps(_features(is_thin_file=0.0, risk_cap=900_000.0, prior_limit=0.0))
+    bronze_flat = 0.10 * 1_000_000  # 100,000
 
-    thin_limit = float(thin["combined_cap"].iloc[0])
-    thick_limit = float(thick["combined_cap"].iloc[0])
-
-    expected_thin_max = 0.40 * 0.25 * 1_000_000  # fraction * tier_mult * global_ceiling
-    assert thin_limit == pytest.approx(expected_thin_max, abs=1.0), (
-        f"Thin-file Silver agent should be capped at {expected_thin_max}, got {thin_limit}"
+    # Silver thin-file: combined_cap >> bronze_flat -> capped at 100,000
+    silver_thin = combine_caps(
+        _features(is_thin_file=1.0, risk_cap=900_000.0, prior_limit=0.0,
+                  agent_tier_ceiling_multiplier=0.25)
     )
-    assert thick_limit > expected_thin_max, (
-        f"Thick-file agent should not be capped by thin_file_tier_fraction"
+    assert float(silver_thin["combined_cap"].iloc[0]) == pytest.approx(bronze_flat, abs=1.0), (
+        "Silver thin-file should be capped at Bronze flat (100,000)"
+    )
+
+    # Silver thick-file: same inputs, no thin-file cap applied
+    silver_thick = combine_caps(
+        _features(is_thin_file=0.0, risk_cap=900_000.0, prior_limit=0.0,
+                  agent_tier_ceiling_multiplier=0.25)
+    )
+    assert float(silver_thick["combined_cap"].iloc[0]) > bronze_flat, (
+        "Thick-file agent should not be capped by thin_file_max_tier"
+    )
+
+    # New Bronze thin-file (ceiling 50,000): already below Bronze flat, must not change
+    new_bronze_thin = combine_caps(
+        _features(is_thin_file=1.0, risk_cap=900_000.0, prior_limit=0.0,
+                  agent_tier_ceiling_multiplier=0.05)
+    )
+    new_bronze_limit = float(new_bronze_thin["combined_cap"].iloc[0])
+    assert new_bronze_limit <= 50_000.0, (
+        f"New Bronze thin-file must not exceed its own tier ceiling (50,000), got {new_bronze_limit}"
     )
 
 
