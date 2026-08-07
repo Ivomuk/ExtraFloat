@@ -172,22 +172,28 @@ def _thick_auc_table(df, score_col):
 # --------------------------------------------------------------------------- #
 
 def _boundary_table(df_all):
-    thick_mask = df_all["distinct_loan_months"].ge(3) & df_all["total_loans_6m"].ge(10)
+    from pd_model.config.model_config import DEFAULT_CONFIG
+    min_m = DEFAULT_CONFIG.thin_file_min_active_months   # 4
+    min_l = DEFAULT_CONFIG.thin_file_min_lifetime_loans  # 5
+    low_l = max(1, min_l - 5)   # one bracket below the loans threshold
+    hi_l  = min_l - 1           # upper edge of the "fails loans only" band
+
+    thick_mask = df_all["distinct_loan_months"].ge(min_m) & df_all["total_loans_6m"].ge(min_l)
     thick_br = df_all.loc[thick_mask, "bad_state"].mean()
 
     segments = [
-        ("thick-file (months>=3 AND loans>=10) [REFERENCE]",
+        (f"thick-file (months>={min_m} AND loans>={min_l}) [REFERENCE]",
          thick_mask),
-        ("months>=3 AND loans in [5,9]  — fails loans only",
-         df_all["distinct_loan_months"].ge(3) & df_all["total_loans_6m"].between(5, 9)),
-        ("months=2 AND loans>=10        — fails months only",
-         df_all["distinct_loan_months"].eq(2) & df_all["total_loans_6m"].ge(10)),
-        ("months=2 AND loans in [5,9]   — fails both (near)",
-         df_all["distinct_loan_months"].eq(2) & df_all["total_loans_6m"].between(5, 9)),
-        ("months=1 AND loans>=10        — far from boundary",
-         df_all["distinct_loan_months"].eq(1) & df_all["total_loans_6m"].ge(10)),
-        ("months>=3 AND loans in [1,4]  — very low depth",
-         df_all["distinct_loan_months"].ge(3) & df_all["total_loans_6m"].between(1, 4)),
+        (f"months>={min_m} AND loans in [{low_l},{hi_l}]  — fails loans only",
+         df_all["distinct_loan_months"].ge(min_m) & df_all["total_loans_6m"].between(low_l, hi_l)),
+        (f"months={min_m-1} AND loans>={min_l}        — fails months only",
+         df_all["distinct_loan_months"].eq(min_m - 1) & df_all["total_loans_6m"].ge(min_l)),
+        (f"months={min_m-1} AND loans in [{low_l},{hi_l}]   — fails both (near)",
+         df_all["distinct_loan_months"].eq(min_m - 1) & df_all["total_loans_6m"].between(low_l, hi_l)),
+        (f"months=1 AND loans>={min_l}        — far from boundary",
+         df_all["distinct_loan_months"].eq(1) & df_all["total_loans_6m"].ge(min_l)),
+        (f"months>={min_m} AND loans in [1,{low_l-1}]  — very low depth",
+         df_all["distinct_loan_months"].ge(min_m) & df_all["total_loans_6m"].between(1, low_l - 1)),
         ("no loan history (months=0)",
          df_all["distinct_loan_months"].eq(0)),
     ]
