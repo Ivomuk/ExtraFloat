@@ -343,12 +343,14 @@ def main():
 
     _thick_auc_table(ops_thick, score_col)
 
+    from pd_model.config.model_config import DEFAULT_CONFIG as _cfg
     print("\n── Done ──\n")
     print("How to read the results:")
     print("  • AUC stable across month/loan buckets → thresholds are appropriate")
-    print("  • AUC drops sharply at months=3 → consider raising to 4")
-    print("  • AUC drops sharply at loans<15  → consider raising to 12-15")
+    print(f"  • AUC drops at months={_cfg.thin_file_min_active_months} boundary → consider raising months threshold")
+    print(f"  • AUC drops at loans<{_cfg.thin_file_min_lifetime_loans+5} → consider raising loans threshold")
     print("  • Boundary bad_rate ≈ thick-file  → safe to lower that threshold")
+    print(f"\n  Current thresholds: months>={_cfg.thin_file_min_active_months} AND loans>={_cfg.thin_file_min_lifetime_loans}")
 
 
 if __name__ == "__main__":
