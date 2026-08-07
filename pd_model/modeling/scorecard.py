@@ -213,14 +213,25 @@ def apply_thin_file_lr(
         X[c] = pd.to_numeric(df_thin[c], errors="coerce") if c in df_thin.columns else np.nan
 
     y_prob = lr_pipeline.predict_proba(X)[:, 1]
+
+    # Enforce the thin-file PD prior as a floor.  The calibrated LR can produce
+    # near-zero probabilities for agents with no loan history (all features = 0),
+    # misinterpreting "never defaulted" as "low risk".  The prior (default 0.12)
+    # represents our uncertainty about agents with no repayment evidence.
+    from pd_model.config.model_config import DEFAULT_CONFIG as _cfg
+    prior_floor = float(_cfg.thin_file_pd_prior)
+    n_floored = int((y_prob < prior_floor).sum())
+    y_prob = np.maximum(y_prob, prior_floor)
     df.loc[thin_mask, "never_loan_pd_like"] = y_prob
 
     logger.info(
         "apply_thin_file_lr: updated never_loan_pd_like for %d thin-file agents "
-        "(median=%.4f, p95=%.4f)",
+        "(median=%.4f, p95=%.4f, floored_at_prior=%.2f: %d agents)",
         int(thin_mask.sum()),
         float(np.nanmedian(y_prob)),
         float(np.nanpercentile(y_prob, 95)),
+        prior_floor,
+        n_floored,
     )
     return df
 
