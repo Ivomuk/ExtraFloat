@@ -47,7 +47,7 @@ One optional file:
 
 | Argument | Description |
 |---|---|
-| `--repayment-file` | XtraFloat repayment history. Enables Phase 2.2 PD features (DPD, penalty roll-forward, repayment consistency). Agents without rows are treated as thin-file and scored conservatively. |
+| `--repayment-file` | XtraFloat repayment history. Enables Phase 2.2 PD features (DPD, penalty roll-forward, repayment consistency). Used to compute `distinct_loan_months` and `total_loans_6m` — agents with fewer than 4 active months or fewer than 5 loans are classified thin-file and scored by the calibrated LR with a 0.12 PD floor. |
 
 ---
 
@@ -118,6 +118,7 @@ python run_credit_risk_pipeline.py \
 | `policy_reason` | string | Policy-stage reason (tier assignment, floor override, regulatory cap) |
 | `combined_reason` | string | Combination-stage reason (weighting scheme applied) |
 | `combined_top_driver` | string | Which cap was the binding constraint |
+| `thin_file_flag` | 0 / 1 | 1 if the agent was scored by the thin-file LR path (fewer than 4 active loan months or fewer than 5 total loans in the 6-month window). |
 | `pd_decile` | int 1–10 \| NA | Population-relative risk rank from `cal_pd` (1 = lowest risk, 10 = highest). NA for agents on the 7-signal fallback. |
 
 See `docs/engine_output_data_dictionary.md` for the full column reference and reason code catalogue.
@@ -135,9 +136,10 @@ The engine evaluates four independent cap signals and combines them with configu
 | Prior exposure | 15% | 10% | Maximum loan size the agent has successfully serviced |
 | Risk | 20% | 50% | `1 − cal_pd` when PD model runs; 7-signal blend otherwise |
 
-Thin-file agents (fewer than 3 lifetime loans) receive higher risk weight because repayment history is sparse. The PD model already handles thin-file conservatism via `never_loan_pd_like`; the experience ramp in the 7-signal fallback path does **not** apply on the `cal_pd` path.
+**Thin-file** agents — those with fewer than 4 distinct active loan months OR fewer than 5 total loans in the 6-month repayment window — receive higher risk weight (50%) because repayment history is sparse. They are scored by a calibrated Logistic Regression rather than XGBoost, and their `cal_pd` is floored at the `thin_file_pd_prior` (0.12) so agents with no loan history are never treated as zero-risk. The experience ramp in the 7-signal fallback path does **not** apply on the `cal_pd` path.
 
 After combining, the engine applies:
+- **Thin-file hard cap**: thin-file agents are capped at the Bronze business-category flat amount (100,000 UGX). Agents already in a lower tier (New Bronze / Unknown, ceiling 50,000 UGX) keep their own category value and are not raised. Configurable via `combination.thin_file_max_tier` in `DEFAULT_CAP_CONFIG`.
 - Risk-tier policy multiplier (tier_1 = 100%, tier_4 = 40%)
 - Agent-tier ceiling (Silver / Gold / Platinum class multipliers)
 - Bank of Uganda regulatory cap: **5,000,000 UGX**
