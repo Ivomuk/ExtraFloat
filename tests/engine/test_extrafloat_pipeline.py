@@ -651,6 +651,31 @@ def test_combine_caps_thin_file_vs_standard():
     assert std_B["combined_reason"].iloc[0] == "standard_weighting_applied"
 
 
+def test_combine_caps_thin_file_tier_fraction():
+    """
+    thin_file_tier_fraction=0.40 caps thin-file agents at 40% of their tier ceiling.
+    Default fixture is Silver (agent_tier_ceiling_multiplier=0.25, ceiling=250,000).
+    Thin-file max = 0.40 * 250,000 = 100,000.
+
+    A thin-file agent with a large risk_cap must be capped at 100,000.
+    A thick-file agent with identical inputs must NOT be capped.
+    """
+    # Use a very large risk_cap so the weighted combined_cap >> 100,000
+    thin = combine_caps(_features(is_thin_file=1.0, risk_cap=900_000.0, prior_limit=0.0))
+    thick = combine_caps(_features(is_thin_file=0.0, risk_cap=900_000.0, prior_limit=0.0))
+
+    thin_limit = float(thin["combined_cap"].iloc[0])
+    thick_limit = float(thick["combined_cap"].iloc[0])
+
+    expected_thin_max = 0.40 * 0.25 * 1_000_000  # fraction * tier_mult * global_ceiling
+    assert thin_limit == pytest.approx(expected_thin_max, abs=1.0), (
+        f"Thin-file Silver agent should be capped at {expected_thin_max}, got {thin_limit}"
+    )
+    assert thick_limit > expected_thin_max, (
+        f"Thick-file agent should not be capped by thin_file_tier_fraction"
+    )
+
+
 # -----------------------------------------------------------------------------
 # TEST 9: apply_policy_adjustments -- tier classification, proven-good override
 # -----------------------------------------------------------------------------

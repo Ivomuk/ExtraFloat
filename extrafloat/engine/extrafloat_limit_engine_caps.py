@@ -77,6 +77,10 @@ DEFAULT_CAP_CONFIG = {
         "thin_file_prior_exposure_weight": 0.10,
         "thin_file_risk_weight": 0.50,
         "thin_file_threshold": 3.0,
+        # Thin-file hard cap: fraction of the agent's own tier ceiling applied
+        # to thin-file agents regardless of capacity or risk score.
+        # 0.40 = Bronze-equivalent for Silver agents; scales proportionally.
+        "thin_file_tier_fraction": 0.40,
         # Prior-limit smoothing guard rails
         "prior_limit_weight": 0.15,
         "prior_limit_max_upside": 1.25,
@@ -1123,6 +1127,33 @@ def combine_caps(features_df, config=None):
     )
 
     combined_cap = smoothed_cap.copy()
+
+    # Thin-file hard cap: cap at thin_file_tier_fraction × agent tier ceiling.
+    # Applied after smoothing so prior-limit guardrails are respected first,
+    # but before the global ceiling so the fraction is meaningful for all tiers.
+    thin_file_tier_fraction = combo_cfg.get("thin_file_tier_fraction", 1.0)
+    if thin_file_tier_fraction < 1.0:
+        effective_ceiling = _clip_series(
+            _safe_series(df, "agent_tier_ceiling_multiplier", 1.0) * cfg["global_ceiling_limit"],
+            cfg["global_floor_limit"],
+            cfg["global_ceiling_limit"],
+        )
+        thin_file_max = effective_ceiling * thin_file_tier_fraction
+        thin_file_cap_applied = (thin_file_flag > 0.0) & (combined_cap > thin_file_max)
+        combined_cap = pd.Series(
+            np.where(thin_file_flag > 0.0, np.minimum(combined_cap, thin_file_max), combined_cap),
+            index=df.index,
+            dtype="float64",
+        )
+        n_capped = int(thin_file_cap_applied.sum())
+        if n_capped > 0:
+            logger.info(
+                "combine_caps: thin-file tier fraction %.2f capped %d agents "
+                "(fraction of thin-file: %.1f%%)",
+                thin_file_tier_fraction,
+                n_capped,
+                100.0 * n_capped / max(1, int((thin_file_flag > 0.0).sum())),
+            )
 
     # Activity and policy floors are applied exclusively in apply_policy_adjustments()
     # to keep floor logic in one authoritative place.
