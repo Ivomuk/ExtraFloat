@@ -167,22 +167,29 @@ class TestHasEverLoanDistinctMonths:
         result, _ = run_phase_2_2_repayment_pd_features(pd_df, rep_df)
         assert result["has_ever_loan"].iloc[0] == 0
 
-    def test_loans_across_3_months_is_thick_file(self):
-        # 2 loans each in m1..m3 -> distinct_months=3 >= 3, total=6 >= 5 -> thick-file
+    def test_loans_across_4_months_is_thick_file(self):
+        # 2 loans each in m1..m4 -> distinct_months=4 >= 4, total=8 >= 5 -> thick-file
         pd_df = self._base_pd_df()
-        rep_df = self._repayment_df(m1=2, m2=2, m3=2, m4=0)
+        rep_df = self._repayment_df(m1=2, m2=2, m3=2, m4=2)
         result, _ = run_phase_2_2_repayment_pd_features(pd_df, rep_df)
         assert result["has_ever_loan"].iloc[0] == 1
 
-    def test_3_months_but_too_few_loans_is_thin_file(self):
-        # 1 loan each in m1..m3 -> distinct_months=3 but total=3 < 5 -> thin-file
+    def test_3_months_is_thin_file(self):
+        # threshold is 4 months: 3 distinct months with enough loans -> thin-file
         pd_df = self._base_pd_df()
-        rep_df = self._repayment_df(m1=1, m2=1, m3=1, m4=0)
+        rep_df = self._repayment_df(m1=5, m2=5, m3=5, m4=0)
+        result, _ = run_phase_2_2_repayment_pd_features(pd_df, rep_df)
+        assert result["has_ever_loan"].iloc[0] == 0
+
+    def test_4_months_but_too_few_loans_is_thin_file(self):
+        # 1 loan each in m1..m4 -> distinct_months=4 but total=4 < 5 -> thin-file
+        pd_df = self._base_pd_df()
+        rep_df = self._repayment_df(m1=1, m2=1, m3=1, m4=1)
         result, _ = run_phase_2_2_repayment_pd_features(pd_df, rep_df)
         assert result["has_ever_loan"].iloc[0] == 0
 
     def test_5_loans_but_single_month_is_thin_file(self):
-        # 5 loans all in m1 -> total >= 5 but distinct_months=1 < 3 -> thin-file
+        # 5 loans all in m1 -> total >= 5 but distinct_months=1 < 4 -> thin-file
         pd_df = self._base_pd_df()
         rep_df = self._repayment_df(m1=5, m2=0, m3=0)
         result, _ = run_phase_2_2_repayment_pd_features(pd_df, rep_df)
