@@ -1209,3 +1209,154 @@ class TestAssignSubLabel:
         # Should not raise TypeError/ValueError, and falls back to 0.0 for
         # unparseable/missing entries.
         assert _assign_sub_label(row, self._cfg()) == "Balanced"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Run manifest + structured alerts (run_extrafloat_segmentation.py)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestCollectAlerts:
+    """Tests for run_extrafloat_segmentation._collect_alerts — rolls the
+    degraded_mode/quality_gate/drift/final_stability .attrs reports into a
+    flat, structured list any caller can route without knowing each
+    report's shape."""
+
+    def _base_df(self):
+        return pd.DataFrame({"segment": ["Gold", "Silver"]})
+
+    def test_no_attrs_no_alerts(self):
+        from run_extrafloat_segmentation import _collect_alerts
+
+        df = self._base_df()
+        assert _collect_alerts(df) == []
+
+    def test_degraded_mode_produces_critical_alert(self):
+        from run_extrafloat_segmentation import _collect_alerts
+
+        df = self._base_df()
+        df.attrs["degraded_mode"] = {"hdbscan_unavailable": True, "umap_unavailable": False}
+        alerts = _collect_alerts(df)
+        assert len(alerts) == 1
+        assert alerts[0]["severity"] == "critical"
+        assert alerts[0]["source"] == "degraded_mode"
+
+    def test_failed_quality_gate_produces_critical_alert(self):
+        from run_extrafloat_segmentation import _collect_alerts
+
+        df = self._base_df()
+        df.attrs["quality_gate"] = {
+            "passed": False,
+            "skipped": False,
+            "checks": {"n_distinct_segments": {"value": 1, "threshold": 2, "passed": False}},
+        }
+        alerts = _collect_alerts(df)
+        assert len(alerts) == 1
+        assert alerts[0]["source"] == "quality_gate"
+
+    def test_skipped_quality_gate_produces_no_alert(self):
+        from run_extrafloat_segmentation import _collect_alerts
+
+        df = self._base_df()
+        df.attrs["quality_gate"] = {"passed": True, "skipped": True, "checks": {}}
+        assert _collect_alerts(df) == []
+
+    def test_drift_detected_produces_warning_alert(self):
+        from run_extrafloat_segmentation import _collect_alerts
+
+        df = self._base_df()
+        df.attrs["drift_report"] = {"drift_detected": True, "n_critical": 2, "n_warning": 1}
+        alerts = _collect_alerts(df)
+        assert len(alerts) == 1
+        assert alerts[0]["severity"] == "warning"
+        assert alerts[0]["source"] == "drift"
+
+    def test_low_segment_consistency_produces_warning_alert(self):
+        from run_extrafloat_segmentation import _collect_alerts
+
+        df = self._base_df()
+        df.attrs["final_stability_report"] = {
+            "segment_consistency_rate": 0.2,
+            "n_seeds": 3,
+        }
+        alerts = _collect_alerts(df)
+        assert len(alerts) == 1
+        assert alerts[0]["source"] == "final_stability"
+
+    def test_high_segment_consistency_produces_no_alert(self):
+        from run_extrafloat_segmentation import _collect_alerts
+
+        df = self._base_df()
+        df.attrs["final_stability_report"] = {
+            "segment_consistency_rate": 0.95,
+            "n_seeds": 3,
+        }
+        assert _collect_alerts(df) == []
+
+
+class TestRunManifest:
+    """Tests for _build_run_manifest / _maybe_save_run_manifest /
+    _collect_package_versions / _get_git_commit_sha."""
+
+    def test_collect_package_versions_returns_expected_keys(self):
+        from run_extrafloat_segmentation import _collect_package_versions
+
+        versions = _collect_package_versions()
+        for pkg in ("numpy", "pandas", "scikit-learn", "hdbscan", "umap-learn"):
+            assert pkg in versions
+            assert isinstance(versions[pkg], str)
+
+    def test_get_git_commit_sha_returns_str_or_none(self):
+        from run_extrafloat_segmentation import _get_git_commit_sha
+
+        sha = _get_git_commit_sha()
+        assert sha is None or (isinstance(sha, str) and len(sha) == 40)
+
+    def test_build_run_manifest_structure(self):
+        from run_extrafloat_segmentation import _build_run_manifest, DEFAULT_SEGMENTATION_CONFIG
+
+        df = pd.DataFrame({"segment": ["Gold", "Silver", "Gold"]})
+        df.attrs["quality_gate"] = {"passed": True, "skipped": False, "checks": {}}
+        manifest = _build_run_manifest(df, DEFAULT_SEGMENTATION_CONFIG, n_input_rows=3)
+
+        for key in (
+            "generated_at_utc", "git_commit_sha", "package_versions", "config",
+            "n_input_rows", "n_output_rows", "n_distinct_segments",
+            "stability_report", "final_stability_report", "drift_report",
+            "quality_gate", "degraded_mode", "alerts",
+        ):
+            assert key in manifest, f"manifest missing key '{key}'"
+        assert manifest["n_input_rows"] == 3
+        assert manifest["n_output_rows"] == 3
+        assert manifest["n_distinct_segments"] == 2
+
+    def test_maybe_save_run_manifest_writes_json(self, tmp_path):
+        from run_extrafloat_segmentation import _maybe_save_run_manifest
+        import json
+
+        df = pd.DataFrame({"segment": ["Gold", "Silver"]})
+        cfg = {"output": {"output_dir": str(tmp_path), "save_run_manifest": True, "final_segment_col": "segment"}}
+        _maybe_save_run_manifest(df, cfg, n_input_rows=2)
+
+        manifest_path = tmp_path / "run_manifest.json"
+        assert manifest_path.exists()
+        loaded = json.loads(manifest_path.read_text())
+        assert loaded["n_input_rows"] == 2
+
+    def test_maybe_save_run_manifest_skips_when_disabled(self, tmp_path):
+        from run_extrafloat_segmentation import _maybe_save_run_manifest
+
+        df = pd.DataFrame({"segment": ["Gold"]})
+        cfg = {"output": {"output_dir": str(tmp_path), "save_run_manifest": False, "final_segment_col": "segment"}}
+        _maybe_save_run_manifest(df, cfg, n_input_rows=1)
+
+        assert not (tmp_path / "run_manifest.json").exists()
+
+    def test_maybe_save_run_manifest_skips_without_output_dir(self, tmp_path):
+        from run_extrafloat_segmentation import _maybe_save_run_manifest
+
+        df = pd.DataFrame({"segment": ["Gold"]})
+        cfg = {"output": {"output_dir": "", "save_run_manifest": True, "final_segment_col": "segment"}}
+        _maybe_save_run_manifest(df, cfg, n_input_rows=1)
+
+        assert not (tmp_path / "run_manifest.json").exists()

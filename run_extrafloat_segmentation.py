@@ -24,8 +24,11 @@ import argparse
 import json
 import logging
 import os
+import subprocess
 import sys
 from copy import deepcopy
+from datetime import datetime, timezone
+from importlib import metadata as importlib_metadata
 from typing import Any
 
 import numpy as np
@@ -123,6 +126,12 @@ DEFAULT_SEGMENTATION_CONFIG: dict[str, Any] = {
         # When False only the SEGMENT_OUTPUT_COLUMNS are returned.
         "keep_intermediate_cols": False,
         "final_segment_col": "segment",
+        # Write run_manifest.json alongside agent_segments.csv (only when
+        # output_dir is set). Records config, package versions, git commit,
+        # and the stability/drift/quality-gate reports for a given run, so a
+        # credit-tier decision can be traced back to exactly what produced
+        # it. See _build_run_manifest().
+        "save_run_manifest": True,
     },
     "drift": {
         **DEFAULT_DRIFT_CONFIG,
@@ -232,6 +241,148 @@ def _maybe_save_output(df: pd.DataFrame, cfg: dict[str, Any]) -> None:
     out_path = os.path.join(out_dir, "agent_segments.csv")
     df.to_csv(out_path, index=False)
     logger.info("_maybe_save_output: wrote %d rows to %s", len(df), out_path)
+
+
+_MANIFEST_PACKAGES: tuple[str, ...] = (
+    "numpy", "pandas", "scikit-learn", "hdbscan", "umap-learn",
+)
+
+
+def _collect_package_versions() -> dict[str, str]:
+    """Best-effort package version snapshot for the run manifest."""
+    versions: dict[str, str] = {}
+    for pkg in _MANIFEST_PACKAGES:
+        try:
+            versions[pkg] = importlib_metadata.version(pkg)
+        except importlib_metadata.PackageNotFoundError:
+            versions[pkg] = "not installed"
+    return versions
+
+
+def _get_git_commit_sha() -> str | None:
+    """Best-effort current git commit SHA; None if unavailable (not a git
+    checkout, git not on PATH, etc.) — never raises."""
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=os.path.dirname(os.path.abspath(__file__)),
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        if result.returncode == 0:
+            return result.stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return None
+
+
+def _build_run_manifest(
+    df: pd.DataFrame,
+    cfg: dict[str, Any],
+    n_input_rows: int,
+) -> dict[str, Any]:
+    """
+    Build an auditable record of exactly what produced a given run's output.
+
+    For a system whose output sizes real credit limits downstream, "what
+    config/code/data produced agent X's tier on date Y" needs to be
+    reconstructable after the fact. This manifest is the answer: resolved
+    config, package versions, git commit, input/output row counts, and the
+    stability/drift/quality-gate reports already attached to the output
+    DataFrame's `.attrs` by earlier pipeline steps.
+    """
+    return {
+        "generated_at_utc": datetime.now(timezone.utc).isoformat(),
+        "git_commit_sha": _get_git_commit_sha(),
+        "package_versions": _collect_package_versions(),
+        "config": cfg,
+        "n_input_rows": n_input_rows,
+        "n_output_rows": len(df),
+        "n_distinct_segments": (
+            int(df[cfg["output"].get("final_segment_col", "segment")].nunique())
+            if cfg["output"].get("final_segment_col", "segment") in df.columns
+            else None
+        ),
+        "stability_report": df.attrs.get("stability_report"),
+        "final_stability_report": df.attrs.get("final_stability_report"),
+        "drift_report": df.attrs.get("drift_report"),
+        "quality_gate": df.attrs.get("quality_gate"),
+        "degraded_mode": df.attrs.get("degraded_mode"),
+        "alerts": df.attrs.get("alerts", []),
+    }
+
+
+def _maybe_save_run_manifest(df: pd.DataFrame, cfg: dict[str, Any], n_input_rows: int) -> None:
+    """Optionally write run_manifest.json alongside agent_segments.csv."""
+    out_dir = cfg["output"].get("output_dir", "")
+    if not out_dir or not cfg["output"].get("save_run_manifest", True):
+        return
+
+    os.makedirs(out_dir, exist_ok=True)
+    manifest = _build_run_manifest(df, cfg, n_input_rows)
+    manifest_path = os.path.join(out_dir, "run_manifest.json")
+    with open(manifest_path, "w") as fh:
+        json.dump(manifest, fh, indent=2, default=str)
+    logger.info("_maybe_save_run_manifest: wrote manifest to %s", manifest_path)
+
+
+def _collect_alerts(df: pd.DataFrame) -> list[dict[str, Any]]:
+    """
+    Roll the stability/drift/quality-gate/degraded-mode reports already
+    attached to *df*.attrs into a flat, structured alert list.
+
+    An automated check nobody sees is not a safety net. Nothing in this
+    repo pages a human yet (no notification channel has been chosen), but
+    returning a structured list here means any caller can decide how to
+    route it (log aggregator, a future Slack/email hook, a dashboard) without
+    having to know the shape of each individual report.
+    """
+    alerts: list[dict[str, Any]] = []
+
+    degraded = df.attrs.get("degraded_mode") or {}
+    if any(degraded.values()):
+        alerts.append({
+            "severity": "critical",
+            "source": "degraded_mode",
+            "message": f"Pipeline ran in degraded mode: {degraded}",
+        })
+
+    quality_gate = df.attrs.get("quality_gate") or {}
+    if quality_gate and not quality_gate.get("skipped") and not quality_gate.get("passed", True):
+        failed = [name for name, c in quality_gate.get("checks", {}).items() if not c["passed"]]
+        alerts.append({
+            "severity": "critical",
+            "source": "quality_gate",
+            "message": f"Quality gate failed: {failed}",
+        })
+
+    drift = df.attrs.get("drift_report") or {}
+    if drift.get("drift_detected"):
+        alerts.append({
+            "severity": "warning",
+            "source": "drift",
+            "message": (
+                f"Feature drift detected: {drift.get('n_critical', 0)} critical, "
+                f"{drift.get('n_warning', 0)} warning feature(s)."
+            ),
+        })
+
+    final_stability = df.attrs.get("final_stability_report") or {}
+    consistency = final_stability.get("segment_consistency_rate")
+    if consistency is not None and not np.isnan(consistency) and consistency < 0.5:
+        alerts.append({
+            "severity": "warning",
+            "source": "final_stability",
+            "message": (
+                f"Final segment assignment is seed-sensitive: only "
+                f"{consistency:.1%} of active agents got the same segment "
+                f"across {final_stability.get('n_seeds', 0)} seeds."
+            ),
+        })
+
+    return alerts
 
 
 def _load_reference_list(path: str, label: str) -> pd.DataFrame | None:
@@ -528,6 +679,15 @@ def run_extrafloat_segmentation(
             quality_gate_report["checks"],
         )
 
+    # ── Step 5c: Structured Alerts ────────────────────────────────────────────
+    # Rolls degraded_mode/quality_gate/drift/final_stability into one list so
+    # a caller can route it without knowing each report's shape individually.
+    alerts = _collect_alerts(features_df)
+    features_df.attrs["alerts"] = alerts
+    for alert in alerts:
+        log_fn = logger.critical if alert["severity"] == "critical" else logger.warning
+        log_fn("run_extrafloat_segmentation: ALERT [%s/%s] %s", alert["severity"], alert["source"], alert["message"])
+
     # ── Step 6: Join MSISDN + Trim Output ────────────────────────────────────
     logger.info("run_extrafloat_segmentation: step 6 — output trimming.")
     features_df = _join_msisdn(features_df, df)
@@ -553,6 +713,7 @@ def run_extrafloat_segmentation(
             )
 
     _maybe_save_output(result, cfg)
+    _maybe_save_run_manifest(result, cfg, n_input_rows=len(agents_df))
 
     n_segments = result[seg_col].nunique() if seg_col in result.columns else 0
     logger.info(
@@ -835,8 +996,17 @@ def main(argv: list[str] | None = None) -> None:
             f"{final_stability['n_active']} active agents)"
         )
 
+    alerts = result.attrs.get("alerts", [])
+    if alerts:
+        print(f"\nAlerts ({len(alerts)}):")
+        for alert in alerts:
+            print(f"  [{alert['severity'].upper()}/{alert['source']}] {alert['message']}")
+
     out_path = os.path.join(args.output, "agent_segments.csv")
     print(f"\nOutput written to: {out_path}  ({len(result):,} agents)")
+    if config.get("output", {}).get("save_run_manifest", True):
+        manifest_path = os.path.join(args.output, "run_manifest.json")
+        print(f"Run manifest written to: {manifest_path}")
 
 
 if __name__ == "__main__":

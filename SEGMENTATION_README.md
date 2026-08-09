@@ -123,6 +123,35 @@ Required input columns are listed in `extrafloat_segmentation_features.REQUIRED_
 - **Drift detection**: PSI/KL divergence of input features against a saved
   baseline (`extrafloat_segmentation_drift.py`), wired into orchestration
   step 1b when `drift.baseline_path` is configured.
+- **Run manifests** (`output.save_run_manifest`, default `True`, written
+  alongside `agent_segments.csv` as `run_manifest.json` whenever
+  `output.output_dir` is set): records the resolved config, package
+  versions, git commit SHA, input/output row counts, and every report
+  above (stability, drift, quality gate, degraded mode) for a given run —
+  so a credit-tier decision can be traced back to exactly what produced
+  it. See `_build_run_manifest()`.
+- **Structured alerts** (`result.attrs["alerts"]`, always computed): rolls
+  degraded-mode/quality-gate/drift/final-stability findings into a flat
+  list of `{severity, source, message}` dicts. No notification channel
+  (Slack/email/etc.) is wired up yet — that's a deliberate open item, see
+  below — but any caller can consume this list without knowing the shape
+  of each individual report. The CLI prints these; see `_collect_alerts()`.
+
+## What data actually feeds this pipeline
+
+`transaction_capacity_features_sample.txt` (repo root) shows the real MTN
+MoMo KPI-mart schema: `agent_msisdn`, `snapshot_dt`, `agent_profile`,
+`account_balance`, `average_balance`, `commission`, and
+`cash_out`/`cash_in`/`payment` × `vol`/`value`/`peers`/`comm`/`cust` split
+into 1m/3m/6m windows, plus `cust_1m/3m/6m` and `vol_1m/3m/6m` totals
+(~57 columns). That sample is only 4 agents on a single snapshot date
+(2025-11-15), with no `agent_category`/whitelist ground-truth column and no
+`voucher_volume_1m` column (the dormant-detection composite score already
+degrades gracefully when that column is absent). It confirms the schema but
+is not enough to validate anything statistically — there is currently no
+real multi-month or labeled dataset available in this repo to calibrate
+against, which is why the two remaining rigor items below are deliberately
+un-started rather than half-built against nothing.
 
 ## Integration boundary
 
@@ -138,11 +167,21 @@ document intentionally does not describe the limit engine's internals.
 
 ## Known limitations / open items
 
-- Business segment boundaries and composite-score weights are hand-set
-  defaults; the ARI-based validation against ground truth exists but is
-  opt-in, not automatic.
-- No temporal / out-of-time validation yet (month-over-month tier-churn
-  checking) — needs real longitudinal data to build and calibrate.
-- No formal packaging (`src/` layout, `pyproject.toml`) — this is still a
-  flat script collection at the repo root, alongside legacy exploratory
-  `cl_file*.txt`/`file*.txt` dumps that fed the original refactor.
+- **Blocked on real data** — deliberately not started, not half-built:
+  - Business segment boundaries and composite-score weights are hand-set
+    defaults; `clustering.optimize_composite_weights` runs an ARI-based
+    grid search against `agent_category` ground truth, but flipping it on
+    by default needs a real labeled dataset to validate the result isn't
+    worse than the hand-set weights — none exists in this repo yet.
+  - No temporal / out-of-time validation (month-over-month tier-churn
+    checking) — needs real multi-month snapshots to build and calibrate
+    against; nothing in this repo currently has more than one snapshot date.
+- **Not attempted this pass** — no formal packaging (`src/` layout,
+  `pyproject.toml`): this is still a flat script collection at the repo
+  root, alongside legacy exploratory `cl_file*.txt`/`file*.txt` dumps that
+  fed the original refactor and a concurrently in-flight branch
+  (`pd-model-review`) touching the same file layout, which makes a
+  repo-wide restructure a poor fit for an unreviewed drive-by change.
+- No notification channel (Slack/email/PagerDuty) is wired to the
+  structured alerts in `result.attrs["alerts"]` — the channel choice needs
+  a human decision, not a default guess.
