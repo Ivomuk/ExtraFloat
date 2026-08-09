@@ -58,6 +58,13 @@ from extrafloat_segmentation_validation import (
     run_quality_gate,
     DEFAULT_QUALITY_GATE_CONFIG,
 )
+from extrafloat_segmentation_drift import build_tier_drift_report
+from extrafloat_segmentation_scoring import (
+    compute_agent_capacity,
+    load_scorecard,
+    validate_scorecard,
+    DEFAULT_SCORING_CONFIG,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -78,6 +85,13 @@ SEGMENT_OUTPUT_COLUMNS: tuple[str, ...] = (
     "tier",
     "tier_sub_label",
     "safety_flags",
+    # ── Deterministic capacity scoring (opt-in; see scoring.scorecard_path) ──
+    "capacity_score",
+    "capacity_tier_raw",
+    "capacity_tier",
+    "capacity_safety_flags",
+    "scorecard_version",
+    "cutoff_version",
 )
 
 INTERMEDIATE_COLUMNS: tuple[str, ...] = (
@@ -138,6 +152,23 @@ DEFAULT_SEGMENTATION_CONFIG: dict[str, Any] = {
     },
     "quality_gate": {
         **DEFAULT_QUALITY_GATE_CONFIG,
+    },
+    "scoring": {
+        **DEFAULT_SCORING_CONFIG,
+        # Path to a versioned scorecard JSON produced by
+        # calibrate_capacity_scorecard (typically via calibrate_scorecard.py).
+        # Empty string (default) means the deterministic capacity_score /
+        # capacity_tier columns are NOT computed and the run behaves exactly
+        # as before this feature was added — this is an opt-in shadow-run
+        # addition alongside the existing ensemble-cluster `segment`/`tier`,
+        # not a replacement for them yet. Point this at a reviewed scorecard
+        # to start producing capacity_tier, and set allow_missing_scorecard
+        # to False once a scorecard is the source of truth for production.
+        "scorecard_path": "",
+        # When True (default) a configured-but-missing scorecard file only
+        # logs a warning and skips capacity scoring. Set False to hard-fail
+        # instead, once a scorecard is required for a given deployment.
+        "allow_missing_scorecard": True,
     },
 }
 
@@ -308,6 +339,7 @@ def _build_run_manifest(
         "stability_report": df.attrs.get("stability_report"),
         "final_stability_report": df.attrs.get("final_stability_report"),
         "drift_report": df.attrs.get("drift_report"),
+        "tier_drift_report": df.attrs.get("tier_drift_report"),
         "quality_gate": df.attrs.get("quality_gate"),
         "degraded_mode": df.attrs.get("degraded_mode"),
         "alerts": df.attrs.get("alerts", []),
@@ -379,6 +411,17 @@ def _collect_alerts(df: pd.DataFrame) -> list[dict[str, Any]]:
                 f"Final segment assignment is seed-sensitive: only "
                 f"{consistency:.1%} of active agents got the same segment "
                 f"across {final_stability.get('n_seeds', 0)} seeds."
+            ),
+        })
+
+    tier_drift = df.attrs.get("tier_drift_report") or {}
+    if tier_drift.get("drift_detected"):
+        alerts.append({
+            "severity": "warning",
+            "source": "tier_drift",
+            "message": (
+                f"capacity_tier proportions diverged from scorecard "
+                f"calibration expectations (PSI={tier_drift.get('psi', float('nan')):.4f})."
             ),
         })
 
@@ -630,6 +673,68 @@ def run_extrafloat_segmentation(
     features_df["tier_sub_label"] = features_df["ensemble_cluster"].map(tier_map["sub_label"])
     features_df["safety_flags"] = features_df["ensemble_cluster"].map(tier_map["safety_flags"])
 
+    # ── Step 4b: Deterministic Capacity Scoring (optional, opt-in) ───────────
+    # Shadow-run alongside the ensemble-cluster segment/tier above: computes
+    # capacity_score/capacity_tier from a frozen, versioned scorecard rather
+    # than a live population-relative ranking, so an agent's tier no longer
+    # moves just because other agents' scores shifted. Only runs when
+    # scoring.scorecard_path is configured — see DEFAULT_SEGMENTATION_CONFIG.
+    scoring_cfg = cfg.get("scoring", {})
+    scorecard_path: str = scoring_cfg.get("scorecard_path", "")
+    if scorecard_path:
+        if not os.path.isfile(scorecard_path):
+            if scoring_cfg.get("allow_missing_scorecard", True):
+                logger.warning(
+                    "run_extrafloat_segmentation: step 4b — scorecard_path "
+                    "'%s' does not exist; skipping capacity scoring "
+                    "(allow_missing_scorecard=True).",
+                    scorecard_path,
+                )
+            else:
+                raise ValueError(
+                    f"run_extrafloat_segmentation: scoring.scorecard_path "
+                    f"'{scorecard_path}' does not exist and "
+                    f"allow_missing_scorecard=False."
+                )
+        else:
+            logger.info(
+                "run_extrafloat_segmentation: step 4b — deterministic "
+                "capacity scoring via scorecard '%s'.",
+                scorecard_path,
+            )
+            scorecard = load_scorecard(scorecard_path)
+            is_dormant = (
+                features_df["cluster_round2"].isna()
+                if "cluster_round2" in features_df.columns
+                else pd.Series(False, index=features_df.index)
+            )
+            capacity_df = compute_agent_capacity(features_df, scorecard, is_dormant=is_dormant)
+            features_df = pd.concat([features_df, capacity_df], axis=1)
+
+            expected_props = scorecard.get("calibration_metadata", {}).get(
+                "expected_tier_proportions"
+            )
+            if expected_props:
+                tier_drift_report = build_tier_drift_report(
+                    expected_proportions=expected_props,
+                    actual_labels=features_df["capacity_tier"],
+                    categories=scorecard.get("tiers", BUSINESS_SEGMENTS),
+                    config=cfg.get("drift"),
+                )
+                features_df.attrs["tier_drift_report"] = tier_drift_report
+                if tier_drift_report.get("drift_detected"):
+                    logger.warning(
+                        "run_extrafloat_segmentation: CAPACITY TIER DRIFT "
+                        "DETECTED — live capacity_tier proportions diverge "
+                        "from scorecard calibration (PSI=%.4f).",
+                        tier_drift_report.get("psi", float("nan")),
+                    )
+    elif not scoring_cfg.get("allow_missing_scorecard", True):
+        raise ValueError(
+            "run_extrafloat_segmentation: scoring.allow_missing_scorecard=False "
+            "but scoring.scorecard_path is empty."
+        )
+
     # ── Step 5: Reference List Enrichment (optional) ─────────────────────────
     wl = whitelist_df
     bl = blacklist_df
@@ -857,6 +962,15 @@ examples:
         "--drift", metavar="JSON",
         help='Drift-detection config as a JSON string, e.g. \'{"baseline_path": "baseline.csv"}\'.',
     )
+    p.add_argument(
+        "--scorecard", metavar="PATH", default="",
+        help=(
+            "Path to a versioned capacity scorecard JSON (from "
+            "calibrate_scorecard.py). When set, computes deterministic "
+            "capacity_score/capacity_tier columns alongside the existing "
+            "ensemble-cluster segment/tier."
+        ),
+    )
 
     # ── Logging ───────────────────────────────────────────────────────────────
     p.add_argument(
@@ -943,6 +1057,9 @@ def main(argv: list[str] | None = None) -> None:
     if drift_override:
         config.setdefault("drift", {}).update(drift_override)
 
+    if args.scorecard:
+        config.setdefault("scoring", {})["scorecard_path"] = args.scorecard
+
     # ── Run ───────────────────────────────────────────────────────────────────
     try:
         result = run_extrafloat_segmentation_from_config(config)
@@ -972,6 +1089,14 @@ def main(argv: list[str] | None = None) -> None:
             f"  critical={drift.get('n_critical', 0)}"
             f"  warning={drift.get('n_warning', 0)}"
             f"  [{status}]"
+        )
+
+    tier_drift = result.attrs.get("tier_drift_report", {})
+    if tier_drift:
+        tier_status = "DRIFT DETECTED" if tier_drift.get("drift_detected") else tier_drift.get("status", "stable")
+        print(
+            f"\nCapacity tier drift  psi={tier_drift.get('psi', float('nan')):.4f}"
+            f"  [{tier_status}]"
         )
 
     quality_gate = result.attrs.get("quality_gate", {})

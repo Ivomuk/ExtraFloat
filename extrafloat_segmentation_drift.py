@@ -106,6 +106,32 @@ def _psi_status(psi: float, warn: float, critical: float) -> str:
     return PSI_STABLE
 
 
+def _psi_from_proportions(
+    expected_pct: np.ndarray,
+    actual_pct: np.ndarray,
+    eps: float = 1e-4,
+) -> float:
+    """Core PSI arithmetic shared by :func:`compute_psi` (binned numeric
+    distributions) and :func:`compute_categorical_psi` (tier proportions).
+
+    Parameters
+    ----------
+    expected_pct, actual_pct : Un-smoothed proportion arrays (same length,
+        same category/bin order), each summing to ~1 before epsilon smoothing.
+    eps : Additive smoothing to avoid log(0) / 0-division, renormalised away.
+
+    Returns
+    -------
+    float  PSI value >= 0.
+    """
+    exp_pct = expected_pct + eps
+    act_pct = actual_pct + eps
+    exp_pct = exp_pct / exp_pct.sum()
+    act_pct = act_pct / act_pct.sum()
+    psi = float(np.sum((act_pct - exp_pct) * np.log(act_pct / exp_pct)))
+    return max(0.0, psi)  # PSI is non-negative; guard against floating-point underflow
+
+
 def _quantile_bin_edges(values: np.ndarray, n_bins: int) -> np.ndarray:
     """Return *n_bins* equal-frequency bin edges derived from *values*.
 
@@ -169,15 +195,10 @@ def compute_psi(
     exp_counts = np.histogram(expected, bins=edges)[0].astype(float)
     act_counts = np.histogram(actual, bins=edges)[0].astype(float)
 
-    exp_pct = (exp_counts / len(expected)) + eps
-    act_pct = (act_counts / len(actual)) + eps
+    exp_pct_raw = exp_counts / len(expected)
+    act_pct_raw = act_counts / len(actual)
 
-    # Renormalise after epsilon addition
-    exp_pct /= exp_pct.sum()
-    act_pct /= act_pct.sum()
-
-    psi = float(np.sum((act_pct - exp_pct) * np.log(act_pct / exp_pct)))
-    return max(0.0, psi)  # PSI is non-negative; guard against floating-point underflow
+    return _psi_from_proportions(exp_pct_raw, act_pct_raw, eps=eps)
 
 
 def compute_kl_divergence(
@@ -452,4 +473,126 @@ def build_drift_report(
         overall_psi,
         report["drift_detected"],
     )
+    return report
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PUBLIC: CATEGORICAL (TIER-PROPORTION) DRIFT
+#
+# The distributions above are all numeric KPI *inputs*. This section monitors
+# the *output* of the deterministic capacity scorecard
+# (extrafloat_segmentation_scoring.py): whether the live proportion of agents
+# landing in each capacity_tier still matches what the scorecard's
+# calibration expected. A scorecard's cutoffs are frozen, so unlike the old
+# live-quantile tiering mechanism they will NOT silently re-balance as the
+# population drifts — that's the point (reproducibility), but it also means
+# a real population shift now shows up as tier-proportion drift instead of
+# being invisibly absorbed, and this check is how that shift gets surfaced.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def compute_categorical_psi(
+    expected_proportions: dict[str, float],
+    actual_labels: pd.Series,
+    categories: list[str] | tuple[str, ...],
+) -> float:
+    """Compute PSI between an expected categorical distribution and observed labels.
+
+    Parameters
+    ----------
+    expected_proportions : Mapping category -> expected proportion (need not
+                            sum to exactly 1.0; missing categories default to 0).
+    actual_labels : Observed category labels (e.g. a `capacity_tier` column).
+                     NaNs are dropped before computing proportions.
+    categories : Full ordered category set (e.g. BUSINESS_SEGMENTS) — defines
+                 both the expected-proportion lookup order and which observed
+                 labels are counted.
+
+    Returns
+    -------
+    float  PSI value >= 0, or NaN if *actual_labels* has no non-NaN values.
+    """
+    categories = list(categories)
+    actual_clean = actual_labels.dropna()
+    if len(actual_clean) == 0:
+        logger.debug("compute_categorical_psi: no non-NaN actual labels — returning NaN.")
+        return float("nan")
+
+    exp_pct_raw = np.array([float(expected_proportions.get(c, 0.0)) for c in categories], dtype=float)
+    counts = actual_clean.value_counts()
+    act_pct_raw = np.array([float(counts.get(c, 0)) / len(actual_clean) for c in categories], dtype=float)
+
+    return _psi_from_proportions(exp_pct_raw, act_pct_raw)
+
+
+def build_tier_drift_report(
+    expected_proportions: dict[str, float],
+    actual_labels: pd.Series,
+    categories: list[str] | tuple[str, ...],
+    config: dict | None = None,
+) -> dict[str, Any]:
+    """Compute a structured drift report comparing tier proportions to calibration expectations.
+
+    Mirrors the shape of :func:`build_drift_report` but for a single
+    categorical distribution rather than a set of numeric features.
+
+    Parameters
+    ----------
+    expected_proportions : From `scorecard["calibration_metadata"]["expected_tier_proportions"]`.
+    actual_labels : Live `capacity_tier` column from the current run.
+    categories : Full ordered tier list, e.g. `scorecard["tiers"]`.
+    config : Drift config dict (reuses `psi_warn_threshold`/`psi_critical_threshold`
+              from DEFAULT_DRIFT_CONFIG).
+
+    Returns
+    -------
+    dict with keys: psi, status, categories, expected_proportions,
+    actual_proportions, n_actual, drift_detected (True iff status == "critical").
+    """
+    cfg = _get_drift_config(config)
+    warn_thr: float = float(cfg.get("psi_warn_threshold", 0.10))
+    crit_thr: float = float(cfg.get("psi_critical_threshold", 0.25))
+
+    categories = list(categories)
+    actual_clean = actual_labels.dropna()
+    n_actual = len(actual_clean)
+
+    expected_out = {c: float(expected_proportions.get(c, 0.0)) for c in categories}
+
+    if n_actual == 0:
+        actual_out = {c: 0.0 for c in categories}
+        psi = float("nan")
+    else:
+        counts = actual_clean.value_counts()
+        actual_out = {c: float(counts.get(c, 0)) / n_actual for c in categories}
+        psi = compute_categorical_psi(expected_proportions, actual_labels, categories)
+
+    status = _psi_status(psi, warn_thr, crit_thr)
+
+    report: dict[str, Any] = {
+        "psi": psi,
+        "status": status,
+        "categories": categories,
+        "expected_proportions": expected_out,
+        "actual_proportions": actual_out,
+        "n_actual": n_actual,
+        "drift_detected": status == PSI_CRITICAL,
+    }
+
+    if status == PSI_CRITICAL:
+        logger.warning(
+            "build_tier_drift_report: CRITICAL tier-proportion drift — PSI=%.4f "
+            "(threshold=%.2f). Live capacity_tier proportions no longer match "
+            "the scorecard's calibration expectations.",
+            psi, crit_thr,
+        )
+    elif status == PSI_WARNING:
+        logger.info(
+            "build_tier_drift_report: WARNING tier-proportion drift — PSI=%.4f "
+            "(threshold=%.2f).",
+            psi, warn_thr,
+        )
+    else:
+        logger.info("build_tier_drift_report: PSI=%.4f status=%s", psi, status)
+
     return report

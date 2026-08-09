@@ -945,6 +945,75 @@ class TestDriftModule:
             load_drift_baseline("/nonexistent/path/baseline.csv")
 
 
+class TestCategoricalDrift:
+    """Tests for extrafloat_segmentation_drift.compute_categorical_psi /
+    build_tier_drift_report — monitors capacity_tier proportions against a
+    scorecard's frozen calibration expectations."""
+
+    def test_identical_distributions_have_zero_psi(self):
+        from extrafloat_segmentation_drift import compute_categorical_psi
+
+        labels = pd.Series(["A"] * 50 + ["B"] * 50)
+        expected = {"A": 0.5, "B": 0.5}
+        psi = compute_categorical_psi(expected, labels, ["A", "B"])
+        assert psi == pytest.approx(0.0, abs=1e-6)
+
+    def test_shifted_distribution_has_positive_psi(self):
+        from extrafloat_segmentation_drift import compute_categorical_psi
+
+        labels = pd.Series(["A"] * 90 + ["B"] * 10)
+        expected = {"A": 0.5, "B": 0.5}
+        psi = compute_categorical_psi(expected, labels, ["A", "B"])
+        assert psi > 0.0
+
+    def test_missing_category_defaults_to_zero_expected(self):
+        from extrafloat_segmentation_drift import compute_categorical_psi
+
+        labels = pd.Series(["A"] * 50 + ["B"] * 50)
+        expected = {"A": 1.0}  # "B" absent -> expected 0.0
+        psi = compute_categorical_psi(expected, labels, ["A", "B"])
+        assert psi > 0.0
+
+    def test_empty_labels_return_nan(self):
+        from extrafloat_segmentation_drift import compute_categorical_psi
+
+        labels = pd.Series([], dtype="object")
+        psi = compute_categorical_psi({"A": 1.0}, labels, ["A"])
+        assert np.isnan(psi)
+
+    def test_nan_labels_dropped_before_computing(self):
+        from extrafloat_segmentation_drift import compute_categorical_psi
+
+        labels = pd.Series(["A"] * 50 + ["B"] * 50 + [np.nan] * 20)
+        expected = {"A": 0.5, "B": 0.5}
+        psi = compute_categorical_psi(expected, labels, ["A", "B"])
+        assert psi == pytest.approx(0.0, abs=1e-6)
+
+    def test_build_tier_drift_report_structure(self):
+        from extrafloat_segmentation_drift import build_tier_drift_report
+
+        labels = pd.Series(["A"] * 50 + ["B"] * 50)
+        expected = {"A": 0.5, "B": 0.5}
+        report = build_tier_drift_report(expected, labels, ["A", "B"])
+        for key in ("psi", "status", "categories", "expected_proportions",
+                    "actual_proportions", "n_actual", "drift_detected"):
+            assert key in report
+        assert report["n_actual"] == 100
+        assert report["drift_detected"] is False
+
+    def test_build_tier_drift_report_flags_critical_shift(self):
+        from extrafloat_segmentation_drift import build_tier_drift_report
+
+        labels = pd.Series(["A"] * 99 + ["B"])
+        expected = {"A": 0.1, "B": 0.9}
+        report = build_tier_drift_report(
+            expected, labels, ["A", "B"],
+            config={"psi_warn_threshold": 0.10, "psi_critical_threshold": 0.25},
+        )
+        assert report["status"] == "critical"
+        assert report["drift_detected"] is True
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Optional dependency guard rails (require_hdbscan / require_umap)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1293,6 +1362,23 @@ class TestCollectAlerts:
         }
         assert _collect_alerts(df) == []
 
+    def test_tier_drift_detected_produces_warning_alert(self):
+        from run_extrafloat_segmentation import _collect_alerts
+
+        df = self._base_df()
+        df.attrs["tier_drift_report"] = {"drift_detected": True, "psi": 0.9, "status": "critical"}
+        alerts = _collect_alerts(df)
+        assert len(alerts) == 1
+        assert alerts[0]["severity"] == "warning"
+        assert alerts[0]["source"] == "tier_drift"
+
+    def test_tier_drift_stable_produces_no_alert(self):
+        from run_extrafloat_segmentation import _collect_alerts
+
+        df = self._base_df()
+        df.attrs["tier_drift_report"] = {"drift_detected": False, "psi": 0.01, "status": "stable"}
+        assert _collect_alerts(df) == []
+
 
 class TestRunManifest:
     """Tests for _build_run_manifest / _maybe_save_run_manifest /
@@ -1323,7 +1409,7 @@ class TestRunManifest:
             "generated_at_utc", "git_commit_sha", "package_versions", "config",
             "n_input_rows", "n_output_rows", "n_distinct_segments",
             "stability_report", "final_stability_report", "drift_report",
-            "quality_gate", "degraded_mode", "alerts",
+            "tier_drift_report", "quality_gate", "degraded_mode", "alerts",
         ):
             assert key in manifest, f"manifest missing key '{key}'"
         assert manifest["n_input_rows"] == 3
@@ -1360,3 +1446,123 @@ class TestRunManifest:
         _maybe_save_run_manifest(df, cfg, n_input_rows=1)
 
         assert not (tmp_path / "run_manifest.json").exists()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Deterministic capacity scoring orchestration (opt-in, shadow-run alongside
+# the existing ensemble-cluster segment/tier — see DEFAULT_SEGMENTATION_CONFIG
+# ["scoring"]).
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestScoringOrchestration:
+    """Tests for the run_extrafloat_segmentation "step 4b" capacity-scoring
+    wiring: opt-in via scoring.scorecard_path, backward compatible when
+    absent, hard-fails when explicitly required but missing."""
+
+    def _small_agents_df(self, n=80):
+        return _make_agents_df(n)
+
+    @staticmethod
+    def _no_output_cfg(**overrides) -> dict:
+        """Config dict with output_dir disabled, so these tests don't write
+        agent_segments.csv / run_manifest.json into the repo working tree."""
+        cfg = {"output": {"output_dir": ""}}
+        cfg.update(overrides)
+        return cfg
+
+    def test_default_config_has_scoring_section(self):
+        from run_extrafloat_segmentation import DEFAULT_SEGMENTATION_CONFIG
+
+        assert "scoring" in DEFAULT_SEGMENTATION_CONFIG
+        assert DEFAULT_SEGMENTATION_CONFIG["scoring"]["scorecard_path"] == ""
+        assert DEFAULT_SEGMENTATION_CONFIG["scoring"]["allow_missing_scorecard"] is True
+
+    def test_no_scorecard_path_produces_no_capacity_columns(self):
+        from run_extrafloat_segmentation import run_extrafloat_segmentation
+
+        agents_df = self._small_agents_df()
+        result = run_extrafloat_segmentation(agents_df, config=self._no_output_cfg())
+        for col in ("capacity_score", "capacity_tier", "capacity_tier_raw"):
+            assert col not in result.columns
+
+    def test_missing_scorecard_file_with_hard_fail_raises(self):
+        from run_extrafloat_segmentation import run_extrafloat_segmentation
+
+        agents_df = self._small_agents_df()
+        cfg = self._no_output_cfg(
+            scoring={"scorecard_path": "/nonexistent/scorecard.json", "allow_missing_scorecard": False}
+        )
+        with pytest.raises(ValueError):
+            run_extrafloat_segmentation(agents_df, config=cfg)
+
+    def test_missing_scorecard_file_default_skips_gracefully(self):
+        from run_extrafloat_segmentation import run_extrafloat_segmentation
+
+        agents_df = self._small_agents_df()
+        cfg = self._no_output_cfg(scoring={"scorecard_path": "/nonexistent/scorecard.json"})
+        result = run_extrafloat_segmentation(agents_df, config=cfg)  # should not raise
+        assert "capacity_tier" not in result.columns
+
+    def test_configured_scorecard_produces_capacity_columns(self, tmp_path):
+        from run_extrafloat_segmentation import run_extrafloat_segmentation
+        from extrafloat_segmentation_features import prepare_features
+        from extrafloat_segmentation_scoring import calibrate_capacity_scorecard, save_scorecard
+
+        agents_df = self._small_agents_df()
+        dev_df, _, _, _ = prepare_features(agents_df)
+        scorecard = calibrate_capacity_scorecard(dev_df, population_description="test fixture")
+        scorecard_path = str(tmp_path / "scorecard.json")
+        save_scorecard(scorecard, scorecard_path)
+
+        cfg = self._no_output_cfg(scoring={"scorecard_path": scorecard_path})
+        result = run_extrafloat_segmentation(agents_df, config=cfg)
+
+        for col in ("capacity_score", "capacity_tier_raw", "capacity_tier",
+                    "capacity_safety_flags", "scorecard_version", "cutoff_version"):
+            assert col in result.columns
+        assert result["capacity_tier"].isin(scorecard["tiers"]).all()
+        # Legacy ensemble-cluster segment/tier still present — shadow-run, not a replacement.
+        assert "segment" in result.columns
+        assert "tier" in result.columns
+
+    def test_capacity_tier_deterministic_across_different_populations(self, tmp_path):
+        """The whole point: an agent's capacity_tier must not depend on which
+        other agents are in the same run, unlike the old ensemble segment/tier."""
+        from run_extrafloat_segmentation import run_extrafloat_segmentation
+        from extrafloat_segmentation_features import prepare_features
+        from extrafloat_segmentation_scoring import calibrate_capacity_scorecard, save_scorecard
+
+        agents_df = self._small_agents_df(80)
+        dev_df, _, _, _ = prepare_features(agents_df)
+        scorecard = calibrate_capacity_scorecard(dev_df, population_description="test fixture")
+        scorecard_path = str(tmp_path / "scorecard.json")
+        save_scorecard(scorecard, scorecard_path)
+
+        cfg = self._no_output_cfg(scoring={"scorecard_path": scorecard_path})
+        full_result = run_extrafloat_segmentation(agents_df, config=cfg)
+
+        subset_df = agents_df.iloc[:40].reset_index(drop=True)
+        subset_result = run_extrafloat_segmentation(subset_df, config=cfg)
+
+        full_by_msisdn = full_result.set_index("agent_msisdn")["capacity_tier"]
+        subset_by_msisdn = subset_result.set_index("agent_msisdn")["capacity_tier"]
+        common = full_by_msisdn.index.intersection(subset_by_msisdn.index)
+        assert len(common) > 0
+        assert (full_by_msisdn.loc[common] == subset_by_msisdn.loc[common]).all()
+
+    def test_tier_drift_report_attached_when_scorecard_used(self, tmp_path):
+        from run_extrafloat_segmentation import run_extrafloat_segmentation
+        from extrafloat_segmentation_features import prepare_features
+        from extrafloat_segmentation_scoring import calibrate_capacity_scorecard, save_scorecard
+
+        agents_df = self._small_agents_df()
+        dev_df, _, _, _ = prepare_features(agents_df)
+        scorecard = calibrate_capacity_scorecard(dev_df, population_description="test fixture")
+        scorecard_path = str(tmp_path / "scorecard.json")
+        save_scorecard(scorecard, scorecard_path)
+
+        cfg = self._no_output_cfg(scoring={"scorecard_path": scorecard_path})
+        result = run_extrafloat_segmentation(agents_df, config=cfg)
+        assert "tier_drift_report" in result.attrs
+        assert "psi" in result.attrs["tier_drift_report"]
