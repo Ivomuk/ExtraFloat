@@ -242,8 +242,10 @@ class TestPrepareFeatures:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-class TestClusteringPipeline:
-    """Tests for extrafloat_segmentation_pipeline.run_clustering_pipeline."""
+class TestDiagnosticClustering:
+    """Tests for extrafloat_segmentation_pipeline.run_diagnostic_clustering —
+    GMM/HDBSCAN diagnostics only. Never assigns a business tier; that is
+    extrafloat_segmentation_scoring.py's job."""
 
     def _get_small_inputs(self, n=80):
         from extrafloat_segmentation_features import prepare_features
@@ -253,30 +255,26 @@ class TestClusteringPipeline:
         return feat_df, X_pca, sel_cols
 
     def test_output_has_required_columns(self):
-        from extrafloat_segmentation_pipeline import run_clustering_pipeline
+        from extrafloat_segmentation_pipeline import run_diagnostic_clustering
 
         feat_df, X_pca, sel_cols = self._get_small_inputs()
-        result = run_clustering_pipeline(feat_df, X_pca, sel_cols)
+        result = run_diagnostic_clustering(feat_df, X_pca, sel_cols)
 
-        for col in ("cluster_round1", "ensemble_cluster", "segment"):
+        for col in ("diag_cluster_id_gmm", "diag_ensemble_cluster", "diag_hdb_tier", "diag_is_anomaly"):
             assert col in result.columns, f"Missing column: {col}"
 
-    def test_segment_col_values_are_valid(self):
-        from extrafloat_segmentation_pipeline import BUSINESS_SEGMENTS, run_clustering_pipeline
+    def test_no_business_tier_columns_produced(self):
+        """Diagnostics must never produce a segment/tier/capacity_tier column itself."""
+        from extrafloat_segmentation_pipeline import run_diagnostic_clustering
 
         feat_df, X_pca, sel_cols = self._get_small_inputs()
-        result = run_clustering_pipeline(feat_df, X_pca, sel_cols)
+        result = run_diagnostic_clustering(feat_df, X_pca, sel_cols)
 
-        seg_values = result["segment"].dropna().unique()
-        invalid = [s for s in seg_values if s not in BUSINESS_SEGMENTS]
-        assert not invalid, f"Invalid segment values found: {invalid}"
+        for col in ("segment", "tier", "capacity_tier"):
+            assert col not in result.columns, f"Diagnostics unexpectedly produced '{col}'"
 
-    def test_dormant_agents_get_below_threshold(self):
-        from extrafloat_segmentation_pipeline import (
-            BUSINESS_SEGMENTS,
-            DORMANT_FILL_LABEL,
-            run_clustering_pipeline,
-        )
+    def test_dormant_agents_get_dormant_fill_label(self):
+        from extrafloat_segmentation_pipeline import DORMANT_FILL_LABEL, run_diagnostic_clustering
 
         feat_df, X_pca, sel_cols = self._get_small_inputs(80)
         # Zero out all multi-product inactivity cols so composite score = 0
@@ -285,56 +283,45 @@ class TestClusteringPipeline:
             if col in feat_df.columns:
                 feat_df.loc[feat_df.index[:10], col] = 0.0
 
-        result = run_clustering_pipeline(feat_df, X_pca, sel_cols)
-        dormant_segs = result.iloc[:10]["segment"].unique()
+        result = run_diagnostic_clustering(feat_df, X_pca, sel_cols)
+        dormant_ensembles = result.iloc[:10]["diag_ensemble_cluster"].unique()
 
-        for seg in dormant_segs:
-            assert seg == BUSINESS_SEGMENTS[0], (
-                f"Dormant agent got segment '{seg}' instead of 'Below Threshold'"
+        for val in dormant_ensembles:
+            assert val == DORMANT_FILL_LABEL, (
+                f"Dormant agent got diag_ensemble_cluster '{val}' instead of '{DORMANT_FILL_LABEL}'"
             )
 
     def test_row_count_preserved(self):
-        from extrafloat_segmentation_pipeline import run_clustering_pipeline
+        from extrafloat_segmentation_pipeline import run_diagnostic_clustering
 
         feat_df, X_pca, sel_cols = self._get_small_inputs()
-        result = run_clustering_pipeline(feat_df, X_pca, sel_cols)
+        result = run_diagnostic_clustering(feat_df, X_pca, sel_cols)
         assert len(result) == len(feat_df)
 
     def test_mismatched_shapes_raise(self):
-        from extrafloat_segmentation_pipeline import run_clustering_pipeline
+        from extrafloat_segmentation_pipeline import run_diagnostic_clustering
 
         feat_df, X_pca, sel_cols = self._get_small_inputs(60)
         X_wrong = X_pca[: len(X_pca) // 2]
         with pytest.raises(ValueError):
-            run_clustering_pipeline(feat_df, X_wrong, sel_cols)
+            run_diagnostic_clustering(feat_df, X_wrong, sel_cols)
 
-    def test_business_segments_has_8_entries(self):
-        from extrafloat_segmentation_pipeline import BUSINESS_SEGMENTS
-
-        assert len(BUSINESS_SEGMENTS) == 8
-
-    def test_stability_report_in_attrs(self):
-        from extrafloat_segmentation_pipeline import DEFAULT_STABILITY_REPORT, run_clustering_pipeline
+    def test_is_anomaly_matches_hdb_noise_label(self):
+        from extrafloat_segmentation_pipeline import HDBSCAN_NOISE_LABEL, run_diagnostic_clustering
 
         feat_df, X_pca, sel_cols = self._get_small_inputs()
-        result = run_clustering_pipeline(feat_df, X_pca, sel_cols, config={"stability_n_seeds": 2})
-        assert "stability_report" in result.attrs, "stability_report missing from attrs"
+        result = run_diagnostic_clustering(feat_df, X_pca, sel_cols)
+        expected = result["diag_cluster_hdb_raw"] == HDBSCAN_NOISE_LABEL
+        assert (result["diag_is_anomaly"] == expected).all()
 
-    def test_stability_report_keys(self):
-        from extrafloat_segmentation_pipeline import run_clustering_pipeline
-
-        feat_df, X_pca, sel_cols = self._get_small_inputs()
-        result = run_clustering_pipeline(feat_df, X_pca, sel_cols, config={"stability_n_seeds": 2})
-        report = result.attrs.get("stability_report", {})
-        for key in ("silhouette_score", "ari_mean", "ari_std", "n_seeds"):
-            assert key in report, f"stability_report missing key '{key}'"
-
-    def test_stability_report_n_seeds(self):
-        from extrafloat_segmentation_pipeline import run_clustering_pipeline
+    def test_diag_degraded_mode_in_attrs(self):
+        from extrafloat_segmentation_pipeline import run_diagnostic_clustering
 
         feat_df, X_pca, sel_cols = self._get_small_inputs()
-        result = run_clustering_pipeline(feat_df, X_pca, sel_cols, config={"stability_n_seeds": 2})
-        assert result.attrs["stability_report"]["n_seeds"] == 2
+        result = run_diagnostic_clustering(feat_df, X_pca, sel_cols)
+        assert "diag_degraded_mode" in result.attrs
+        for key in ("hdbscan_unavailable", "umap_unavailable"):
+            assert key in result.attrs["diag_degraded_mode"]
 
     def test_hdb_tier_ranking_uses_business_kpi(self):
         """_map_hdb_to_tier should rank by total_value_1m not PC1 when available."""
@@ -342,8 +329,6 @@ class TestClusteringPipeline:
         from extrafloat_segmentation_pipeline import _map_hdb_to_tier
 
         n = 50
-        rng = np.random.RandomState(0)
-        # Two clusters: cluster 0 = low value, cluster 1 = high value
         hdb_labels = np.array([0] * 25 + [1] * 25)
         features_df_active = _make_agents_df(n)
         features_df_active = features_df_active.reset_index(drop=True)
@@ -352,15 +337,15 @@ class TestClusteringPipeline:
         )
         cfg = {"hdb_tier_ranking_cols": ["total_value_1m", "cash_out_value_1m", "commission"]}
         tiers = _map_hdb_to_tier(hdb_labels, features_df_active, cfg)
-        # cluster 0 (low value) should get a lower tier than cluster 1 (high value)
+        # cluster 0 (low value) should get a lower diagnostic label than cluster 1 (high value)
         tier_0 = tiers.iloc[0]
         tier_1 = tiers.iloc[25]
-        assert tier_0 != tier_1, "Both clusters got the same tier"
+        assert tier_0 != tier_1, "Both clusters got the same diagnostic label"
 
     def test_umap_fallback_when_not_available(self):
         """_get_active_umap returns array of correct shape even without umap."""
         import numpy as np
-        from extrafloat_segmentation_pipeline import _get_active_umap, _UMAP_AVAILABLE
+        from extrafloat_segmentation_pipeline import _get_active_umap
 
         rng = np.random.RandomState(42)
         X = rng.randn(40, 10)
@@ -369,23 +354,49 @@ class TestClusteringPipeline:
         assert result.shape[0] == 40
         assert result.shape[1] == 2
 
-    def test_optimize_weights_skipped_without_agent_category(self):
-        """optimize_composite_weights=True with no agent_category col → no crash, uses defaults."""
-        import pandas as pd
-        from extrafloat_segmentation_pipeline import _find_optimal_composite_weights
 
-        profile_means = pd.DataFrame(
-            {"commission": [1.0, 5.0, 10.0], "cash_out_value_1m": [2.0, 6.0, 12.0]},
-            index=["A", "B", "C"],
+class TestDiagnosticEnsembleStability:
+    """Tests for extrafloat_segmentation_pipeline.compute_diagnostic_ensemble_stability."""
+
+    def _get_small_inputs(self, n=80):
+        from extrafloat_segmentation_features import prepare_features
+        from extrafloat_segmentation_pipeline import _identify_dormant_mask, DEFAULT_CLUSTERING_CONFIG
+
+        df = _make_agents_df(n)
+        feat_df, _, X_pca, sel_cols = prepare_features(df)
+        active_mask = ~_identify_dormant_mask(feat_df, DEFAULT_CLUSTERING_CONFIG)
+        return feat_df, active_mask, sel_cols
+
+    def test_returns_expected_keys(self):
+        from extrafloat_segmentation_pipeline import compute_diagnostic_ensemble_stability
+
+        feat_df, active_mask, sel_cols = self._get_small_inputs()
+        report = compute_diagnostic_ensemble_stability(feat_df, active_mask, sel_cols, n_seeds=2)
+        for key in ("ensemble_consistency_rate", "ensemble_ari_mean", "ensemble_ari_std", "n_seeds", "n_active"):
+            assert key in report, f"report missing key '{key}'"
+        assert report["n_seeds"] == 2
+
+    def test_default_report_when_n_seeds_below_two(self):
+        from extrafloat_segmentation_pipeline import (
+            compute_diagnostic_ensemble_stability,
+            DEFAULT_DIAGNOSTIC_STABILITY_REPORT,
         )
-        features_df = _make_agents_df(30)
-        # Ensure agent_category is absent
-        if "agent_category" in features_df.columns:
-            features_df = features_df.drop(columns=["agent_category"])
-        ensemble_col = pd.Series(["A"] * 10 + ["B"] * 10 + ["C"] * 10)
-        cfg = {"composite_weights": {"value": 0.5, "activity": 0.3, "efficiency": 0.2}, "weight_grid_step": 0.5}
-        weights = _find_optimal_composite_weights(profile_means, features_df, ensemble_col, cfg)
-        assert set(weights.keys()) == {"value", "activity", "efficiency"}
+
+        feat_df, active_mask, sel_cols = self._get_small_inputs()
+        report = compute_diagnostic_ensemble_stability(feat_df, active_mask, sel_cols, n_seeds=1)
+        assert report == DEFAULT_DIAGNOSTIC_STABILITY_REPORT
+
+    def test_default_report_when_no_active_agents(self):
+        import pandas as pd
+        from extrafloat_segmentation_pipeline import (
+            compute_diagnostic_ensemble_stability,
+            DEFAULT_DIAGNOSTIC_STABILITY_REPORT,
+        )
+
+        feat_df, _, sel_cols = self._get_small_inputs()
+        no_active = pd.Series(False, index=feat_df.index)
+        report = compute_diagnostic_ensemble_stability(feat_df, no_active, sel_cols, n_seeds=2)
+        assert report == DEFAULT_DIAGNOSTIC_STABILITY_REPORT
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -428,65 +439,6 @@ class TestClusterPackProfiles:
         means_df = result["means"]["balances"]
         assert means_df.shape[0] == df["ensemble_cluster"].nunique()
         assert "account_balance" in means_df.columns
-
-
-class TestBuildClusterTiers:
-    """Tests for extrafloat_segmentation_profiling.build_cluster_tiers."""
-
-    def _make_scores(self):
-        scores = pd.DataFrame(
-            {
-                "cash_in": [2.5, 0.5, 1.0, 0.3],
-                "cash_out": [2.2, 0.6, 0.9, 0.2],
-            },
-            index=["ClusterA", "ClusterB", "ClusterC", "ClusterD"],
-        )
-        stats = pd.DataFrame(
-            {
-                "n_agents": [500, 20, 200, 300],
-                "mean_tenure_months": [24, 2, 18, 12],
-            },
-            index=scores.index,
-        )
-        return scores, stats
-
-    def test_returns_expected_columns(self):
-        from extrafloat_segmentation_profiling import build_cluster_tiers
-
-        scores, stats = self._make_scores()
-        result = build_cluster_tiers(scores, cluster_stats=stats)
-        for col in ("cluster", "tier", "sub_label", "n_agents", "safety_flags"):
-            assert col in result.columns, f"Missing column: {col}"
-
-    def test_small_cluster_triggers_safety_flag(self):
-        from extrafloat_segmentation_profiling import build_cluster_tiers
-
-        scores, stats = self._make_scores()
-        # ClusterB has n_agents=20 < min_agents_per_tier=30
-        result = build_cluster_tiers(scores, cluster_stats=stats)
-        clusterb_row = result[result["cluster"] == "ClusterB"].iloc[0]
-        assert clusterb_row["safety_flags"] != "", (
-            "ClusterB (n=20) should have a safety flag"
-        )
-
-    def test_no_lift_columns_raises(self):
-        from extrafloat_segmentation_profiling import build_cluster_tiers
-
-        scores = pd.DataFrame(
-            {"n_agents": [100, 200], "mean_tenure_months": [12, 24]},
-            index=["A", "B"],
-        )
-        with pytest.raises(ValueError, match="no lift columns"):
-            build_cluster_tiers(scores)
-
-    def test_tier_values_are_valid(self):
-        from extrafloat_segmentation_profiling import build_cluster_tiers
-
-        scores, stats = self._make_scores()
-        result = build_cluster_tiers(scores, cluster_stats=stats)
-        valid_tiers = {"Platinum", "Gold", "Silver", "Bronze"}
-        for tier in result["tier"]:
-            assert tier in valid_tiers, f"Unexpected tier: {tier}"
 
 
 class TestMergeReferenceLists:
@@ -740,15 +692,23 @@ class TestDefaultConfig:
     def test_all_sections_present(self):
         from run_extrafloat_segmentation import DEFAULT_SEGMENTATION_CONFIG
 
-        for section in ("data", "features", "clustering", "profiling", "output", "drift"):
+        for section in ("data", "features", "scoring", "clustering", "profiling", "output", "drift"):
             assert section in DEFAULT_SEGMENTATION_CONFIG, f"Missing section: {section}"
 
     def test_config_round_trip(self):
         from run_extrafloat_segmentation import _get_config
 
-        cfg = _get_config(None)
-        for section in ("data", "features", "clustering", "profiling", "output", "drift"):
+        cfg = _get_config({"scoring": {"allow_missing_scorecard": True}})
+        for section in ("data", "features", "scoring", "clustering", "profiling", "output", "drift"):
             assert section in cfg
+
+    def test_scorecard_required_by_default(self):
+        """A run with no scorecard_path and no allow_missing_scorecard override
+        must fail fast, since capacity_tier is this pipeline's sole output."""
+        from run_extrafloat_segmentation import DEFAULT_SEGMENTATION_CONFIG
+
+        assert DEFAULT_SEGMENTATION_CONFIG["scoring"]["scorecard_path"] == ""
+        assert DEFAULT_SEGMENTATION_CONFIG["scoring"]["allow_missing_scorecard"] is False
 
     def test_partial_override_preserved(self):
         from run_extrafloat_segmentation import _get_config
@@ -760,22 +720,33 @@ class TestDefaultConfig:
 
 
 class TestPipelineConstants:
-    """Verify critical module constants are correctly defined."""
+    """Verify critical module constants are correctly defined.
+
+    BUSINESS_SEGMENTS is owned by extrafloat_segmentation_scoring.py — the
+    only module that assigns a business tier now.
+    extrafloat_segmentation_pipeline.py is diagnostics-only and has no
+    business tier concept of its own.
+    """
 
     def test_business_segments_length(self):
-        from extrafloat_segmentation_pipeline import BUSINESS_SEGMENTS
+        from extrafloat_segmentation_scoring import BUSINESS_SEGMENTS
 
         assert len(BUSINESS_SEGMENTS) == 8
 
     def test_business_segments_first_is_below_threshold(self):
-        from extrafloat_segmentation_pipeline import BUSINESS_SEGMENTS
+        from extrafloat_segmentation_scoring import BUSINESS_SEGMENTS
 
         assert BUSINESS_SEGMENTS[0] == "Below Threshold"
 
     def test_business_segments_last_is_diamond(self):
-        from extrafloat_segmentation_pipeline import BUSINESS_SEGMENTS
+        from extrafloat_segmentation_scoring import BUSINESS_SEGMENTS
 
         assert BUSINESS_SEGMENTS[-1] == "Diamond"
+
+    def test_pipeline_module_has_no_business_segments(self):
+        import extrafloat_segmentation_pipeline as pipeline_mod
+
+        assert not hasattr(pipeline_mod, "BUSINESS_SEGMENTS")
 
     def test_dormant_fill_label_constant(self):
         from extrafloat_segmentation_pipeline import DORMANT_FILL_LABEL
@@ -1022,11 +993,14 @@ class TestCategoricalDrift:
 class TestOptionalDependencyGuards:
     """Tests for extrafloat_segmentation_pipeline._check_optional_dependencies
     and the require_hdbscan/require_umap config flags wired into
-    run_clustering_pipeline. A missing hdbscan/umap install used to degrade
+    run_diagnostic_clustering. A missing hdbscan/umap install used to degrade
     cluster quality silently (hdb_tier="Unavailable" for every active agent,
     or a raw column slice fed to HDBSCAN instead of a real embedding) with
-    only a log line marking the difference. These tests confirm that is now
-    a loud, opt-in failure mode instead of a silent one.
+    only a log line marking the difference. These tests confirm that is a
+    loud, opt-in failure mode instead of a silent one — and, since this
+    module is diagnostics-only now, that it can only ever block a
+    deliberately-requested diagnostics run, never production capacity
+    scoring (which does not import this module's public function at all).
     """
 
     def _small_inputs(self, n=50):
@@ -1046,15 +1020,18 @@ class TestOptionalDependencyGuards:
         assert DEFAULT_CLUSTERING_CONFIG["require_hdbscan"] is True
         assert DEFAULT_CLUSTERING_CONFIG["require_umap"] is True
 
+    def test_diagnostics_disabled_by_default(self):
+        from extrafloat_segmentation_pipeline import DEFAULT_CLUSTERING_CONFIG
+
+        assert DEFAULT_CLUSTERING_CONFIG["enable_diagnostics"] is False
+
     def test_missing_hdbscan_raises_by_default(self, monkeypatch):
         import extrafloat_segmentation_pipeline as pipe
 
         monkeypatch.setattr(pipe, "_HDBSCAN_AVAILABLE", False)
         df, X_pca, cols = self._small_inputs()
         with pytest.raises(RuntimeError, match="require_hdbscan"):
-            pipe.run_clustering_pipeline(
-                df, X_pca, cols, config={"kmeans_round1_k": 2, "kmeans_round2_k": 2}
-            )
+            pipe.run_diagnostic_clustering(df, X_pca, cols)
 
     def test_missing_umap_raises_by_default(self, monkeypatch):
         import extrafloat_segmentation_pipeline as pipe
@@ -1062,29 +1039,24 @@ class TestOptionalDependencyGuards:
         monkeypatch.setattr(pipe, "_UMAP_AVAILABLE", False)
         df, X_pca, cols = self._small_inputs()
         with pytest.raises(RuntimeError, match="require_umap"):
-            pipe.run_clustering_pipeline(
-                df, X_pca, cols, config={"kmeans_round1_k": 2, "kmeans_round2_k": 2}
-            )
+            pipe.run_diagnostic_clustering(df, X_pca, cols)
 
     def test_missing_hdbscan_allowed_when_not_required(self, monkeypatch):
         import extrafloat_segmentation_pipeline as pipe
 
         monkeypatch.setattr(pipe, "_HDBSCAN_AVAILABLE", False)
         df, X_pca, cols = self._small_inputs()
-        result = pipe.run_clustering_pipeline(
-            df, X_pca, cols,
-            config={"kmeans_round1_k": 2, "kmeans_round2_k": 2, "require_hdbscan": False},
+        result = pipe.run_diagnostic_clustering(
+            df, X_pca, cols, config={"require_hdbscan": False},
         )
-        assert result.attrs["degraded_mode"]["hdbscan_unavailable"] is True
+        assert result.attrs["diag_degraded_mode"]["hdbscan_unavailable"] is True
 
     def test_degraded_mode_false_when_all_available(self):
-        from extrafloat_segmentation_pipeline import run_clustering_pipeline
+        from extrafloat_segmentation_pipeline import run_diagnostic_clustering
 
         df, X_pca, cols = self._small_inputs()
-        result = run_clustering_pipeline(
-            df, X_pca, cols, config={"kmeans_round1_k": 2, "kmeans_round2_k": 2}
-        )
-        assert result.attrs["degraded_mode"] == {
+        result = run_diagnostic_clustering(df, X_pca, cols)
+        assert result.attrs["diag_degraded_mode"] == {
             "hdbscan_unavailable": False,
             "umap_unavailable": False,
         }
@@ -1173,126 +1145,18 @@ class TestQualityGate:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Final segment stability (extrafloat_segmentation_pipeline.compute_final_segment_stability)
-# ─────────────────────────────────────────────────────────────────────────────
-
-
-class TestFinalSegmentStability:
-    """Tests for compute_final_segment_stability — unlike the existing
-    Round-1-KMeans-only stability report, this re-runs the full active-agent
-    stage (GMM/UMAP/HDBSCAN/segment mapping) across seeds so it reflects the
-    reproducibility of the *segment* an agent actually lands in."""
-
-    def _get_inputs(self, n=80):
-        from extrafloat_segmentation_features import prepare_features
-
-        df = _make_agents_df(n)
-        feat_df, _, X_pca, sel_cols = prepare_features(df)
-        return feat_df, X_pca, sel_cols
-
-    def test_returns_expected_keys(self):
-        from extrafloat_segmentation_pipeline import compute_final_segment_stability
-
-        feat_df, X_pca, sel_cols = self._get_inputs()
-        active_mask = pd.Series(True, index=feat_df.index)
-        report = compute_final_segment_stability(
-            feat_df, active_mask, sel_cols,
-            config={"kmeans_round1_k": 2, "kmeans_round2_k": 2, "stability_n_seeds": 2},
-        )
-        for key in ("segment_consistency_rate", "segment_ari_mean", "segment_ari_std", "n_seeds", "n_active"):
-            assert key in report, f"missing key '{key}'"
-        assert report["n_seeds"] == 2
-        assert report["n_active"] == len(feat_df)
-        assert 0.0 <= report["segment_consistency_rate"] <= 1.0
-
-    def test_default_report_when_n_seeds_below_two(self):
-        from extrafloat_segmentation_pipeline import (
-            DEFAULT_FINAL_STABILITY_REPORT,
-            compute_final_segment_stability,
-        )
-
-        feat_df, X_pca, sel_cols = self._get_inputs(30)
-        active_mask = pd.Series(True, index=feat_df.index)
-        report = compute_final_segment_stability(
-            feat_df, active_mask, sel_cols, config={"stability_n_seeds": 1}
-        )
-        assert report == DEFAULT_FINAL_STABILITY_REPORT
-
-    def test_default_report_when_no_active_agents(self):
-        from extrafloat_segmentation_pipeline import (
-            DEFAULT_FINAL_STABILITY_REPORT,
-            compute_final_segment_stability,
-        )
-
-        feat_df, X_pca, sel_cols = self._get_inputs(30)
-        active_mask = pd.Series(False, index=feat_df.index)
-        report = compute_final_segment_stability(
-            feat_df, active_mask, sel_cols, config={"stability_n_seeds": 2}
-        )
-        assert report == DEFAULT_FINAL_STABILITY_REPORT
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# _assign_sub_label cleanup regression (redundant no-op ternary removed)
-# ─────────────────────────────────────────────────────────────────────────────
-
-
-class TestAssignSubLabel:
-    """Regression tests for extrafloat_segmentation_profiling._assign_sub_label
-    after removing its no-op isinstance ternary (behavior-preserving cleanup,
-    plus non-numeric inputs now coerce to 0 instead of raising)."""
-
-    def _cfg(self):
-        from extrafloat_segmentation_profiling import DEFAULT_PROFILING_CONFIG
-
-        return DEFAULT_PROFILING_CONFIG
-
-    def test_high_cash_out(self):
-        from extrafloat_segmentation_profiling import _assign_sub_label
-
-        row = pd.Series({"cash_out": 2.0, "cash_in": 0.5, "payments": 0.5})
-        assert _assign_sub_label(row, self._cfg()) == "High Cash-Out"
-
-    def test_high_cash_in(self):
-        from extrafloat_segmentation_profiling import _assign_sub_label
-
-        row = pd.Series({"cash_out": 0.5, "cash_in": 2.0, "payments": 0.5})
-        assert _assign_sub_label(row, self._cfg()) == "High Cash-In"
-
-    def test_balanced_when_all_low(self):
-        from extrafloat_segmentation_profiling import _assign_sub_label
-
-        row = pd.Series({"cash_out": 0.9, "cash_in": 0.9, "payments": 0.9})
-        assert _assign_sub_label(row, self._cfg()) == "Balanced"
-
-    def test_missing_values_default_to_zero_not_error(self):
-        from extrafloat_segmentation_profiling import _assign_sub_label
-
-        row = pd.Series({})
-        assert _assign_sub_label(row, self._cfg()) == "Balanced"
-
-    def test_non_numeric_values_coerce_instead_of_raising(self):
-        from extrafloat_segmentation_profiling import _assign_sub_label
-
-        row = pd.Series({"cash_out": None, "cash_in": np.nan, "payments": 0.2})
-        # Should not raise TypeError/ValueError, and falls back to 0.0 for
-        # unparseable/missing entries.
-        assert _assign_sub_label(row, self._cfg()) == "Balanced"
-
-
-# ─────────────────────────────────────────────────────────────────────────────
 # Run manifest + structured alerts (run_extrafloat_segmentation.py)
 # ─────────────────────────────────────────────────────────────────────────────
 
 
 class TestCollectAlerts:
     """Tests for run_extrafloat_segmentation._collect_alerts — rolls the
-    degraded_mode/quality_gate/drift/final_stability .attrs reports into a
-    flat, structured list any caller can route without knowing each
-    report's shape."""
+    diag_degraded_mode/quality_gate/drift/tier_drift/diagnostic_stability
+    .attrs reports into a flat, structured list any caller can route
+    without knowing each report's shape."""
 
     def _base_df(self):
-        return pd.DataFrame({"segment": ["Gold", "Silver"]})
+        return pd.DataFrame({"capacity_tier": ["Gold", "Silver"]})
 
     def test_no_attrs_no_alerts(self):
         from run_extrafloat_segmentation import _collect_alerts
@@ -1300,15 +1164,15 @@ class TestCollectAlerts:
         df = self._base_df()
         assert _collect_alerts(df) == []
 
-    def test_degraded_mode_produces_critical_alert(self):
+    def test_diag_degraded_mode_produces_warning_alert(self):
         from run_extrafloat_segmentation import _collect_alerts
 
         df = self._base_df()
-        df.attrs["degraded_mode"] = {"hdbscan_unavailable": True, "umap_unavailable": False}
+        df.attrs["diag_degraded_mode"] = {"hdbscan_unavailable": True, "umap_unavailable": False}
         alerts = _collect_alerts(df)
         assert len(alerts) == 1
-        assert alerts[0]["severity"] == "critical"
-        assert alerts[0]["source"] == "degraded_mode"
+        assert alerts[0]["severity"] == "warning"
+        assert alerts[0]["source"] == "diag_degraded_mode"
 
     def test_failed_quality_gate_produces_critical_alert(self):
         from run_extrafloat_segmentation import _collect_alerts
@@ -1340,24 +1204,24 @@ class TestCollectAlerts:
         assert alerts[0]["severity"] == "warning"
         assert alerts[0]["source"] == "drift"
 
-    def test_low_segment_consistency_produces_warning_alert(self):
+    def test_low_diagnostic_consistency_produces_warning_alert(self):
         from run_extrafloat_segmentation import _collect_alerts
 
         df = self._base_df()
-        df.attrs["final_stability_report"] = {
-            "segment_consistency_rate": 0.2,
+        df.attrs["diagnostic_stability_report"] = {
+            "ensemble_consistency_rate": 0.2,
             "n_seeds": 3,
         }
         alerts = _collect_alerts(df)
         assert len(alerts) == 1
-        assert alerts[0]["source"] == "final_stability"
+        assert alerts[0]["source"] == "diagnostic_stability"
 
-    def test_high_segment_consistency_produces_no_alert(self):
+    def test_high_diagnostic_consistency_produces_no_alert(self):
         from run_extrafloat_segmentation import _collect_alerts
 
         df = self._base_df()
-        df.attrs["final_stability_report"] = {
-            "segment_consistency_rate": 0.95,
+        df.attrs["diagnostic_stability_report"] = {
+            "ensemble_consistency_rate": 0.95,
             "n_seeds": 3,
         }
         assert _collect_alerts(df) == []
@@ -1401,27 +1265,27 @@ class TestRunManifest:
     def test_build_run_manifest_structure(self):
         from run_extrafloat_segmentation import _build_run_manifest, DEFAULT_SEGMENTATION_CONFIG
 
-        df = pd.DataFrame({"segment": ["Gold", "Silver", "Gold"]})
+        df = pd.DataFrame({"capacity_tier": ["Gold", "Silver", "Gold"]})
         df.attrs["quality_gate"] = {"passed": True, "skipped": False, "checks": {}}
         manifest = _build_run_manifest(df, DEFAULT_SEGMENTATION_CONFIG, n_input_rows=3)
 
         for key in (
             "generated_at_utc", "git_commit_sha", "package_versions", "config",
-            "n_input_rows", "n_output_rows", "n_distinct_segments",
-            "stability_report", "final_stability_report", "drift_report",
-            "tier_drift_report", "quality_gate", "degraded_mode", "alerts",
+            "n_input_rows", "n_output_rows", "n_distinct_tiers",
+            "drift_report", "tier_drift_report", "diagnostic_stability_report",
+            "quality_gate", "diag_degraded_mode", "alerts",
         ):
             assert key in manifest, f"manifest missing key '{key}'"
         assert manifest["n_input_rows"] == 3
         assert manifest["n_output_rows"] == 3
-        assert manifest["n_distinct_segments"] == 2
+        assert manifest["n_distinct_tiers"] == 2
 
     def test_maybe_save_run_manifest_writes_json(self, tmp_path):
         from run_extrafloat_segmentation import _maybe_save_run_manifest
         import json
 
-        df = pd.DataFrame({"segment": ["Gold", "Silver"]})
-        cfg = {"output": {"output_dir": str(tmp_path), "save_run_manifest": True, "final_segment_col": "segment"}}
+        df = pd.DataFrame({"capacity_tier": ["Gold", "Silver"]})
+        cfg = {"output": {"output_dir": str(tmp_path), "save_run_manifest": True, "primary_tier_col": "capacity_tier"}}
         _maybe_save_run_manifest(df, cfg, n_input_rows=2)
 
         manifest_path = tmp_path / "run_manifest.json"
@@ -1432,8 +1296,8 @@ class TestRunManifest:
     def test_maybe_save_run_manifest_skips_when_disabled(self, tmp_path):
         from run_extrafloat_segmentation import _maybe_save_run_manifest
 
-        df = pd.DataFrame({"segment": ["Gold"]})
-        cfg = {"output": {"output_dir": str(tmp_path), "save_run_manifest": False, "final_segment_col": "segment"}}
+        df = pd.DataFrame({"capacity_tier": ["Gold"]})
+        cfg = {"output": {"output_dir": str(tmp_path), "save_run_manifest": False, "primary_tier_col": "capacity_tier"}}
         _maybe_save_run_manifest(df, cfg, n_input_rows=1)
 
         assert not (tmp_path / "run_manifest.json").exists()
@@ -1441,8 +1305,8 @@ class TestRunManifest:
     def test_maybe_save_run_manifest_skips_without_output_dir(self, tmp_path):
         from run_extrafloat_segmentation import _maybe_save_run_manifest
 
-        df = pd.DataFrame({"segment": ["Gold"]})
-        cfg = {"output": {"output_dir": "", "save_run_manifest": True, "final_segment_col": "segment"}}
+        df = pd.DataFrame({"capacity_tier": ["Gold"]})
+        cfg = {"output": {"output_dir": "", "save_run_manifest": True, "primary_tier_col": "capacity_tier"}}
         _maybe_save_run_manifest(df, cfg, n_input_rows=1)
 
         assert not (tmp_path / "run_manifest.json").exists()
@@ -1456,9 +1320,10 @@ class TestRunManifest:
 
 
 class TestScoringOrchestration:
-    """Tests for the run_extrafloat_segmentation "step 4b" capacity-scoring
-    wiring: opt-in via scoring.scorecard_path, backward compatible when
-    absent, hard-fails when explicitly required but missing."""
+    """Tests for the run_extrafloat_segmentation capacity-scoring wiring:
+    a scorecard is REQUIRED by default (fails fast without one), diagnostic
+    clustering is opt-in and independent, and capacity_tier is deterministic
+    regardless of which other agents are in the run."""
 
     def _small_agents_df(self, n=80):
         return _make_agents_df(n)
@@ -1471,18 +1336,36 @@ class TestScoringOrchestration:
         cfg.update(overrides)
         return cfg
 
-    def test_default_config_has_scoring_section(self):
+    def _calibrated_scorecard_path(self, agents_df, tmp_path, **kwargs):
+        from extrafloat_segmentation_features import prepare_features
+        from extrafloat_segmentation_scoring import calibrate_capacity_scorecard, save_scorecard
+
+        dev_df, _, _, _ = prepare_features(agents_df)
+        scorecard = calibrate_capacity_scorecard(dev_df, population_description="test fixture", **kwargs)
+        scorecard_path = str(tmp_path / "scorecard.json")
+        save_scorecard(scorecard, scorecard_path)
+        return scorecard_path, scorecard
+
+    def test_default_config_requires_scorecard(self):
         from run_extrafloat_segmentation import DEFAULT_SEGMENTATION_CONFIG
 
         assert "scoring" in DEFAULT_SEGMENTATION_CONFIG
         assert DEFAULT_SEGMENTATION_CONFIG["scoring"]["scorecard_path"] == ""
-        assert DEFAULT_SEGMENTATION_CONFIG["scoring"]["allow_missing_scorecard"] is True
+        assert DEFAULT_SEGMENTATION_CONFIG["scoring"]["allow_missing_scorecard"] is False
 
-    def test_no_scorecard_path_produces_no_capacity_columns(self):
+    def test_no_scorecard_configured_raises_by_default(self):
         from run_extrafloat_segmentation import run_extrafloat_segmentation
 
         agents_df = self._small_agents_df()
-        result = run_extrafloat_segmentation(agents_df, config=self._no_output_cfg())
+        with pytest.raises(ValueError, match="scorecard"):
+            run_extrafloat_segmentation(agents_df, config=self._no_output_cfg())
+
+    def test_no_scorecard_with_allow_missing_runs_without_capacity_tier(self):
+        from run_extrafloat_segmentation import run_extrafloat_segmentation
+
+        agents_df = self._small_agents_df()
+        cfg = self._no_output_cfg(scoring={"allow_missing_scorecard": True})
+        result = run_extrafloat_segmentation(agents_df, config=cfg)  # should not raise
         for col in ("capacity_score", "capacity_tier", "capacity_tier_raw"):
             assert col not in result.columns
 
@@ -1496,24 +1379,21 @@ class TestScoringOrchestration:
         with pytest.raises(ValueError):
             run_extrafloat_segmentation(agents_df, config=cfg)
 
-    def test_missing_scorecard_file_default_skips_gracefully(self):
+    def test_missing_scorecard_file_with_allow_missing_skips_gracefully(self):
         from run_extrafloat_segmentation import run_extrafloat_segmentation
 
         agents_df = self._small_agents_df()
-        cfg = self._no_output_cfg(scoring={"scorecard_path": "/nonexistent/scorecard.json"})
+        cfg = self._no_output_cfg(
+            scoring={"scorecard_path": "/nonexistent/scorecard.json", "allow_missing_scorecard": True}
+        )
         result = run_extrafloat_segmentation(agents_df, config=cfg)  # should not raise
         assert "capacity_tier" not in result.columns
 
     def test_configured_scorecard_produces_capacity_columns(self, tmp_path):
         from run_extrafloat_segmentation import run_extrafloat_segmentation
-        from extrafloat_segmentation_features import prepare_features
-        from extrafloat_segmentation_scoring import calibrate_capacity_scorecard, save_scorecard
 
         agents_df = self._small_agents_df()
-        dev_df, _, _, _ = prepare_features(agents_df)
-        scorecard = calibrate_capacity_scorecard(dev_df, population_description="test fixture")
-        scorecard_path = str(tmp_path / "scorecard.json")
-        save_scorecard(scorecard, scorecard_path)
+        scorecard_path, scorecard = self._calibrated_scorecard_path(agents_df, tmp_path)
 
         cfg = self._no_output_cfg(scoring={"scorecard_path": scorecard_path})
         result = run_extrafloat_segmentation(agents_df, config=cfg)
@@ -1522,22 +1402,67 @@ class TestScoringOrchestration:
                     "capacity_safety_flags", "scorecard_version", "cutoff_version"):
             assert col in result.columns
         assert result["capacity_tier"].isin(scorecard["tiers"]).all()
-        # Legacy ensemble-cluster segment/tier still present — shadow-run, not a replacement.
+        # Legacy aliases present by default (emit_legacy_aliases=True) and
+        # equal to capacity_tier — not an independently-computed mechanism.
         assert "segment" in result.columns
         assert "tier" in result.columns
+        assert (result["segment"] == result["capacity_tier"]).all()
+        assert (result["tier"] == result["capacity_tier"]).all()
+
+    def test_emit_legacy_aliases_false_omits_deprecated_columns(self, tmp_path):
+        from run_extrafloat_segmentation import run_extrafloat_segmentation
+
+        agents_df = self._small_agents_df()
+        scorecard_path, _ = self._calibrated_scorecard_path(agents_df, tmp_path)
+
+        cfg = self._no_output_cfg(
+            scoring={"scorecard_path": scorecard_path},
+            output={"output_dir": "", "emit_legacy_aliases": False},
+        )
+        result = run_extrafloat_segmentation(agents_df, config=cfg)
+        assert "capacity_tier" in result.columns
+        assert "segment" not in result.columns
+        assert "tier" not in result.columns
+
+    def test_diagnostics_disabled_by_default_no_diag_columns(self, tmp_path):
+        from run_extrafloat_segmentation import run_extrafloat_segmentation
+
+        agents_df = self._small_agents_df()
+        scorecard_path, _ = self._calibrated_scorecard_path(agents_df, tmp_path)
+
+        cfg = self._no_output_cfg(scoring={"scorecard_path": scorecard_path})
+        result = run_extrafloat_segmentation(agents_df, config=cfg)
+        assert not any(c.startswith("diag_") for c in result.columns)
+
+    def test_diagnostics_enabled_produces_diag_columns(self, tmp_path):
+        from run_extrafloat_segmentation import run_extrafloat_segmentation
+
+        agents_df = self._small_agents_df()
+        scorecard_path, _ = self._calibrated_scorecard_path(agents_df, tmp_path)
+
+        cfg = self._no_output_cfg(
+            scoring={"scorecard_path": scorecard_path},
+            clustering={"enable_diagnostics": True},
+        )
+        result = run_extrafloat_segmentation(agents_df, config=cfg)
+        for col in ("diag_hdb_tier", "diag_ensemble_cluster", "diag_is_anomaly"):
+            assert col in result.columns
+        # capacity_tier must be identical whether or not diagnostics ran —
+        # diagnostics never feeds capacity scoring.
+        cfg_no_diag = self._no_output_cfg(scoring={"scorecard_path": scorecard_path})
+        result_no_diag = run_extrafloat_segmentation(agents_df, config=cfg_no_diag)
+        assert (
+            result.set_index("agent_msisdn")["capacity_tier"]
+            == result_no_diag.set_index("agent_msisdn")["capacity_tier"]
+        ).all()
 
     def test_capacity_tier_deterministic_across_different_populations(self, tmp_path):
         """The whole point: an agent's capacity_tier must not depend on which
         other agents are in the same run, unlike the old ensemble segment/tier."""
         from run_extrafloat_segmentation import run_extrafloat_segmentation
-        from extrafloat_segmentation_features import prepare_features
-        from extrafloat_segmentation_scoring import calibrate_capacity_scorecard, save_scorecard
 
         agents_df = self._small_agents_df(80)
-        dev_df, _, _, _ = prepare_features(agents_df)
-        scorecard = calibrate_capacity_scorecard(dev_df, population_description="test fixture")
-        scorecard_path = str(tmp_path / "scorecard.json")
-        save_scorecard(scorecard, scorecard_path)
+        scorecard_path, _ = self._calibrated_scorecard_path(agents_df, tmp_path)
 
         cfg = self._no_output_cfg(scoring={"scorecard_path": scorecard_path})
         full_result = run_extrafloat_segmentation(agents_df, config=cfg)
@@ -1553,16 +1478,23 @@ class TestScoringOrchestration:
 
     def test_tier_drift_report_attached_when_scorecard_used(self, tmp_path):
         from run_extrafloat_segmentation import run_extrafloat_segmentation
-        from extrafloat_segmentation_features import prepare_features
-        from extrafloat_segmentation_scoring import calibrate_capacity_scorecard, save_scorecard
 
         agents_df = self._small_agents_df()
-        dev_df, _, _, _ = prepare_features(agents_df)
-        scorecard = calibrate_capacity_scorecard(dev_df, population_description="test fixture")
-        scorecard_path = str(tmp_path / "scorecard.json")
-        save_scorecard(scorecard, scorecard_path)
+        scorecard_path, _ = self._calibrated_scorecard_path(agents_df, tmp_path)
 
         cfg = self._no_output_cfg(scoring={"scorecard_path": scorecard_path})
         result = run_extrafloat_segmentation(agents_df, config=cfg)
         assert "tier_drift_report" in result.attrs
         assert "psi" in result.attrs["tier_drift_report"]
+
+    def test_quality_gate_uses_capacity_tier(self, tmp_path):
+        from run_extrafloat_segmentation import run_extrafloat_segmentation
+
+        agents_df = self._small_agents_df()
+        scorecard_path, _ = self._calibrated_scorecard_path(agents_df, tmp_path)
+
+        cfg = self._no_output_cfg(scoring={"scorecard_path": scorecard_path})
+        result = run_extrafloat_segmentation(agents_df, config=cfg)
+        quality_gate = result.attrs.get("quality_gate", {})
+        assert quality_gate.get("skipped") is False
+        assert "n_distinct_segments" in quality_gate.get("checks", {})

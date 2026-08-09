@@ -18,8 +18,8 @@ import pytest
 
 sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
 
-from extrafloat_segmentation_pipeline import BUSINESS_SEGMENTS
 from extrafloat_segmentation_scoring import (
+    BUSINESS_SEGMENTS,
     CAPACITY_FACTOR_GROUPS,
     DEFAULT_GROUP_WEIGHTS,
     apply_tenure_safety_cap,

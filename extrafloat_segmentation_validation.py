@@ -497,6 +497,7 @@ def run_quality_gate(
     cluster_col: str = "ensemble_cluster",
     label_col: str = "agent_category",
     active_mask: pd.Series | None = None,
+    hdb_tier_col: str = "hdb_tier",
 ) -> dict[str, Any]:
     """
     Automated post-clustering sanity/quality gate.
@@ -512,21 +513,28 @@ def run_quality_gate(
     This function only evaluates; it never raises unless
     ``config["fail_on_breach"]`` is True. Intended to be called from
     `run_extrafloat_segmentation` after clustering + profiling and before
-    output trimming (so `cluster_round2`/`hdb_tier`/`ensemble_cluster` are
-    still present), so a degenerate run can be caught automatically instead
-    of relying on someone manually running this module after the fact.
+    output trimming (so diagnostic columns like `diag_hdb_tier` /
+    `diag_ensemble_cluster` are still present when diagnostics ran), so a
+    degenerate run can be caught automatically instead of relying on
+    someone manually running this module after the fact.
 
     Parameters
     ----------
-    df : Segmentation output DataFrame (post `run_clustering_pipeline`).
+    df : Segmentation output DataFrame (post capacity scoring / optional
+         diagnostic clustering).
     config : Quality-gate config. See DEFAULT_QUALITY_GATE_CONFIG.
     segment_col : Business segment column.
     cluster_col : Ensemble cluster column (used for purity/ARI).
     label_col : Ground-truth reference label column, if available.
     active_mask : Boolean mask of non-dormant agents. Defaults to
-                  `df["cluster_round2"].notna()` when that column is present
-                  (Round-2 KMeans only runs on active agents), else all
-                  agents are treated as active.
+                  `df["cluster_round2"].notna()` when that column is present,
+                  else all agents are treated as active. Callers with a
+                  dormant mask computed elsewhere (e.g.
+                  `extrafloat_segmentation_pipeline._identify_dormant_mask`)
+                  should pass it explicitly.
+    hdb_tier_col : Column holding HDBSCAN diagnostic tier labels, used for
+                  the noise/unavailable-share check. Only evaluated when
+                  present in *df* (diagnostic clustering is optional).
 
     Returns
     -------
@@ -566,8 +574,8 @@ def run_quality_gate(
         "passed": n_distinct >= cfg["min_distinct_segments"],
     }
 
-    if "hdb_tier" in df.columns and len(active) > 0:
-        noise_mask = active["hdb_tier"].isin(["Noise / Irregular", "Unavailable"])
+    if hdb_tier_col in df.columns and len(active) > 0:
+        noise_mask = active[hdb_tier_col].isin(["Noise / Irregular", "Unavailable"])
         noise_pct = float(noise_mask.mean())
         checks["hdb_noise_or_unavailable_pct"] = {
             "value": noise_pct,

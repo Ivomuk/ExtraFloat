@@ -3,8 +3,21 @@ run_extrafloat_segmentation.py
 ================================
 Orchestration entry point for the MTN MoMo agent segmentation pipeline.
 
-Chains: feature engineering → clustering → pack profiling → tier building →
-optional whitelist/blacklist enrichment → output trimming.
+Chains: feature engineering → deterministic capacity scoring → optional
+diagnostic clustering → optional whitelist/blacklist enrichment → quality
+gate → output trimming.
+
+An agent's business tier (`capacity_tier`) is decided solely by a
+versioned, frozen capacity scorecard (`extrafloat_segmentation_scoring.py`)
+— the same agent feature values always produce the same tier, regardless
+of which other agents are in the run. GMM/HDBSCAN clustering
+(`extrafloat_segmentation_pipeline.py`) is optional diagnostics only
+(anomaly flagging, archetype research); it never decides `capacity_tier`.
+
+A scorecard is REQUIRED by default (`scoring.scorecard_path` must point at
+a file produced by `calibrate_scorecard.py`) — set
+`scoring.allow_missing_scorecard=True` only for a deliberately degraded
+local/dev run.
 
 Market: Uganda (UG) — MTN Mobile Money agent segmentation.
 
@@ -14,8 +27,9 @@ Usage
 >>> import pandas as pd
 >>> agents_df = pd.read_csv("path/to/kpi_mart.csv")
 >>> config = dict(DEFAULT_SEGMENTATION_CONFIG)
+>>> config["scoring"]["scorecard_path"] = "scorecards/capacity_scorecard_v1.json"
 >>> result = run_extrafloat_segmentation(agents_df, config=config)
->>> result[["agent_msisdn", "segment", "hdb_tier", "ensemble_cluster"]].head()
+>>> result[["agent_msisdn", "capacity_score", "capacity_tier"]].head()
 """
 
 from __future__ import annotations
@@ -36,20 +50,19 @@ import pandas as pd
 
 from extrafloat_segmentation_features import prepare_features, REQUIRED_COLUMNS
 from extrafloat_segmentation_pipeline import (
-    run_clustering_pipeline,
-    compute_final_segment_stability,
-    BUSINESS_SEGMENTS,
+    run_diagnostic_clustering,
+    compute_diagnostic_ensemble_stability,
+    _identify_dormant_mask,
+    DEFAULT_CLUSTERING_CONFIG,
 )
 from extrafloat_segmentation_profiling import (
     build_cluster_pack_profiles,
-    build_cluster_tiers,
     merge_reference_lists,
     PROFILING_PACKS,
-    DEFAULT_PROFILING_CONFIG,
 )
-from extrafloat_segmentation_pipeline import DEFAULT_CLUSTERING_CONFIG
 from extrafloat_segmentation_drift import (
     build_drift_report,
+    build_tier_drift_report,
     load_drift_baseline,
     save_drift_baseline,
     DEFAULT_DRIFT_CONFIG,
@@ -58,11 +71,10 @@ from extrafloat_segmentation_validation import (
     run_quality_gate,
     DEFAULT_QUALITY_GATE_CONFIG,
 )
-from extrafloat_segmentation_drift import build_tier_drift_report
 from extrafloat_segmentation_scoring import (
     compute_agent_capacity,
     load_scorecard,
-    validate_scorecard,
+    BUSINESS_SEGMENTS,
     DEFAULT_SCORING_CONFIG,
 )
 
@@ -75,30 +87,32 @@ logger = logging.getLogger(__name__)
 SEGMENT_OUTPUT_COLUMNS: tuple[str, ...] = (
     "agent_msisdn",
     "pos_msisdn",
-    "cluster_round1",
-    "cluster_round2",
-    "cluster_id_gmm",
-    "cluster_hdb_raw",
-    "hdb_tier",
-    "ensemble_cluster",
-    "segment",
-    "tier",
-    "tier_sub_label",
-    "safety_flags",
-    # ── Deterministic capacity scoring (opt-in; see scoring.scorecard_path) ──
+    # ── Deterministic capacity scoring (primary; always present) ────────────
     "capacity_score",
     "capacity_tier_raw",
     "capacity_tier",
     "capacity_safety_flags",
     "scorecard_version",
     "cutoff_version",
+    # ── Diagnostic clustering (optional; see clustering.enable_diagnostics) ──
+    "diag_cluster_id_gmm",
+    "diag_cluster_hdb_raw",
+    "diag_hdb_tier",
+    "diag_ensemble_cluster",
+    "diag_is_anomaly",
+    # ── Reference-list enrichment ─────────────────────────────────────────────
+    "CommissionDecision",
+    # ── Deprecated legacy aliases of capacity_tier (see output.emit_legacy_aliases) ──
+    "segment",
+    "tier",
 )
 
+# Diagnostic cluster-ID columns are opt-in noise for most consumers;
+# diag_is_anomaly and diag_hdb_tier are kept as regular (non-intermediate)
+# output since they're directly useful diagnostic signals on their own.
 INTERMEDIATE_COLUMNS: tuple[str, ...] = (
-    "cluster_round1",
-    "cluster_round2",
-    "cluster_id_gmm",
-    "cluster_hdb_raw",
+    "diag_cluster_id_gmm",
+    "diag_cluster_hdb_raw",
 )
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -114,7 +128,7 @@ DEFAULT_SEGMENTATION_CONFIG: dict[str, Any] = {
         "blacklist_path": "",
         "date_format": "%Y%m%d",
         "msisdn_col": "agent_msisdn",
-        # MSISDNs of commission/super agents to exclude before clustering.
+        # MSISDNs of commission/super agents to exclude before scoring.
         "commission_agents_msisdn": [256789760000, 256783891111, 256781872222, 256772453333],
     },
     "features": {
@@ -128,21 +142,47 @@ DEFAULT_SEGMENTATION_CONFIG: dict[str, Any] = {
         "random_state": 42,
         "max_interaction_cols": 10,
     },
+    "scoring": {
+        **DEFAULT_SCORING_CONFIG,
+        # Path to a versioned scorecard JSON produced by
+        # calibrate_capacity_scorecard (typically via calibrate_scorecard.py).
+        # REQUIRED — a run with no scorecard and allow_missing_scorecard=False
+        # (the default) raises before any output is produced. This is
+        # deliberate: capacity_tier is the sole business-tier output of this
+        # pipeline, so a run without a scorecard has nothing to compute.
+        "scorecard_path": "",
+        "allow_missing_scorecard": False,
+    },
+    # GMM/HDBSCAN diagnostic clustering — anomaly flagging and archetype
+    # research only. Never decides capacity_tier. See DEFAULT_CLUSTERING_CONFIG
+    # ["enable_diagnostics"] (default False).
     "clustering": {
         **DEFAULT_CLUSTERING_CONFIG,
     },
     "profiling": {
-        **DEFAULT_PROFILING_CONFIG,
+        # Pack-based KPI profiling grouped by capacity_tier — a read-only
+        # research aid (e.g. "what does a Gold-tier agent's profile look
+        # like"), not something any downstream decision depends on. Off by
+        # default to keep production runs lean; when enabled the result is
+        # attached to the output DataFrame's .attrs["pack_profiles"], not
+        # written to the CSV output.
+        "enable_pack_profiles": False,
     },
     "output": {
         # Where to write optional CSV exports (empty string = no export).
         "output_dir": "segmentation_outputs",
         # When False only the SEGMENT_OUTPUT_COLUMNS are returned.
         "keep_intermediate_cols": False,
-        "final_segment_col": "segment",
+        # The single source of truth for an agent's tier.
+        "primary_tier_col": "capacity_tier",
+        # Emit deprecated `segment`/`tier` columns as copies of capacity_tier,
+        # for consumers not yet migrated off the old column names. Planned
+        # for removal in a future release — new integrations should read
+        # capacity_tier directly.
+        "emit_legacy_aliases": True,
         # Write run_manifest.json alongside agent_segments.csv (only when
         # output_dir is set). Records config, package versions, git commit,
-        # and the stability/drift/quality-gate reports for a given run, so a
+        # and the drift/quality-gate reports for a given run, so a
         # credit-tier decision can be traced back to exactly what produced
         # it. See _build_run_manifest().
         "save_run_manifest": True,
@@ -152,23 +192,6 @@ DEFAULT_SEGMENTATION_CONFIG: dict[str, Any] = {
     },
     "quality_gate": {
         **DEFAULT_QUALITY_GATE_CONFIG,
-    },
-    "scoring": {
-        **DEFAULT_SCORING_CONFIG,
-        # Path to a versioned scorecard JSON produced by
-        # calibrate_capacity_scorecard (typically via calibrate_scorecard.py).
-        # Empty string (default) means the deterministic capacity_score /
-        # capacity_tier columns are NOT computed and the run behaves exactly
-        # as before this feature was added — this is an opt-in shadow-run
-        # addition alongside the existing ensemble-cluster `segment`/`tier`,
-        # not a replacement for them yet. Point this at a reviewed scorecard
-        # to start producing capacity_tier, and set allow_missing_scorecard
-        # to False once a scorecard is the source of truth for production.
-        "scorecard_path": "",
-        # When True (default) a configured-but-missing scorecard file only
-        # logs a warning and skips capacity scoring. Set False to hard-fail
-        # instead, once a scorecard is required for a given deployment.
-        "allow_missing_scorecard": True,
     },
 }
 
@@ -195,20 +218,21 @@ def _get_config(config: dict | None) -> dict[str, Any]:
 
 def _validate_config(cfg: dict[str, Any]) -> None:
     """Raise ValueError if required config keys are missing or invalid."""
-    required_sections = ("data", "features", "clustering", "profiling", "output")
+    required_sections = ("data", "features", "scoring", "clustering", "profiling", "output")
     for s in required_sections:
         if s not in cfg:
             raise ValueError(
                 f"run_extrafloat_segmentation: config missing required section '{s}'."
             )
 
-    weights = cfg["clustering"].get("composite_weights", {})
-    total = sum(float(w) for w in weights.values()) if weights else 0.0
-    if weights and abs(total - 1.0) > 0.01:
-        logger.warning(
-            "_validate_config: composite_weights sum to %.3f (expected 1.0). "
-            "Scores will still be computed but rankings may be unexpected.",
-            total,
+    scoring_cfg = cfg["scoring"]
+    if not scoring_cfg.get("scorecard_path") and not scoring_cfg.get("allow_missing_scorecard", False):
+        raise ValueError(
+            "run_extrafloat_segmentation: scoring.scorecard_path is empty and "
+            "scoring.allow_missing_scorecard is not True. A scorecard is "
+            "required to compute capacity_tier — calibrate one with "
+            "calibrate_scorecard.py, or set allow_missing_scorecard=True for "
+            "a deliberately degraded run with no tier output."
         )
 
 
@@ -226,9 +250,9 @@ def _join_msisdn(result: pd.DataFrame, original_df: pd.DataFrame) -> pd.DataFram
     """
     Ensure agent_msisdn and pos_msisdn columns are present on the result.
 
-    The clustering pipeline works on the feature matrix (which drops raw
-    identifier columns).  This helper joins them back from the original df
-    using the shared index.
+    The feature/scoring pipeline works on the feature matrix (which drops
+    raw identifier columns).  This helper joins them back from the original
+    df using the shared index.
     """
     for col in ("agent_msisdn", "pos_msisdn"):
         if col not in result.columns and col in original_df.columns:
@@ -244,8 +268,8 @@ def _trim_output_columns(
     """
     Keep the original agent columns plus the new segmentation output columns.
 
-    When *keep_intermediate* is False, intermediate cluster columns
-    (cluster_round1, cluster_round2, etc.) are dropped from the output.
+    When *keep_intermediate* is False, intermediate diagnostic ID columns
+    (diag_cluster_id_gmm, diag_cluster_hdb_raw) are dropped from the output.
     """
     new_seg_cols = [c for c in SEGMENT_OUTPUT_COLUMNS if c in result.columns]
 
@@ -321,9 +345,10 @@ def _build_run_manifest(
     config/code/data produced agent X's tier on date Y" needs to be
     reconstructable after the fact. This manifest is the answer: resolved
     config, package versions, git commit, input/output row counts, and the
-    stability/drift/quality-gate reports already attached to the output
-    DataFrame's `.attrs` by earlier pipeline steps.
+    drift/quality-gate reports already attached to the output DataFrame's
+    `.attrs` by earlier pipeline steps.
     """
+    tier_col = cfg["output"].get("primary_tier_col", "capacity_tier")
     return {
         "generated_at_utc": datetime.now(timezone.utc).isoformat(),
         "git_commit_sha": _get_git_commit_sha(),
@@ -331,17 +356,14 @@ def _build_run_manifest(
         "config": cfg,
         "n_input_rows": n_input_rows,
         "n_output_rows": len(df),
-        "n_distinct_segments": (
-            int(df[cfg["output"].get("final_segment_col", "segment")].nunique())
-            if cfg["output"].get("final_segment_col", "segment") in df.columns
-            else None
+        "n_distinct_tiers": (
+            int(df[tier_col].nunique()) if tier_col in df.columns else None
         ),
-        "stability_report": df.attrs.get("stability_report"),
-        "final_stability_report": df.attrs.get("final_stability_report"),
         "drift_report": df.attrs.get("drift_report"),
         "tier_drift_report": df.attrs.get("tier_drift_report"),
+        "diagnostic_stability_report": df.attrs.get("diagnostic_stability_report"),
         "quality_gate": df.attrs.get("quality_gate"),
-        "degraded_mode": df.attrs.get("degraded_mode"),
+        "diag_degraded_mode": df.attrs.get("diag_degraded_mode"),
         "alerts": df.attrs.get("alerts", []),
     }
 
@@ -362,8 +384,8 @@ def _maybe_save_run_manifest(df: pd.DataFrame, cfg: dict[str, Any], n_input_rows
 
 def _collect_alerts(df: pd.DataFrame) -> list[dict[str, Any]]:
     """
-    Roll the stability/drift/quality-gate/degraded-mode reports already
-    attached to *df*.attrs into a flat, structured alert list.
+    Roll the drift/quality-gate/degraded-mode reports already attached to
+    *df*.attrs into a flat, structured alert list.
 
     An automated check nobody sees is not a safety net. Nothing in this
     repo pages a human yet (no notification channel has been chosen), but
@@ -373,12 +395,15 @@ def _collect_alerts(df: pd.DataFrame) -> list[dict[str, Any]]:
     """
     alerts: list[dict[str, Any]] = []
 
-    degraded = df.attrs.get("degraded_mode") or {}
+    degraded = df.attrs.get("diag_degraded_mode") or {}
     if any(degraded.values()):
         alerts.append({
-            "severity": "critical",
-            "source": "degraded_mode",
-            "message": f"Pipeline ran in degraded mode: {degraded}",
+            "severity": "warning",
+            "source": "diag_degraded_mode",
+            "message": (
+                f"Diagnostic clustering ran in degraded mode: {degraded}. "
+                f"capacity_tier is unaffected — diagnostics never feed it."
+            ),
         })
 
     quality_gate = df.attrs.get("quality_gate") or {}
@@ -401,19 +426,6 @@ def _collect_alerts(df: pd.DataFrame) -> list[dict[str, Any]]:
             ),
         })
 
-    final_stability = df.attrs.get("final_stability_report") or {}
-    consistency = final_stability.get("segment_consistency_rate")
-    if consistency is not None and not np.isnan(consistency) and consistency < 0.5:
-        alerts.append({
-            "severity": "warning",
-            "source": "final_stability",
-            "message": (
-                f"Final segment assignment is seed-sensitive: only "
-                f"{consistency:.1%} of active agents got the same segment "
-                f"across {final_stability.get('n_seeds', 0)} seeds."
-            ),
-        })
-
     tier_drift = df.attrs.get("tier_drift_report") or {}
     if tier_drift.get("drift_detected"):
         alerts.append({
@@ -422,6 +434,20 @@ def _collect_alerts(df: pd.DataFrame) -> list[dict[str, Any]]:
             "message": (
                 f"capacity_tier proportions diverged from scorecard "
                 f"calibration expectations (PSI={tier_drift.get('psi', float('nan')):.4f})."
+            ),
+        })
+
+    diag_stability = df.attrs.get("diagnostic_stability_report") or {}
+    consistency = diag_stability.get("ensemble_consistency_rate")
+    if consistency is not None and not np.isnan(consistency) and consistency < 0.5:
+        alerts.append({
+            "severity": "warning",
+            "source": "diagnostic_stability",
+            "message": (
+                f"Diagnostic ensemble clustering is seed-sensitive: only "
+                f"{consistency:.1%} of active agents got the same "
+                f"diag_ensemble_cluster across {diag_stability.get('n_seeds', 0)} "
+                f"seeds. capacity_tier is unaffected."
             ),
         })
 
@@ -466,11 +492,12 @@ def run_extrafloat_segmentation(
 
     Chains:
         1. Feature engineering (prepare_features)
-        2. Two-stage clustering (run_clustering_pipeline)
-        3. Pack-based profiling (build_cluster_pack_profiles)
-        4. Tier assignment (build_cluster_tiers)
+        2. Deterministic capacity scoring (compute_agent_capacity) — REQUIRED
+        3. Optional diagnostic clustering (run_diagnostic_clustering)
+        4. Optional pack profiling (build_cluster_pack_profiles, research-only)
         5. Optional whitelist/blacklist enrichment (merge_reference_lists)
-        6. Output trimming
+        6. Quality gate
+        7. Output trimming
 
     Parameters
     ----------
@@ -483,8 +510,8 @@ def run_extrafloat_segmentation(
         fall back to DEFAULT_SEGMENTATION_CONFIG.  Example override::
 
             config = {
-                "features": {"corr_threshold": 0.95},
-                "clustering": {"kmeans_round1_k": 8},
+                "scoring": {"scorecard_path": "scorecards/capacity_scorecard_v1.json"},
+                "clustering": {"enable_diagnostics": True},
             }
 
     whitelist_df :
@@ -499,14 +526,16 @@ def run_extrafloat_segmentation(
     Returns
     -------
     pd.DataFrame
-        agents_df enriched with segmentation columns:
-            segment         : final business segment (from BUSINESS_SEGMENTS)
-            ensemble_cluster: GMM×HDBSCAN ensemble label
-            hdb_tier        : HDBSCAN tier label (data-driven)
-            tier            : pack-profile based tier (Platinum/Gold/Silver/Bronze)
-            tier_sub_label  : activity mix sub-label (High Cash-Out, etc.)
-            safety_flags    : semi-colon separated safety filter messages (if any)
-        Plus intermediate cluster columns when keep_intermediate_cols=True.
+        agents_df enriched with:
+            capacity_score        : deterministic [0,1] capacity score
+            capacity_tier_raw     : tier before the tenure safety cap
+            capacity_tier         : final business tier (the source of truth)
+            capacity_safety_flags : safety-cap / dormant flags, if any
+            scorecard_version, cutoff_version : scorecard provenance
+        Plus, when clustering.enable_diagnostics=True:
+            diag_hdb_tier, diag_ensemble_cluster, diag_is_anomaly, ...
+        Plus deprecated `segment`/`tier` aliases of capacity_tier, unless
+        output.emit_legacy_aliases=False.
     """
     cfg = _get_config(config)
     _validate_config(cfg)
@@ -555,7 +584,7 @@ def run_extrafloat_segmentation(
             if drift_report.get("drift_detected"):
                 logger.warning(
                     "run_extrafloat_segmentation: DRIFT DETECTED — %d feature(s) "
-                    "show critical PSI shift. Segment assignments may be unreliable. "
+                    "show critical PSI shift. capacity_tier may be unreliable. "
                     "Critical: %s",
                     drift_report["n_critical"],
                     [
@@ -577,162 +606,112 @@ def run_extrafloat_segmentation(
                 baseline_path,
             )
 
-    # ── Step 2: Clustering ────────────────────────────────────────────────────
-    logger.info("run_extrafloat_segmentation: step 2 — clustering pipeline.")
-    features_df = run_clustering_pipeline(
-        features_df=features_df,
-        X_pca=X_pca,
-        selected_cols=selected_cols,
-        config=cfg.get("clustering"),
-    )
-
-    stability = features_df.attrs.get("stability_report", {})
-    if stability and stability.get("n_seeds", 0) > 0:
-        logger.info(
-            "run_extrafloat_segmentation: cluster stability — "
-            "silhouette=%.3f, ARI mean=%.3f ± %.3f (%d seeds)",
-            stability.get("silhouette_score", float("nan")),
-            stability.get("ari_mean", float("nan")),
-            stability.get("ari_std", float("nan")),
-            stability.get("n_seeds", 0),
-        )
-
-    # ── Step 2b: Full-pipeline segment stability (optional, expensive) ───────
+    # ── Step 2: Deterministic Capacity Scoring (required) ────────────────────
+    logger.info("run_extrafloat_segmentation: step 2 — deterministic capacity scoring.")
     clustering_cfg = cfg.get("clustering", {})
-    if clustering_cfg.get("full_stability_check", False):
+    scoring_cfg = cfg.get("scoring", {})
+    scorecard_path: str = scoring_cfg.get("scorecard_path", "")
+
+    is_dormant = _identify_dormant_mask(features_df, clustering_cfg)
+
+    scorecard: dict[str, Any] | None = None
+    if scorecard_path and os.path.isfile(scorecard_path):
+        scorecard = load_scorecard(scorecard_path)
+        capacity_df = compute_agent_capacity(features_df, scorecard, is_dormant=is_dormant)
+        features_df = pd.concat([features_df, capacity_df], axis=1)
         logger.info(
-            "run_extrafloat_segmentation: step 2b — full-pipeline segment "
-            "stability check (this re-runs the active-agent pipeline across "
-            "multiple seeds and is significantly more expensive than the "
-            "Round-1-only stability report above)."
+            "run_extrafloat_segmentation: capacity scoring complete via "
+            "scorecard '%s' (cutoff_version=%s).",
+            scorecard_path,
+            scorecard.get("cutoff_version"),
         )
-        active_mask_for_stability = (
-            features_df["cluster_round2"].notna()
-            if "cluster_round2" in features_df.columns
-            else pd.Series(True, index=features_df.index)
+
+        expected_props = scorecard.get("calibration_metadata", {}).get(
+            "expected_tier_proportions"
         )
-        final_stability = compute_final_segment_stability(
+        if expected_props:
+            tier_drift_report = build_tier_drift_report(
+                expected_proportions=expected_props,
+                actual_labels=features_df["capacity_tier"],
+                categories=scorecard.get("tiers", BUSINESS_SEGMENTS),
+                config=drift_cfg,
+            )
+            features_df.attrs["tier_drift_report"] = tier_drift_report
+            if tier_drift_report.get("drift_detected"):
+                logger.warning(
+                    "run_extrafloat_segmentation: CAPACITY TIER DRIFT "
+                    "DETECTED — live capacity_tier proportions diverge "
+                    "from scorecard calibration (PSI=%.4f).",
+                    tier_drift_report.get("psi", float("nan")),
+                )
+    elif scoring_cfg.get("allow_missing_scorecard", False):
+        logger.warning(
+            "run_extrafloat_segmentation: step 2 — no usable scorecard "
+            "(scorecard_path=%r); capacity_tier will NOT be computed "
+            "(allow_missing_scorecard=True).",
+            scorecard_path,
+        )
+    else:
+        # _validate_config already raises for this case before we get here;
+        # this branch only matters if scorecard_path was set but the file
+        # doesn't exist (a genuine deployment error, not a config omission).
+        raise ValueError(
+            f"run_extrafloat_segmentation: scoring.scorecard_path "
+            f"'{scorecard_path}' does not exist and "
+            f"allow_missing_scorecard=False."
+        )
+
+    # ── Step 3: Diagnostic Clustering (optional) ──────────────────────────────
+    if clustering_cfg.get("enable_diagnostics", False):
+        logger.info(
+            "run_extrafloat_segmentation: step 3 — diagnostic clustering "
+            "(enable_diagnostics=True)."
+        )
+        features_df = run_diagnostic_clustering(
             features_df=features_df,
-            active_mask=active_mask_for_stability,
+            X_pca=X_pca,
             selected_cols=selected_cols,
             config=clustering_cfg,
         )
-        features_df.attrs["final_stability_report"] = final_stability
+        if "diag_degraded_mode" in features_df.attrs:
+            pass  # already logged inside run_diagnostic_clustering
+
+        if clustering_cfg.get("full_stability_check", False):
+            logger.info(
+                "run_extrafloat_segmentation: step 3b — diagnostic ensemble "
+                "stability check (re-runs the active-agent diagnostics "
+                "pipeline across multiple seeds; expensive)."
+            )
+            diagnostic_stability = compute_diagnostic_ensemble_stability(
+                features_df=features_df,
+                active_mask=~is_dormant,
+                selected_cols=selected_cols,
+                config=clustering_cfg,
+            )
+            features_df.attrs["diagnostic_stability_report"] = diagnostic_stability
+            logger.info(
+                "run_extrafloat_segmentation: diagnostic ensemble stability — "
+                "consistency=%.3f, ARI mean=%.3f ± %.3f (%d seeds, %d active agents)",
+                diagnostic_stability.get("ensemble_consistency_rate", float("nan")),
+                diagnostic_stability.get("ensemble_ari_mean", float("nan")),
+                diagnostic_stability.get("ensemble_ari_std", float("nan")),
+                diagnostic_stability.get("n_seeds", 0),
+                diagnostic_stability.get("n_active", 0),
+            )
+    else:
         logger.info(
-            "run_extrafloat_segmentation: final segment stability — "
-            "consistency=%.3f, ARI mean=%.3f ± %.3f (%d seeds, %d active agents)",
-            final_stability.get("segment_consistency_rate", float("nan")),
-            final_stability.get("segment_ari_mean", float("nan")),
-            final_stability.get("segment_ari_std", float("nan")),
-            final_stability.get("n_seeds", 0),
-            final_stability.get("n_active", 0),
+            "run_extrafloat_segmentation: step 3 — diagnostic clustering "
+            "disabled (clustering.enable_diagnostics=False); skipping."
         )
 
-    seg_col = cfg["output"].get("final_segment_col", "segment")
-    if seg_col != "segment" and "segment" in features_df.columns:
-        features_df = features_df.rename(columns={"segment": seg_col})
-
-    # ── Step 3: Pack Profiling ────────────────────────────────────────────────
-    logger.info("run_extrafloat_segmentation: step 3 — pack profiling.")
-    pack_profiles = build_cluster_pack_profiles(
-        df=features_df,
-        cluster_col="ensemble_cluster",
-        packs=PROFILING_PACKS,
-        melt_for_heatmap=False,
-    )
-
-    # ── Step 4: Tier Assignment ───────────────────────────────────────────────
-    logger.info("run_extrafloat_segmentation: step 4 — tier assignment.")
-    from extrafloat_segmentation_profiling import _compute_cluster_stats  # noqa: PLC0415
-
-    # Build per-cluster lift summary (mean lift across all packs)
-    lifts = pack_profiles.get("lifts", {})
-    if lifts:
-        lift_frames = []
-        for pack_name, lift_df in lifts.items():
-            mean_lift = lift_df.mean(axis=1).rename(pack_name)
-            lift_frames.append(mean_lift)
-        cluster_lift_summary = pd.concat(lift_frames, axis=1)
-    else:
-        # Fallback: use raw means for the first pack
-        means = pack_profiles.get("means", {})
-        first_pack = next(iter(means.values()), pd.DataFrame())
-        cluster_lift_summary = first_pack.mean(axis=1).rename("overall").to_frame()
-
-    cluster_stats = _compute_cluster_stats(features_df, "ensemble_cluster")
-
-    tier_table = build_cluster_tiers(
-        cluster_pack_scores=cluster_lift_summary,
-        cluster_stats=cluster_stats,
-        config=cfg.get("profiling"),
-    )
-
-    # Map tier back onto agents via ensemble_cluster
-    tier_map = tier_table.set_index("cluster")[["tier", "sub_label", "safety_flags"]]
-    features_df["tier"] = features_df["ensemble_cluster"].map(tier_map["tier"])
-    features_df["tier_sub_label"] = features_df["ensemble_cluster"].map(tier_map["sub_label"])
-    features_df["safety_flags"] = features_df["ensemble_cluster"].map(tier_map["safety_flags"])
-
-    # ── Step 4b: Deterministic Capacity Scoring (optional, opt-in) ───────────
-    # Shadow-run alongside the ensemble-cluster segment/tier above: computes
-    # capacity_score/capacity_tier from a frozen, versioned scorecard rather
-    # than a live population-relative ranking, so an agent's tier no longer
-    # moves just because other agents' scores shifted. Only runs when
-    # scoring.scorecard_path is configured — see DEFAULT_SEGMENTATION_CONFIG.
-    scoring_cfg = cfg.get("scoring", {})
-    scorecard_path: str = scoring_cfg.get("scorecard_path", "")
-    if scorecard_path:
-        if not os.path.isfile(scorecard_path):
-            if scoring_cfg.get("allow_missing_scorecard", True):
-                logger.warning(
-                    "run_extrafloat_segmentation: step 4b — scorecard_path "
-                    "'%s' does not exist; skipping capacity scoring "
-                    "(allow_missing_scorecard=True).",
-                    scorecard_path,
-                )
-            else:
-                raise ValueError(
-                    f"run_extrafloat_segmentation: scoring.scorecard_path "
-                    f"'{scorecard_path}' does not exist and "
-                    f"allow_missing_scorecard=False."
-                )
-        else:
-            logger.info(
-                "run_extrafloat_segmentation: step 4b — deterministic "
-                "capacity scoring via scorecard '%s'.",
-                scorecard_path,
-            )
-            scorecard = load_scorecard(scorecard_path)
-            is_dormant = (
-                features_df["cluster_round2"].isna()
-                if "cluster_round2" in features_df.columns
-                else pd.Series(False, index=features_df.index)
-            )
-            capacity_df = compute_agent_capacity(features_df, scorecard, is_dormant=is_dormant)
-            features_df = pd.concat([features_df, capacity_df], axis=1)
-
-            expected_props = scorecard.get("calibration_metadata", {}).get(
-                "expected_tier_proportions"
-            )
-            if expected_props:
-                tier_drift_report = build_tier_drift_report(
-                    expected_proportions=expected_props,
-                    actual_labels=features_df["capacity_tier"],
-                    categories=scorecard.get("tiers", BUSINESS_SEGMENTS),
-                    config=cfg.get("drift"),
-                )
-                features_df.attrs["tier_drift_report"] = tier_drift_report
-                if tier_drift_report.get("drift_detected"):
-                    logger.warning(
-                        "run_extrafloat_segmentation: CAPACITY TIER DRIFT "
-                        "DETECTED — live capacity_tier proportions diverge "
-                        "from scorecard calibration (PSI=%.4f).",
-                        tier_drift_report.get("psi", float("nan")),
-                    )
-    elif not scoring_cfg.get("allow_missing_scorecard", True):
-        raise ValueError(
-            "run_extrafloat_segmentation: scoring.allow_missing_scorecard=False "
-            "but scoring.scorecard_path is empty."
+    # ── Step 4: Pack Profiling (optional, research-only) ─────────────────────
+    if cfg.get("profiling", {}).get("enable_pack_profiles", False) and "capacity_tier" in features_df.columns:
+        logger.info("run_extrafloat_segmentation: step 4 — pack profiling.")
+        features_df.attrs["pack_profiles"] = build_cluster_pack_profiles(
+            df=features_df,
+            cluster_col="capacity_tier",
+            packs=PROFILING_PACKS,
+            melt_for_heatmap=False,
         )
 
     # ── Step 5: Reference List Enrichment (optional) ─────────────────────────
@@ -758,19 +737,32 @@ def run_extrafloat_segmentation(
             "run_extrafloat_segmentation: step 5 — no reference lists provided, skipping."
         )
 
-    # ── Step 5b: Quality Gate ─────────────────────────────────────────────────
-    # Runs before intermediate columns (cluster_round2, hdb_tier, ensemble_cluster)
-    # are trimmed away in Step 6, and after agent_category (if any) is merged in
-    # Step 5, so both the unsupervised and supervised checks have what they need.
-    logger.info("run_extrafloat_segmentation: step 5b — quality gate.")
-    quality_gate_report = run_quality_gate(
-        features_df,
-        config=cfg.get("quality_gate"),
-        segment_col=seg_col,
-    )
+    # ── Step 6: Quality Gate ─────────────────────────────────────────────────
+    # Runs before intermediate diagnostic columns are trimmed away in Step 7,
+    # and after agent_category (if any) is merged in Step 5, so both the
+    # unsupervised and supervised checks have what they need.
+    logger.info("run_extrafloat_segmentation: step 6 — quality gate.")
+    tier_col = cfg["output"].get("primary_tier_col", "capacity_tier")
+    quality_gate_report: dict[str, Any]
+    if tier_col in features_df.columns:
+        quality_gate_report = run_quality_gate(
+            features_df,
+            config=cfg.get("quality_gate"),
+            segment_col=tier_col,
+            cluster_col="diag_ensemble_cluster",
+            hdb_tier_col="diag_hdb_tier",
+            active_mask=~is_dormant,
+        )
+    else:
+        logger.info(
+            "run_extrafloat_segmentation: step 6 — '%s' not present (no "
+            "scorecard was applied) — skipping quality gate.",
+            tier_col,
+        )
+        quality_gate_report = {"passed": True, "checks": {}, "has_ground_truth": False, "skipped": True}
     features_df.attrs["quality_gate"] = quality_gate_report
     if quality_gate_report.get("skipped"):
-        logger.info("run_extrafloat_segmentation: quality gate disabled via config — skipped.")
+        logger.info("run_extrafloat_segmentation: quality gate skipped.")
     elif quality_gate_report["passed"]:
         logger.info("run_extrafloat_segmentation: quality gate PASSED.")
     else:
@@ -784,17 +776,29 @@ def run_extrafloat_segmentation(
             quality_gate_report["checks"],
         )
 
-    # ── Step 5c: Structured Alerts ────────────────────────────────────────────
-    # Rolls degraded_mode/quality_gate/drift/final_stability into one list so
-    # a caller can route it without knowing each report's shape individually.
+    # ── Step 6b: Structured Alerts ────────────────────────────────────────────
+    # Rolls degraded_mode/quality_gate/drift/tier_drift into one list so a
+    # caller can route it without knowing each report's shape individually.
     alerts = _collect_alerts(features_df)
     features_df.attrs["alerts"] = alerts
     for alert in alerts:
         log_fn = logger.critical if alert["severity"] == "critical" else logger.warning
         log_fn("run_extrafloat_segmentation: ALERT [%s/%s] %s", alert["severity"], alert["source"], alert["message"])
 
-    # ── Step 6: Join MSISDN + Trim Output ────────────────────────────────────
-    logger.info("run_extrafloat_segmentation: step 6 — output trimming.")
+    # ── Step 7: Legacy Aliases + Join MSISDN + Trim Output ───────────────────
+    logger.info("run_extrafloat_segmentation: step 7 — output trimming.")
+
+    if cfg["output"].get("emit_legacy_aliases", True) and tier_col in features_df.columns:
+        logger.warning(
+            "run_extrafloat_segmentation: emitting deprecated 'segment'/'tier' "
+            "columns as aliases of '%s'. These will be removed in a future "
+            "release — read '%s' directly. Set "
+            "output.emit_legacy_aliases=False to opt out now.",
+            tier_col, tier_col,
+        )
+        features_df["segment"] = features_df[tier_col]
+        features_df["tier"] = features_df[tier_col]
+
     features_df = _join_msisdn(features_df, df)
 
     keep_intermediate = cfg["output"].get("keep_intermediate_cols", False)
@@ -820,12 +824,12 @@ def run_extrafloat_segmentation(
     _maybe_save_output(result, cfg)
     _maybe_save_run_manifest(result, cfg, n_input_rows=len(agents_df))
 
-    n_segments = result[seg_col].nunique() if seg_col in result.columns else 0
+    n_tiers = result[tier_col].nunique() if tier_col in result.columns else 0
     logger.info(
         "run_extrafloat_segmentation: pipeline complete — %d agents, "
-        "%d distinct segments.",
+        "%d distinct tiers.",
         len(result),
-        n_segments,
+        n_tiers,
     )
 
     return result
@@ -892,32 +896,34 @@ def _build_parser() -> argparse.ArgumentParser:
         prog="python -m run_extrafloat_segmentation",
         description=(
             "MTN MoMo Uganda agent segmentation pipeline.\n\n"
-            "Runs feature engineering → two-stage clustering → pack profiling\n"
-            "→ tier assignment → optional whitelist/blacklist enrichment."
+            "Runs feature engineering → deterministic capacity scoring\n"
+            "(requires --scorecard) → optional diagnostic clustering →\n"
+            "optional whitelist/blacklist enrichment → quality gate."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 examples:
-  # minimal — input CSV, output CSV
-  python run_extrafloat_segmentation.py --agents agents.csv --output out/
+  # minimal — input CSV, scorecard, output CSV
+  python run_extrafloat_segmentation.py --agents agents.csv \\
+      --scorecard scorecards/capacity_scorecard_v1.json --output out/
 
   # with reference lists
   python run_extrafloat_segmentation.py \\
-      --agents agents.csv --whitelist wl.csv --blacklist bl.csv --output out/
+      --agents agents.csv --scorecard scorecards/capacity_scorecard_v1.json \\
+      --whitelist wl.csv --blacklist bl.csv --output out/
 
-  # override clustering settings inline
+  # enable diagnostic clustering alongside capacity scoring
   python run_extrafloat_segmentation.py --agents agents.csv \\
-      --clustering '{"kmeans_round1_k": 8, "stability_n_seeds": 5}'
+      --scorecard scorecards/capacity_scorecard_v1.json \\
+      --clustering '{"enable_diagnostics": true}'
 
   # load full config from JSON file
   python run_extrafloat_segmentation.py --config config.json
 
   # save drift baseline on first run, check on subsequent runs
   python run_extrafloat_segmentation.py --agents agents.csv \\
+      --scorecard scorecards/capacity_scorecard_v1.json \\
       --drift '{"save_baseline": true, "baseline_save_path": "baseline.csv"}'
-
-  python run_extrafloat_segmentation.py --agents agents.csv \\
-      --drift '{"baseline_path": "baseline.csv"}'
 """,
     )
 
@@ -934,6 +940,18 @@ examples:
         "--blacklist", metavar="PATH", default="",
         help="Optional blacklist CSV path.",
     )
+    p.add_argument(
+        "--scorecard", metavar="PATH", default="",
+        help=(
+            "Path to a versioned capacity scorecard JSON (from "
+            "calibrate_scorecard.py). Required unless --allow-missing-scorecard "
+            "is passed."
+        ),
+    )
+    p.add_argument(
+        "--allow-missing-scorecard", action="store_true",
+        help="Run without a scorecard (no capacity_tier will be computed).",
+    )
 
     # ── Output ────────────────────────────────────────────────────────────────
     p.add_argument(
@@ -942,7 +960,7 @@ examples:
     )
     p.add_argument(
         "--keep-intermediate", action="store_true",
-        help="Include intermediate cluster columns in the output CSV.",
+        help="Include intermediate diagnostic ID columns in the output CSV.",
     )
 
     # ── Config overrides ──────────────────────────────────────────────────────
@@ -956,20 +974,11 @@ examples:
     )
     p.add_argument(
         "--clustering", metavar="JSON",
-        help='Clustering config overrides as a JSON string, e.g. \'{"kmeans_round1_k": 8}\'.',
+        help='Diagnostic-clustering config overrides as a JSON string, e.g. \'{"enable_diagnostics": true}\'.',
     )
     p.add_argument(
         "--drift", metavar="JSON",
         help='Drift-detection config as a JSON string, e.g. \'{"baseline_path": "baseline.csv"}\'.',
-    )
-    p.add_argument(
-        "--scorecard", metavar="PATH", default="",
-        help=(
-            "Path to a versioned capacity scorecard JSON (from "
-            "calibrate_scorecard.py). When set, computes deterministic "
-            "capacity_score/capacity_tier columns alongside the existing "
-            "ensemble-cluster segment/tier."
-        ),
     )
 
     # ── Logging ───────────────────────────────────────────────────────────────
@@ -1044,6 +1053,12 @@ def main(argv: list[str] | None = None) -> None:
     config["output"]["output_dir"] = args.output
     config["output"]["keep_intermediate_cols"] = args.keep_intermediate
 
+    config.setdefault("scoring", {})
+    if args.scorecard:
+        config["scoring"]["scorecard_path"] = args.scorecard
+    if args.allow_missing_scorecard:
+        config["scoring"]["allow_missing_scorecard"] = True
+
     # Inline JSON overrides
     features_override = _parse_json_arg(args.features, "features")
     if features_override:
@@ -1057,9 +1072,6 @@ def main(argv: list[str] | None = None) -> None:
     if drift_override:
         config.setdefault("drift", {}).update(drift_override)
 
-    if args.scorecard:
-        config.setdefault("scoring", {})["scorecard_path"] = args.scorecard
-
     # ── Run ───────────────────────────────────────────────────────────────────
     try:
         result = run_extrafloat_segmentation_from_config(config)
@@ -1068,18 +1080,10 @@ def main(argv: list[str] | None = None) -> None:
         sys.exit(1)
 
     # ── Print summary ─────────────────────────────────────────────────────────
-    seg_col = config.get("output", {}).get("final_segment_col", "segment")
-    if seg_col in result.columns:
-        print("\nSegment distribution:")
-        print(result[seg_col].value_counts().to_string())
-
-    stability = result.attrs.get("stability_report", {})
-    if stability.get("n_seeds", 0) > 0:
-        print(
-            f"\nCluster stability  silhouette={stability['silhouette_score']:.3f}  "
-            f"ARI={stability['ari_mean']:.3f} ± {stability['ari_std']:.3f}"
-            f"  ({stability['n_seeds']} seeds)"
-        )
+    tier_col = config.get("output", {}).get("primary_tier_col", "capacity_tier")
+    if tier_col in result.columns:
+        print("\nCapacity tier distribution:")
+        print(result[tier_col].value_counts().to_string())
 
     drift = result.attrs.get("drift_report", {})
     if drift:
@@ -1110,15 +1114,15 @@ def main(argv: list[str] | None = None) -> None:
             + (f"  breached: {failed_checks}" if failed_checks else "")
         )
 
-    final_stability = result.attrs.get("final_stability_report", {})
-    if final_stability.get("n_seeds", 0) > 0:
+    diag_stability = result.attrs.get("diagnostic_stability_report", {})
+    if diag_stability.get("n_seeds", 0) > 0:
         print(
-            f"\nFinal segment stability  "
-            f"consistency={final_stability['segment_consistency_rate']:.3f}  "
-            f"ARI={final_stability['segment_ari_mean']:.3f} ± "
-            f"{final_stability['segment_ari_std']:.3f}"
-            f"  ({final_stability['n_seeds']} seeds, "
-            f"{final_stability['n_active']} active agents)"
+            f"\nDiagnostic ensemble stability  "
+            f"consistency={diag_stability['ensemble_consistency_rate']:.3f}  "
+            f"ARI={diag_stability['ensemble_ari_mean']:.3f} ± "
+            f"{diag_stability['ensemble_ari_std']:.3f}"
+            f"  ({diag_stability['n_seeds']} seeds, "
+            f"{diag_stability['n_active']} active agents)"
         )
 
     alerts = result.attrs.get("alerts", [])

@@ -58,8 +58,6 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from extrafloat_segmentation_pipeline import BUSINESS_SEGMENTS
-
 logger = logging.getLogger(__name__)
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -67,6 +65,20 @@ logger = logging.getLogger(__name__)
 # ─────────────────────────────────────────────────────────────────────────────
 
 SCORECARD_SCHEMA_VERSION: str = "1.0"
+
+# The canonical business tier ladder. Owned here, not by
+# extrafloat_segmentation_pipeline.py — that module is diagnostics-only and
+# no longer assigns any business tier, so it has no reason to define one.
+BUSINESS_SEGMENTS: tuple[str, ...] = (
+    "Below Threshold",
+    "New Bronze",
+    "Bronze",
+    "Silver",
+    "Gold",
+    "Platinum",
+    "Titanium",
+    "Diamond",
+)
 
 # Factor groups: each maps a business-meaning bucket to the raw KPI columns
 # that feed it and the aggregation used to combine them into one raw value

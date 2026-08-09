@@ -1,10 +1,34 @@
 """
 extrafloat_segmentation_pipeline.py
 =====================================
-Two-stage KMeans -> GMM+HDBSCAN ensemble clustering pipeline for
-Uganda MTN MoMo agent segmentation.
+GMM + HDBSCAN diagnostic clustering for Uganda MTN MoMo agent segmentation.
 
-Refactors cl_file3.txt + cl_file4.txt + cl_file5.txt.
+This module is diagnostics-only. It no longer decides any agent's business
+tier — that is `extrafloat_segmentation_scoring.py`'s job, via a
+deterministic, versioned capacity scorecard. This pipeline exists to
+support two things a frozen scorecard cannot do on its own:
+
+  1. **Anomaly flagging** — HDBSCAN noise points (diag_is_anomaly) surface
+     agents whose behavior doesn't resemble any dense cluster, worth a
+     human look regardless of what their capacity_tier says.
+  2. **Archetype research** — GMM/HDBSCAN groupings and pack profiles let
+     an analyst ask "what does a Gold-tier agent's feature profile
+     actually look like" when reviewing/recalibrating a scorecard.
+
+Earlier versions of this module also ran two rounds of KMeans and used a
+composite-score cluster ranking to assign the business `segment`/`tier`
+directly from cluster membership. That mechanism is gone: an agent's tier
+moved whenever the *population* changed, even with the agent's own
+behavior unchanged, which is not defensible for a product whose tier sizes
+a real credit limit. See `extrafloat_segmentation_scoring.py`'s module
+docstring for the replacement and the reasoning.
+
+Because this is diagnostics rather than production scoring, it is entirely
+optional: `run_extrafloat_segmentation` only calls
+`run_diagnostic_clustering` when `clustering.enable_diagnostics=True`, and
+missing optional dependencies (hdbscan / umap-learn) can only ever block a
+deliberately-requested diagnostics run, never a production capacity-scoring
+run.
 
 Market: Uganda (UG) — MTN Mobile Money.
 """
@@ -17,7 +41,6 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
-from sklearn.cluster import KMeans
 from sklearn.decomposition import PCA
 from sklearn.mixture import GaussianMixture
 from sklearn.preprocessing import RobustScaler
@@ -40,22 +63,13 @@ logger = logging.getLogger(__name__)
 # CONSTANTS
 # ─────────────────────────────────────────────────────────────────────────────
 
-DORMANT_FILL_LABEL: str = "Dormant_Cluster_kmeans1"
+DORMANT_FILL_LABEL: str = "Dormant_Cluster"
 ENSEMBLE_MISSING_LABEL: str = "ENSEMBLE_MISSING"
 HDBSCAN_NOISE_LABEL: int = -1
 
-BUSINESS_SEGMENTS: tuple[str, ...] = (
-    "Below Threshold",
-    "New Bronze",
-    "Bronze",
-    "Silver",
-    "Gold",
-    "Platinum",
-    "Titanium",
-    "Diamond",
-)
-
-# HDB tier names ordered from lowest to highest activity (data-driven assignment)
+# HDB tier names ordered from lowest to highest activity (data-driven assignment).
+# Purely descriptive labels for diagnostic clusters — NOT business tiers.
+# Business tiers (BUSINESS_SEGMENTS) live in extrafloat_segmentation_scoring.py.
 _HDB_TIER_NAMES: list[str] = [
     "Emerging / Low Activity",
     "Bronze Active",
@@ -65,30 +79,17 @@ _HDB_TIER_NAMES: list[str] = [
     "Platinum Power",
 ]
 
-# Profiling columns used for composite scoring (must exist in features_df)
-PROFILING_COLS: tuple[str, ...] = (
-    "commission",
-    "cash_out_value_1m",
-    "cash_out_value_3m",
-    "cash_in_value_1m",
-    "cash_in_value_6m",
-    "payment_value_1m",
-    "payment_value_3m",
-    "cash_out_vol_1m",
-    "cash_out_vol_3m",
-    "commission_per_value_3m",
-    "commission_per_value_6m",
-    "tenure_years",
-)
-
 # ─────────────────────────────────────────────────────────────────────────────
 # DEFAULT CONFIGURATION
 # ─────────────────────────────────────────────────────────────────────────────
 
 DEFAULT_CLUSTERING_CONFIG: dict[str, Any] = {
     "random_state": 42,
-    "kmeans_round1_k": 6,
-    "kmeans_round2_k": 6,
+    # When False (default), run_diagnostic_clustering is never called from
+    # run_extrafloat_segmentation — capacity scoring (deterministic scorecard)
+    # is the only thing that decides an agent's tier. Set True to also run
+    # GMM/HDBSCAN diagnostics (anomaly flagging, archetype research) alongside.
+    "enable_diagnostics": False,
     # ── Dormant detection (multi-product composite inactivity score) ──────────
     "dormant_inactivity_cols": [
         "cash_out_vol_1m",
@@ -119,31 +120,18 @@ DEFAULT_CLUSTERING_CONFIG: dict[str, Any] = {
     "hdb_tier_ranking_cols": ["total_value_1m", "cash_out_value_1m", "commission"],
     # ── PCA variance target ───────────────────────────────────────────────────
     "target_pca_variance": 0.90,
-    # ── Composite score weights ───────────────────────────────────────────────
-    "composite_weights": {
-        "value": 0.5,
-        "activity": 0.3,
-        "efficiency": 0.2,
-    },
-    # ── ARI-based weight optimisation (opt-in; requires agent_category col) ──
-    "optimize_composite_weights": False,
-    "weight_grid_step": 0.1,
-    # ── Cluster stability reporting ───────────────────────────────────────────
+    # ── Diagnostic ensemble stability reporting (opt-in; expensive) ──────────
     "stability_n_seeds": 3,
-    "sample_cap_silhouette": 20000,
-    # Full-pipeline (GMM/UMAP/HDBSCAN/segment) stability re-run across seeds.
-    # O(stability_n_seeds) full active-pipeline re-runs — off by default;
+    # O(stability_n_seeds) full active-diagnostics re-runs — off by default;
     # meant for scheduled/offline validation, not every production run.
-    # See compute_final_segment_stability().
+    # See compute_diagnostic_ensemble_stability().
     "full_stability_check": False,
     # ── Optional dependency requirements ───────────────────────────────────────
-    # HDBSCAN/UMAP are "soft" (importable-or-not) dependencies. When required
-    # (the default) a missing install raises RuntimeError at the start of
-    # run_clustering_pipeline instead of silently degrading cluster quality
-    # (missing HDBSCAN -> hdb_tier="Unavailable" for every active agent;
-    # missing UMAP -> HDBSCAN receives a raw PCA-scaled column slice instead
-    # of a real embedding). Set to False only for a deliberately degraded
-    # local/dev run.
+    # HDBSCAN/UMAP are "soft" (importable-or-not) dependencies. Only matter
+    # when enable_diagnostics=True: a missing install then raises RuntimeError
+    # at the start of run_diagnostic_clustering instead of silently degrading
+    # diagnostic quality. Never blocks production capacity scoring, which
+    # does not depend on this module at all.
     "require_hdbscan": True,
     "require_umap": True,
 }
@@ -159,25 +147,18 @@ def _get_clustering_config(config: dict | None) -> dict[str, Any]:
     if config is None:
         return deepcopy(DEFAULT_CLUSTERING_CONFIG)
     merged = deepcopy(DEFAULT_CLUSTERING_CONFIG)
-    for k, v in config.items():
-        if k == "composite_weights" and isinstance(v, dict):
-            merged["composite_weights"].update(v)
-        else:
-            merged[k] = v
+    merged.update(config)
     return merged
 
 
 def _check_optional_dependencies(cfg: dict[str, Any]) -> dict[str, bool]:
     """Verify optional ML dependencies (hdbscan, umap-learn) against config.
 
-    HDBSCAN and UMAP are import-optional: when absent, the pipeline used to
-    keep running and silently degrade — HDBSCAN missing meant every active
-    agent's ``hdb_tier`` became the string "Unavailable" (collapsing the
-    ensemble label and hence the business ``segment``), and UMAP missing
-    meant HDBSCAN was fed a meaningless raw column slice instead of a real
-    embedding — with only a log line marking the difference. For a pipeline
-    whose output sizes real credit limits downstream, a silently degraded
-    run is worse than a run that refuses to start.
+    Only ever called from `run_diagnostic_clustering`, i.e. only when a
+    caller has deliberately opted into diagnostics
+    (`clustering.enable_diagnostics=True`). Production capacity scoring
+    never imports this module's public function and so can never be blocked
+    by a missing optional dependency here.
 
     Parameters
     ----------
@@ -200,52 +181,23 @@ def _check_optional_dependencies(cfg: dict[str, Any]) -> dict[str, bool]:
 
     if cfg.get("require_hdbscan", True) and not _HDBSCAN_AVAILABLE:
         raise RuntimeError(
-            "run_clustering_pipeline: hdbscan is not installed but "
+            "run_diagnostic_clustering: hdbscan is not installed but "
             "require_hdbscan=True (the default). Install with "
             "'pip install hdbscan', or explicitly set "
             "config['clustering']['require_hdbscan']=False to allow a "
-            "degraded run (hdb_tier will be 'Unavailable' for all active "
-            "agents, which collapses ensemble/segment quality)."
+            "degraded diagnostics run (diag_hdb_tier will be 'Unavailable' "
+            "for all active agents)."
         )
     if cfg.get("require_umap", True) and not _UMAP_AVAILABLE:
         raise RuntimeError(
-            "run_clustering_pipeline: umap-learn is not installed but "
+            "run_diagnostic_clustering: umap-learn is not installed but "
             "require_umap=True (the default). Install with "
             "'pip install umap-learn', or explicitly set "
             "config['clustering']['require_umap']=False to allow a "
-            "degraded run (HDBSCAN will receive a raw PCA-scaled column "
-            "slice instead of a UMAP embedding)."
+            "degraded diagnostics run (HDBSCAN will receive a raw "
+            "PCA-scaled column slice instead of a UMAP embedding)."
         )
     return status
-
-
-def _run_kmeans_round1(
-    X_pca: np.ndarray, cfg: dict[str, Any], rng: np.random.RandomState
-) -> np.ndarray:
-    """Fit KMeans on all agents (Round 1).
-
-    Parameters
-    ----------
-    X_pca : PCA-reduced feature array (all agents).
-    cfg   : Clustering config.
-    rng   : Random state.
-
-    Returns
-    -------
-    Integer cluster label array of length n_agents.
-    """
-    k = cfg["kmeans_round1_k"]
-    logger.info("_run_kmeans_round1: fitting KMeans k=%d on %d agents", k, len(X_pca))
-    km = KMeans(
-        n_clusters=k,
-        random_state=rng.randint(0, 2**31),
-        n_init=20,
-        max_iter=300,
-    )
-    labels = km.fit_predict(X_pca)
-    for cluster_id, count in zip(*np.unique(labels, return_counts=True)):
-        logger.debug("_run_kmeans_round1: cluster %d -> %d agents", cluster_id, count)
-    return labels
 
 
 def _identify_dormant_mask(
@@ -257,6 +209,11 @@ def _identify_dormant_mask(
     percentile (clipped to [0, 1]) and then the weighted sum is computed.
     Agents whose composite score is at or below *dormant_composite_threshold*
     are classified as dormant.
+
+    This is the single source of truth for dormancy across the whole
+    segmentation pipeline — both `extrafloat_segmentation_scoring.py`
+    (dormant agents forced to the lowest capacity tier) and this module's
+    diagnostics call it with the same config.
 
     Parameters
     ----------
@@ -309,56 +266,6 @@ def _identify_dormant_mask(
         threshold,
     )
     return mask
-
-
-def _run_kmeans_round2(
-    features_df: pd.DataFrame,
-    active_mask: pd.Series,
-    selected_cols: list[str],
-    cfg: dict[str, Any],
-    rng: np.random.RandomState,
-) -> np.ndarray:
-    """Fit KMeans on active agents with fresh scaling + PCA (Round 2).
-
-    Parameters
-    ----------
-    features_df  : Full agent feature DataFrame.
-    active_mask  : Boolean mask of active (non-dormant) agents.
-    selected_cols: Feature columns for re-scaling.
-    cfg          : Clustering config.
-    rng          : Random state.
-
-    Returns
-    -------
-    Integer cluster label array of length active_mask.sum().
-    """
-    k = cfg["kmeans_round2_k"]
-    target_var = cfg["target_pca_variance"]
-    rs = rng.randint(0, 2**31)
-
-    valid_cols = [c for c in selected_cols if c in features_df.columns]
-    X_active = features_df.loc[active_mask, valid_cols].fillna(0.0).astype(float).values
-
-    scaler = RobustScaler()
-    X_scaled = scaler.fit_transform(X_active)
-
-    pca_full = PCA(random_state=rs)
-    pca_full.fit(X_scaled)
-    cum_var = np.cumsum(pca_full.explained_variance_ratio_)
-    n_comp = int(np.argmax(cum_var >= target_var) + 1)
-
-    pca = PCA(n_components=n_comp, svd_solver="randomized", random_state=rs)
-    X_active_pca = pca.fit_transform(X_scaled)
-
-    logger.info(
-        "_run_kmeans_round2: k=%d, n_active=%d, n_components=%d",
-        k,
-        len(X_active),
-        n_comp,
-    )
-    km = KMeans(n_clusters=k, random_state=rs, n_init=20, max_iter=300)
-    labels = km.fit_predict(X_active_pca)
-    return labels
 
 
 def _get_active_pca(
@@ -616,12 +523,14 @@ def _map_hdb_to_tier(
     features_df_active: pd.DataFrame,
     cfg: dict[str, Any],
 ) -> pd.Series:
-    """Assign data-driven tier names to HDBSCAN cluster IDs.
+    """Assign data-driven diagnostic labels to HDBSCAN cluster IDs.
 
     Ranks non-noise clusters by their mean value of the first available
     business KPI column from *hdb_tier_ranking_cols* (default: total_value_1m
     → cash_out_value_1m → commission).  Using a business KPI centroid rather
-    than PC1 ensures tier order reflects commercial value, not variance.
+    than PC1 makes the diagnostic label order reflect commercial value, not
+    variance. These labels are descriptive research aids only — they are
+    NOT business tiers and never feed into capacity_tier.
     Noise label (-1) -> "Noise / Irregular".
 
     Parameters
@@ -633,7 +542,7 @@ def _map_hdb_to_tier(
 
     Returns
     -------
-    pd.Series of tier name strings, same length as hdb_labels_active.
+    pd.Series of diagnostic label strings, same length as hdb_labels_active.
     """
     unique_clusters = sorted(
         c for c in np.unique(hdb_labels_active) if c != HDBSCAN_NOISE_LABEL
@@ -667,26 +576,26 @@ def _map_hdb_to_tier(
             rank_col,
         )
     else:
-        # Last-resort: warn and skip ranking (assign tiers in discovery order)
+        # Last-resort: warn and skip ranking (assign labels in discovery order)
         logger.warning(
             "_map_hdb_to_tier: none of %s found in features_df_active — "
-            "assigning tiers in cluster-ID order (no business-KPI ranking).",
+            "assigning labels in cluster-ID order (no business-KPI ranking).",
             ranking_cols,
         )
         cluster_means = {cid: float(cid) for cid in unique_clusters}
 
     sorted_clusters = sorted(unique_clusters, key=lambda c: cluster_means[c])
 
-    # Evenly distribute tier names across clusters
+    # Evenly distribute descriptive labels across clusters
     tier_groups = np.array_split(sorted_clusters, min(len(_HDB_TIER_NAMES), len(sorted_clusters)))
     cluster_to_tier: dict[int, str] = {}
-    tier_list = _HDB_TIER_NAMES[-len(tier_groups):]  # use highest tiers if fewer clusters
+    tier_list = _HDB_TIER_NAMES[-len(tier_groups):]  # use highest labels if fewer clusters
     for tier_name, group in zip(tier_list, tier_groups):
         for cid in group:
             cluster_to_tier[cid] = tier_name
 
     logger.info(
-        "_map_hdb_to_tier: mapping %d clusters -> %d tiers (data-driven)",
+        "_map_hdb_to_tier: mapping %d clusters -> %d diagnostic labels",
         len(unique_clusters),
         len(set(cluster_to_tier.values())),
     )
@@ -711,12 +620,12 @@ def _build_ensemble_labels(
     gmm_labels: pd.Series,
     hdb_tier_col: pd.Series,
 ) -> pd.Series:
-    """Combine GMM ID and HDB tier into "GMM_{id}__{tier}" string labels.
+    """Combine GMM ID and HDB diagnostic label into "GMM_{id}__{tier}" string labels.
 
     Parameters
     ----------
     gmm_labels   : Integer GMM cluster IDs (Int64 series).
-    hdb_tier_col : String HDB tier labels.
+    hdb_tier_col : String HDB diagnostic label.
 
     Returns
     -------
@@ -730,305 +639,10 @@ def _build_ensemble_labels(
     return pd.Series(result, index=gmm_labels.index, dtype="object")
 
 
-def _find_optimal_composite_weights(
-    profile_means: pd.DataFrame,
-    features_df: pd.DataFrame,
-    ensemble_col: pd.Series,
-    cfg: dict[str, Any],
-) -> dict[str, float]:
-    """Grid-search composite weight combinations that maximise ARI vs agent_category.
-
-    Searches all (value, activity, efficiency) triples in steps of
-    *weight_grid_step* that sum to 1.0.  For each triple the resulting segment
-    assignment is compared to ``features_df["agent_category"]`` using ARI.
-    Returns the weight triple with the highest ARI; falls back to
-    ``cfg["composite_weights"]`` if no improvement is found or if the
-    ``agent_category`` column is absent.
-
-    Parameters
-    ----------
-    profile_means : DataFrame (index=ensemble_cluster, cols=KPI features).
-    features_df   : Agent-level feature DataFrame containing ``agent_category``.
-    ensemble_col  : Series of ensemble cluster labels aligned with features_df.
-    cfg           : Clustering config.
-
-    Returns
-    -------
-    dict with keys ``value``, ``activity``, ``efficiency``.
-    """
-    from sklearn.metrics import adjusted_rand_score  # noqa: PLC0415
-
-    default_weights: dict[str, float] = dict(cfg.get("composite_weights", {"value": 0.5, "activity": 0.3, "efficiency": 0.2}))
-
-    if "agent_category" not in features_df.columns:
-        logger.info(
-            "_find_optimal_composite_weights: agent_category column absent — "
-            "using default weights %s",
-            default_weights,
-        )
-        return default_weights
-
-    step: float = float(cfg.get("weight_grid_step", 0.1))
-    steps = [round(i * step, 10) for i in range(int(1.0 / step) + 1)]
-
-    true_labels = features_df["agent_category"].astype(str).values
-
-    best_ari: float = -2.0
-    best_weights = default_weights
-
-    for v in steps:
-        for a in steps:
-            e = round(1.0 - v - a, 10)
-            if e < 0 or e > 1.0 + 1e-9:
-                continue
-            trial_cfg = {**cfg, "composite_weights": {"value": v, "activity": a, "efficiency": e}}
-            composite = _compute_composite_score(profile_means, trial_cfg)
-            sorted_clusters = composite.sort_values(ascending=True).index.tolist()
-            n = len(sorted_clusters)
-            seg_map: dict[str, str] = {}
-            for rank, cl in enumerate(sorted_clusters):
-                seg_idx = min(int(rank / n * len(BUSINESS_SEGMENTS)), len(BUSINESS_SEGMENTS) - 1)
-                seg_map[cl] = BUSINESS_SEGMENTS[seg_idx]
-            seg_map[DORMANT_FILL_LABEL] = BUSINESS_SEGMENTS[0]
-            seg_map[ENSEMBLE_MISSING_LABEL] = BUSINESS_SEGMENTS[0]
-            pred_labels = ensemble_col.map(seg_map).fillna(BUSINESS_SEGMENTS[0]).values
-            try:
-                ari = adjusted_rand_score(true_labels, pred_labels)
-            except Exception:  # noqa: BLE001
-                continue
-            if ari > best_ari:
-                best_ari = ari
-                best_weights = {"value": v, "activity": a, "efficiency": round(e, 10)}
-
-    logger.info(
-        "_find_optimal_composite_weights: best weights=%s (ARI=%.4f vs default ARI=%.4f)",
-        best_weights,
-        best_ari,
-        adjusted_rand_score(
-            true_labels,
-            ensemble_col.map(
-                {
-                    **{
-                        cl: BUSINESS_SEGMENTS[min(int(i / len(profile_means) * len(BUSINESS_SEGMENTS)), len(BUSINESS_SEGMENTS) - 1)]
-                        for i, cl in enumerate(_compute_composite_score(profile_means, cfg).sort_values().index)
-                    },
-                    DORMANT_FILL_LABEL: BUSINESS_SEGMENTS[0],
-                    ENSEMBLE_MISSING_LABEL: BUSINESS_SEGMENTS[0],
-                }
-            ).fillna(BUSINESS_SEGMENTS[0]).values,
-        ),
-    )
-    return best_weights
-
-
-def _compute_composite_score(
-    profile_means: pd.DataFrame, cfg: dict[str, Any]
-) -> pd.Series:
-    """Compute weighted composite score per ensemble cluster from mean profiles.
-
-    Groups:
-    - value     : commission + cash_out/in + payment values (sum, normalized)
-    - activity  : cash_out/in volumes (sum, normalized)
-    - efficiency: commission_per_value + tenure (mean, normalized)
-
-    Parameters
-    ----------
-    profile_means : DataFrame (index=ensemble_cluster, cols=KPI features).
-    cfg           : Clustering config with composite_weights dict.
-
-    Returns
-    -------
-    pd.Series of composite scores, index=ensemble_cluster.
-    """
-    weights = cfg.get("composite_weights", {"value": 0.5, "activity": 0.3, "efficiency": 0.2})
-
-    def _norm(s: pd.Series) -> pd.Series:
-        lo, hi = s.min(), s.max()
-        if hi == lo:
-            return pd.Series(0.0, index=s.index)
-        return (s - lo) / (hi - lo)
-
-    value_cols = [
-        c for c in (
-            "commission", "cash_out_value_1m", "cash_out_value_3m",
-            "cash_in_value_1m", "cash_in_value_6m",
-            "payment_value_1m", "payment_value_3m",
-        ) if c in profile_means.columns
-    ]
-    activity_cols = [
-        c for c in ("cash_out_vol_1m", "cash_out_vol_3m")
-        if c in profile_means.columns
-    ]
-    efficiency_cols = [
-        c for c in ("commission_per_value_3m", "commission_per_value_6m", "tenure_years")
-        if c in profile_means.columns
-    ]
-
-    value_score = _norm(profile_means[value_cols].sum(axis=1)) if value_cols else pd.Series(0.0, index=profile_means.index)
-    activity_score = _norm(profile_means[activity_cols].sum(axis=1)) if activity_cols else pd.Series(0.0, index=profile_means.index)
-    efficiency_score = _norm(profile_means[efficiency_cols].mean(axis=1)) if efficiency_cols else pd.Series(0.0, index=profile_means.index)
-
-    composite = (
-        float(weights.get("value", 0.5)) * value_score
-        + float(weights.get("activity", 0.3)) * activity_score
-        + float(weights.get("efficiency", 0.2)) * efficiency_score
-    )
-    return composite
-
-
-def _map_ensemble_to_segment(
-    ensemble_col: pd.Series,
-    features_df: pd.DataFrame,
-    cfg: dict[str, Any],
-) -> pd.Series:
-    """Assign business segments to agents via data-driven composite score ranking.
-
-    Algorithm:
-    1. Compute mean profile per ensemble cluster over PROFILING_COLS.
-    2. Score each cluster with a composite score.
-    3. Rank clusters by score (ascending).
-    4. Assign BUSINESS_SEGMENTS by quantile (evenly distributed).
-    5. Dormant cluster (DORMANT_FILL_LABEL) always -> "Below Threshold".
-
-    Parameters
-    ----------
-    ensemble_col : Series of ensemble cluster labels (aligned with features_df).
-    features_df  : Agent feature DataFrame.
-    cfg          : Clustering config.
-
-    Returns
-    -------
-    pd.Series of business segment strings.
-    """
-    valid_profiling_cols = [c for c in PROFILING_COLS if c in features_df.columns]
-    tmp = features_df.copy()
-    tmp["__ensemble__"] = ensemble_col.values
-
-    profile_means = tmp.groupby("__ensemble__")[valid_profiling_cols].mean()
-
-    # Optionally optimise composite weights via ARI against known labels
-    if cfg.get("optimize_composite_weights") and "agent_category" in features_df.columns:
-        optimised_weights = _find_optimal_composite_weights(
-            profile_means, features_df, ensemble_col, cfg
-        )
-        cfg = {**cfg, "composite_weights": optimised_weights}
-        logger.info(
-            "_map_ensemble_to_segment: using ARI-optimised weights=%s", optimised_weights
-        )
-
-    composite = _compute_composite_score(profile_means, cfg)
-    sorted_clusters = composite.sort_values(ascending=True).index.tolist()
-    n = len(sorted_clusters)
-
-    segment_map: dict[str, str] = {}
-    for rank, cluster_label in enumerate(sorted_clusters):
-        seg_idx = min(int(rank / n * len(BUSINESS_SEGMENTS)), len(BUSINESS_SEGMENTS) - 1)
-        segment_map[cluster_label] = BUSINESS_SEGMENTS[seg_idx]
-
-    # Dormant cluster always -> "Below Threshold"
-    segment_map[DORMANT_FILL_LABEL] = BUSINESS_SEGMENTS[0]
-    segment_map[ENSEMBLE_MISSING_LABEL] = BUSINESS_SEGMENTS[0]
-
-    logger.info("_map_ensemble_to_segment: cluster -> segment mapping:")
-    for cl, seg in sorted(segment_map.items(), key=lambda x: composite.get(x[0], -1)):
-        logger.info("  %-45s -> %s", cl, seg)
-
-    return ensemble_col.map(segment_map).fillna(BUSINESS_SEGMENTS[0])
-
-
-DEFAULT_STABILITY_REPORT: dict[str, Any] = {
-    "silhouette_score": float("nan"),
-    "ari_mean": float("nan"),
-    "ari_std": float("nan"),
-    "n_seeds": 0,
-}
-
-
-def _compute_stability_metrics(
-    X_pca: np.ndarray,
-    cfg: dict[str, Any],
-) -> dict[str, Any]:
-    """Evaluate cluster reproducibility across multiple random seeds.
-
-    Runs KMeans (round-1 settings) ``stability_n_seeds`` times with different
-    random seeds, then computes:
-
-    - **silhouette_score**: averaged over seeds on a subsample of size
-      ``sample_cap_silhouette``.
-    - **ari_mean / ari_std**: mean and standard deviation of pairwise
-      Adjusted Rand Index between all seed-pair label assignments.
-
-    Parameters
-    ----------
-    X_pca : PCA-reduced feature array (all agents).
-    cfg   : Clustering config.
-
-    Returns
-    -------
-    dict with keys: ``silhouette_score``, ``ari_mean``, ``ari_std``, ``n_seeds``.
-    """
-    from itertools import combinations  # noqa: PLC0415
-    from sklearn.metrics import adjusted_rand_score, silhouette_score  # noqa: PLC0415
-
-    n_seeds: int = int(cfg.get("stability_n_seeds", 3))
-    k: int = int(cfg.get("kmeans_round1_k", 6))
-    cap: int = int(cfg.get("sample_cap_silhouette", 20000))
-    base_seed: int = int(cfg.get("random_state", 42))
-
-    if n_seeds < 2:
-        logger.warning(
-            "_compute_stability_metrics: stability_n_seeds=%d < 2 — "
-            "returning default report.",
-            n_seeds,
-        )
-        return deepcopy(DEFAULT_STABILITY_REPORT)
-
-    n = len(X_pca)
-    seed_labels: list[np.ndarray] = []
-    sil_scores: list[float] = []
-
-    for i in range(n_seeds):
-        seed = base_seed + i * 137  # deterministic but varied seeds
-        km = KMeans(n_clusters=k, random_state=seed, n_init=10, max_iter=200)
-        labels_i = km.fit_predict(X_pca)
-        seed_labels.append(labels_i)
-
-        # Silhouette on a subsample
-        cap_i = min(n, cap)
-        rng_i = np.random.RandomState(seed)
-        idx = rng_i.choice(n, size=cap_i, replace=False) if cap_i < n else np.arange(n)
-        try:
-            sil = silhouette_score(X_pca[idx], labels_i[idx])
-            sil_scores.append(sil)
-        except Exception:  # noqa: BLE001
-            pass
-
-    # Pairwise ARI
-    ari_values: list[float] = [
-        adjusted_rand_score(seed_labels[a], seed_labels[b])
-        for a, b in combinations(range(n_seeds), 2)
-    ]
-
-    report = {
-        "silhouette_score": float(np.mean(sil_scores)) if sil_scores else float("nan"),
-        "ari_mean": float(np.mean(ari_values)) if ari_values else float("nan"),
-        "ari_std": float(np.std(ari_values)) if ari_values else float("nan"),
-        "n_seeds": n_seeds,
-    }
-    logger.info(
-        "_compute_stability_metrics: silhouette=%.3f, ARI mean=%.3f ± %.3f (%d seeds)",
-        report["silhouette_score"],
-        report["ari_mean"],
-        report["ari_std"],
-        n_seeds,
-    )
-    return report
-
-
-DEFAULT_FINAL_STABILITY_REPORT: dict[str, Any] = {
-    "segment_consistency_rate": float("nan"),
-    "segment_ari_mean": float("nan"),
-    "segment_ari_std": float("nan"),
+DEFAULT_DIAGNOSTIC_STABILITY_REPORT: dict[str, Any] = {
+    "ensemble_consistency_rate": float("nan"),
+    "ensemble_ari_mean": float("nan"),
+    "ensemble_ari_std": float("nan"),
     "n_seeds": 0,
     "n_active": 0,
 }
@@ -1041,21 +655,21 @@ def _run_active_pipeline_once(
     cfg: dict[str, Any],
     rng: np.random.RandomState,
 ) -> pd.Series:
-    """Run GMM -> UMAP/HDBSCAN -> ensemble -> segment mapping once for active agents.
+    """Run GMM -> UMAP/HDBSCAN -> ensemble label once for active agents.
 
-    Factored out of the inline steps in `run_clustering_pipeline` so
-    `compute_final_segment_stability` can re-run just the active-agent
+    Factored out of the inline steps in `run_diagnostic_clustering` so
+    `compute_diagnostic_ensemble_stability` can re-run just the active-agent
     stage under a fresh seed without duplicating that orchestration logic.
 
     Returns
     -------
-    pd.Series of segment strings, indexed like *features_df* (agents outside
-    *active_mask* get BUSINESS_SEGMENTS[0], "Below Threshold").
+    pd.Series of ensemble-cluster label strings, indexed like *features_df*
+    (agents outside *active_mask* get DORMANT_FILL_LABEL).
     """
     out_ensemble = pd.Series(DORMANT_FILL_LABEL, index=features_df.index, dtype="object")
 
     if active_mask.sum() == 0:
-        return _map_ensemble_to_segment(out_ensemble, features_df, cfg)
+        return out_ensemble
 
     X_pca_active, X_scaled_active = _get_active_pca(
         features_df, active_mask, selected_cols, cfg, rng
@@ -1080,49 +694,44 @@ def _run_active_pipeline_once(
     ensemble_active = ensemble_active.replace({ENSEMBLE_MISSING_LABEL: DORMANT_FILL_LABEL})
     out_ensemble.loc[active_index] = ensemble_active.values
 
-    return _map_ensemble_to_segment(out_ensemble, features_df, cfg)
+    return out_ensemble
 
 
-def compute_final_segment_stability(
+def compute_diagnostic_ensemble_stability(
     features_df: pd.DataFrame,
     active_mask: pd.Series,
     selected_cols: list[str],
     config: dict | None = None,
     n_seeds: int | None = None,
 ) -> dict[str, Any]:
-    """Measure reproducibility of the *final business segment*, not just Round-1 KMeans.
+    """Measure reproducibility of the GMM+HDBSCAN diagnostic ensemble label.
 
-    `_compute_stability_metrics` (used inside `run_clustering_pipeline`) only
-    re-runs the Round-1 KMeans stage across seeds — it says nothing about
-    whether the GMM/UMAP/HDBSCAN/composite-scoring stages downstream, which
-    are what actually decide an agent's ``segment``, are themselves
-    reproducible. A pipeline can report "stable" while individual agents'
-    tiers (and hence the credit limits derived from them) are seed-sensitive.
+    Since this module no longer decides any agent's business tier, this
+    function measures whether the *diagnostic* ensemble_cluster grouping
+    (used for anomaly flagging / archetype research) is itself reproducible
+    across random seeds — useful context when trusting an anomaly flag or an
+    archetype profile derived from a single run.
 
-    This function re-runs the full active-agent stage `n_seeds` times under
-    different seeds and reports how consistently each agent lands in the
-    same segment. It is O(n_seeds) full active-pipeline re-runs, so it is
-    intended for scheduled/offline validation runs rather than every
-    production invocation — call it explicitly; it is not part of
-    `run_clustering_pipeline`.
+    This is O(n_seeds) full active-diagnostics re-runs, so it is intended
+    for scheduled/offline validation runs rather than every production
+    invocation — call it explicitly; it is not part of
+    `run_diagnostic_clustering`.
 
     Parameters
     ----------
     features_df : Agent feature DataFrame (post feature engineering).
     active_mask : Boolean mask of non-dormant agents, e.g. from
-                  `_identify_dormant_mask(features_df, cfg)` or
-                  `features_df["cluster_round2"].notna()` on an
-                  already-clustered DataFrame.
+                  `_identify_dormant_mask(features_df, cfg)`.
     selected_cols : Feature columns used for scaling/PCA.
     config : Clustering config (same shape as DEFAULT_CLUSTERING_CONFIG).
     n_seeds : Override `stability_n_seeds` from config.
 
     Returns
     -------
-    dict with keys: segment_consistency_rate (fraction of agents assigned
-    the *same* segment in every seed run), segment_ari_mean, segment_ari_std
-    (pairwise Adjusted Rand Index across seed pairs on the full segment
-    column), n_seeds, n_active.
+    dict with keys: ensemble_consistency_rate (fraction of agents assigned
+    the *same* ensemble_cluster in every seed run), ensemble_ari_mean,
+    ensemble_ari_std (pairwise Adjusted Rand Index across seed pairs),
+    n_seeds, n_active.
     """
     from itertools import combinations  # noqa: PLC0415
     from sklearn.metrics import adjusted_rand_score  # noqa: PLC0415
@@ -1133,29 +742,29 @@ def compute_final_segment_stability(
 
     if seeds < 2:
         logger.warning(
-            "compute_final_segment_stability: n_seeds=%d < 2 — "
+            "compute_diagnostic_ensemble_stability: n_seeds=%d < 2 — "
             "returning default report.",
             seeds,
         )
-        return deepcopy(DEFAULT_FINAL_STABILITY_REPORT)
+        return deepcopy(DEFAULT_DIAGNOSTIC_STABILITY_REPORT)
 
     n_active = int(active_mask.sum())
     if n_active == 0:
         logger.warning(
-            "compute_final_segment_stability: no active agents — "
+            "compute_diagnostic_ensemble_stability: no active agents — "
             "returning default report."
         )
-        return deepcopy(DEFAULT_FINAL_STABILITY_REPORT)
+        return deepcopy(DEFAULT_DIAGNOSTIC_STABILITY_REPORT)
 
-    seed_segments: list[pd.Series] = []
+    seed_ensembles: list[pd.Series] = []
     for i in range(seeds):
-        seed = base_seed + i * 137  # deterministic but varied, matches _compute_stability_metrics
+        seed = base_seed + i * 137  # deterministic but varied seeds
         rng = np.random.RandomState(seed)
-        seed_segments.append(
+        seed_ensembles.append(
             _run_active_pipeline_once(features_df, active_mask, selected_cols, cfg, rng)
         )
 
-    matrix = pd.concat(seed_segments, axis=1)
+    matrix = pd.concat(seed_ensembles, axis=1)
     matrix.columns = [f"seed_{i}" for i in range(seeds)]
 
     consistency = float((matrix.nunique(axis=1) == 1).mean())
@@ -1165,18 +774,18 @@ def compute_final_segment_stability(
     ]
 
     report = {
-        "segment_consistency_rate": consistency,
-        "segment_ari_mean": float(np.mean(ari_values)),
-        "segment_ari_std": float(np.std(ari_values)),
+        "ensemble_consistency_rate": consistency,
+        "ensemble_ari_mean": float(np.mean(ari_values)),
+        "ensemble_ari_std": float(np.std(ari_values)),
         "n_seeds": seeds,
         "n_active": n_active,
     }
     logger.info(
-        "compute_final_segment_stability: consistency=%.3f, segment ARI "
+        "compute_diagnostic_ensemble_stability: consistency=%.3f, ensemble ARI "
         "mean=%.3f ± %.3f (%d seeds, %d active agents)",
-        report["segment_consistency_rate"],
-        report["segment_ari_mean"],
-        report["segment_ari_std"],
+        report["ensemble_consistency_rate"],
+        report["ensemble_ari_mean"],
+        report["ensemble_ari_std"],
         seeds,
         n_active,
     )
@@ -1188,23 +797,31 @@ def compute_final_segment_stability(
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def run_clustering_pipeline(
+def run_diagnostic_clustering(
     features_df: pd.DataFrame,
     X_pca: np.ndarray,
     selected_cols: list[str],
     config: dict | None = None,
 ) -> pd.DataFrame:
-    """Two-stage KMeans -> GMM+HDBSCAN -> ensemble -> business segment mapping.
+    """GMM + HDBSCAN diagnostic clustering — anomaly flagging and archetype research.
+
+    Does NOT assign any business tier. Only called from
+    `run_extrafloat_segmentation` when `clustering.enable_diagnostics=True`;
+    the deterministic capacity scorecard
+    (`extrafloat_segmentation_scoring.compute_agent_capacity`) is what
+    decides `capacity_tier`, independent of this function.
 
     Parameters
     ----------
     features_df :
         Agent-level feature DataFrame (index must align with rows of X_pca).
-        Must contain the dormant detection column (default: cash_out_vol_1m).
     X_pca :
-        PCA-reduced feature array aligned with features_df.
+        PCA-reduced feature array aligned with features_df. Accepted for
+        interface symmetry with the rest of the pipeline, but this function
+        recomputes its own active-agent PCA (`_get_active_pca`) rather than
+        reusing *X_pca*, since dormant agents must be excluded first.
     selected_cols :
-        Feature column names for re-scaling active agents in Round 2 / HDBSCAN.
+        Feature column names for re-scaling active agents for GMM/HDBSCAN.
     config :
         Clustering configuration dict. Missing keys fall back to
         DEFAULT_CLUSTERING_CONFIG.
@@ -1212,14 +829,12 @@ def run_clustering_pipeline(
     Returns
     -------
     pd.DataFrame
-        features_df with added columns:
-            cluster_round1  : Round-1 KMeans label (int, all agents)
-            cluster_round2  : Round-2 KMeans label (Int64, NaN for dormant)
-            cluster_id_gmm  : GMM label (Int64, -1 for dormant)
-            cluster_hdb_raw : Raw HDBSCAN integer label (Int64)
-            hdb_tier        : Named HDBSCAN tier string (data-driven)
-            ensemble_cluster: Combined "GMM_{id}__{tier}" label
-            segment         : Business segment from BUSINESS_SEGMENTS
+        features_df with added diagnostic-only columns:
+            diag_cluster_id_gmm  : GMM label (Int64, -1 for dormant)
+            diag_cluster_hdb_raw : Raw HDBSCAN integer label (Int64)
+            diag_hdb_tier        : Descriptive HDBSCAN label (data-driven, NOT a business tier)
+            diag_ensemble_cluster: Combined "GMM_{id}__{tier}" label
+            diag_is_anomaly      : True where diag_cluster_hdb_raw == HDBSCAN_NOISE_LABEL
     """
     cfg = _get_clustering_config(config)
     dep_status = _check_optional_dependencies(cfg)
@@ -1227,31 +842,20 @@ def run_clustering_pipeline(
 
     if X_pca.shape[0] != len(features_df):
         raise ValueError(
-            f"run_clustering_pipeline: X_pca has {X_pca.shape[0]} rows but "
+            f"run_diagnostic_clustering: X_pca has {X_pca.shape[0]} rows but "
             f"features_df has {len(features_df)} rows."
         )
 
     out = features_df.copy()
 
     logger.info(
-        "run_clustering_pipeline: starting on %d agents, X_pca shape=%s",
+        "run_diagnostic_clustering: starting on %d agents, X_pca shape=%s",
         len(out),
         X_pca.shape,
     )
 
-    # ── Round 1: KMeans on all agents ────────────────────────────────────────
-    labels_r1 = _run_kmeans_round1(X_pca, cfg, rng)
-    out["cluster_round1"] = labels_r1
-
-    # ── Dormant detection (data-driven) ──────────────────────────────────────
     dormant_mask = _identify_dormant_mask(out, cfg)
     active_mask = ~dormant_mask
-
-    # ── Round 2: KMeans on active agents ─────────────────────────────────────
-    out["cluster_round2"] = pd.array([pd.NA] * len(out), dtype="Int64")
-    if active_mask.sum() > 0:
-        labels_r2 = _run_kmeans_round2(out, active_mask, selected_cols, cfg, rng)
-        out.loc[active_mask, "cluster_round2"] = labels_r2
 
     # ── Active PCA (GMM) + scaled features (UMAP→HDBSCAN) ───────────────────
     X_pca_active: np.ndarray | None = None
@@ -1261,19 +865,16 @@ def run_clustering_pipeline(
             out, active_mask, selected_cols, cfg, rng
         )
 
-    # ── Stability metrics (run before main clustering to use same X_pca) ─────
-    stability_report = _compute_stability_metrics(X_pca, cfg)
-
     # ── GMM on active agents (PCA space) ─────────────────────────────────────
-    out["cluster_id_gmm"] = pd.array([-1] * len(out), dtype="Int64")
+    out["diag_cluster_id_gmm"] = pd.array([-1] * len(out), dtype="Int64")
     if X_pca_active is not None:
         gmm_labels, _ = _run_gmm(X_pca_active, cfg, rng)
         active_indices = out.index[active_mask]
-        out.loc[active_indices, "cluster_id_gmm"] = gmm_labels
+        out.loc[active_indices, "diag_cluster_id_gmm"] = gmm_labels
 
     # ── HDBSCAN on active agents (UMAP space when available) ─────────────────
-    out["cluster_hdb_raw"] = pd.array([pd.NA] * len(out), dtype="Int64")
-    out["hdb_tier"] = pd.NA
+    out["diag_cluster_hdb_raw"] = pd.array([pd.NA] * len(out), dtype="Int64")
+    out["diag_hdb_tier"] = pd.NA
 
     if X_pca_active is not None and X_scaled_active is not None:
         try:
@@ -1284,57 +885,52 @@ def run_clustering_pipeline(
 
             hdb_labels = _run_hdbscan(X_hdbscan, cfg)
             active_indices = out.index[active_mask]
-            out.loc[active_indices, "cluster_hdb_raw"] = hdb_labels
+            out.loc[active_indices, "diag_cluster_hdb_raw"] = hdb_labels
             features_df_active = out.loc[active_mask].reset_index(drop=True)
             hdb_tier_active = _map_hdb_to_tier(hdb_labels, features_df_active, cfg)
-            out.loc[active_indices, "hdb_tier"] = hdb_tier_active.values
+            out.loc[active_indices, "diag_hdb_tier"] = hdb_tier_active.values
         except ImportError as exc:
             logger.error(
-                "run_clustering_pipeline: HDBSCAN unavailable — %s. "
-                "Skipping HDBSCAN stage; hdb_tier will be 'Unavailable'.",
+                "run_diagnostic_clustering: HDBSCAN unavailable — %s. "
+                "Skipping HDBSCAN stage; diag_hdb_tier will be 'Unavailable'.",
                 exc,
             )
-            out.loc[active_mask, "hdb_tier"] = "Unavailable"
+            out.loc[active_mask, "diag_hdb_tier"] = "Unavailable"
 
     # ── Ensemble labels ───────────────────────────────────────────────────────
-    out["ensemble_cluster"] = DORMANT_FILL_LABEL
+    out["diag_ensemble_cluster"] = DORMANT_FILL_LABEL
 
-    gmm_active = out.loc[active_mask, "cluster_id_gmm"]
-    hdb_active = out.loc[active_mask, "hdb_tier"]
+    gmm_active = out.loc[active_mask, "diag_cluster_id_gmm"]
+    hdb_active = out.loc[active_mask, "diag_hdb_tier"]
 
     if active_mask.sum() > 0:
         ensemble_active = _build_ensemble_labels(gmm_active, hdb_active)
-        # Replace any ENSEMBLE_MISSING with dormant fill label
         ensemble_active = ensemble_active.replace(
             {ENSEMBLE_MISSING_LABEL: DORMANT_FILL_LABEL}
         )
-        out.loc[active_mask, "ensemble_cluster"] = ensemble_active.values
+        out.loc[active_mask, "diag_ensemble_cluster"] = ensemble_active.values
 
-    # ── Business segment mapping (data-driven) ────────────────────────────────
-    out["segment"] = _map_ensemble_to_segment(out["ensemble_cluster"], out, cfg)
+    # ── Anomaly flag: HDBSCAN noise points among active agents ──────────────
+    out["diag_is_anomaly"] = out["diag_cluster_hdb_raw"] == HDBSCAN_NOISE_LABEL
 
-    # Dormant agents always -> "Below Threshold"
-    out.loc[dormant_mask, "segment"] = BUSINESS_SEGMENTS[0]
-
-    # ── Attach stability report as DataFrame metadata ─────────────────────────
-    out.attrs["stability_report"] = stability_report
-
-    # ── Flag degraded runs (only reachable when require_* was explicitly
-    #    set to False, since _check_optional_dependencies already raised
-    #    above otherwise) so callers can propagate the caveat downstream. ──
-    out.attrs["degraded_mode"] = {
+    # ── Attach degraded-mode flag as DataFrame metadata ──────────────────────
+    out.attrs["diag_degraded_mode"] = {
         "hdbscan_unavailable": not dep_status["hdbscan_available"],
         "umap_unavailable": not dep_status["umap_available"],
     }
-    if any(out.attrs["degraded_mode"].values()):
+    if any(out.attrs["diag_degraded_mode"].values()):
         logger.warning(
-            "run_clustering_pipeline: completed in DEGRADED MODE — %s. "
-            "Cluster/segment quality is reduced; see out.attrs['degraded_mode'].",
-            out.attrs["degraded_mode"],
+            "run_diagnostic_clustering: completed in DEGRADED MODE — %s. "
+            "Diagnostic quality is reduced; see out.attrs['diag_degraded_mode'].",
+            out.attrs["diag_degraded_mode"],
         )
 
-    # Log summary
-    seg_counts = out["segment"].value_counts().to_dict()
-    logger.info("run_clustering_pipeline: segment distribution — %s", seg_counts)
+    n_anomalies = int(out["diag_is_anomaly"].sum())
+    logger.info(
+        "run_diagnostic_clustering: %d/%d active agents flagged as anomalies "
+        "(HDBSCAN noise).",
+        n_anomalies,
+        int(active_mask.sum()),
+    )
 
     return out
