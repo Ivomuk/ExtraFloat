@@ -14,6 +14,7 @@ Market: Uganda (UG) — MTN Mobile Money agent segmentation.
 from __future__ import annotations
 
 import logging
+from copy import deepcopy
 from typing import Any
 
 import numpy as np
@@ -449,3 +450,182 @@ def rank_feature_importance(
     ).sort_values(ascending=False)
 
     return importances
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# QUALITY GATE
+#
+# The functions above (purity, ARI, KPI comparison, feature importance) are a
+# validation toolkit, but until this section was added nothing in
+# run_extrafloat_segmentation.py ever called them — a degenerate clustering
+# run (collapsed GMM components, HDBSCAN mostly noise, poor purity against
+# known agent categories) flowed straight through to output with no
+# automated check before those tiers reached downstream consumers.
+# `run_quality_gate` is the check meant to be wired into the main
+# orchestration after clustering + profiling.
+# ─────────────────────────────────────────────────────────────────────────────
+
+DEFAULT_QUALITY_GATE_CONFIG: dict[str, Any] = {
+    "enabled": True,
+    # When True, a breached check raises ValueError instead of only logging
+    # CRITICAL. Defaults to False so turning the gate on doesn't immediately
+    # break existing production runs; tighten once thresholds are calibrated
+    # against real data.
+    "fail_on_breach": False,
+    # ── Unsupervised checks (always run, no ground truth required) ───────────
+    "min_distinct_segments": 2,
+    "max_hdb_noise_pct": 0.50,
+    "max_active_below_threshold_pct": 0.50,
+    # ── Supervised checks (only run when label_col is present in the data) ───
+    "min_purity": 0.0,
+    "min_ari": 0.0,
+}
+
+
+def _get_quality_gate_config(config: dict | None) -> dict[str, Any]:
+    """Return deep-merged quality-gate config, filling missing keys from defaults."""
+    merged = deepcopy(DEFAULT_QUALITY_GATE_CONFIG)
+    if config:
+        merged.update(config)
+    return merged
+
+
+def run_quality_gate(
+    df: pd.DataFrame,
+    config: dict | None = None,
+    segment_col: str = "segment",
+    cluster_col: str = "ensemble_cluster",
+    label_col: str = "agent_category",
+    active_mask: pd.Series | None = None,
+) -> dict[str, Any]:
+    """
+    Automated post-clustering sanity/quality gate.
+
+    Always runs unsupervised sanity checks (segment diversity, HDBSCAN
+    noise/unavailable share, "Below Threshold" share among *active* agents
+    specifically — dormant agents are expected to land there, so mixing them
+    in would make this check meaningless). When *label_col* (ground-truth
+    agent category, e.g. from a whitelist/blacklist merge) is present, also
+    runs supervised purity and ARI checks via `cluster_purity_table` /
+    `compute_adjusted_rand_score`.
+
+    This function only evaluates; it never raises unless
+    ``config["fail_on_breach"]`` is True. Intended to be called from
+    `run_extrafloat_segmentation` after clustering + profiling and before
+    output trimming (so `cluster_round2`/`hdb_tier`/`ensemble_cluster` are
+    still present), so a degenerate run can be caught automatically instead
+    of relying on someone manually running this module after the fact.
+
+    Parameters
+    ----------
+    df : Segmentation output DataFrame (post `run_clustering_pipeline`).
+    config : Quality-gate config. See DEFAULT_QUALITY_GATE_CONFIG.
+    segment_col : Business segment column.
+    cluster_col : Ensemble cluster column (used for purity/ARI).
+    label_col : Ground-truth reference label column, if available.
+    active_mask : Boolean mask of non-dormant agents. Defaults to
+                  `df["cluster_round2"].notna()` when that column is present
+                  (Round-2 KMeans only runs on active agents), else all
+                  agents are treated as active.
+
+    Returns
+    -------
+    dict with keys:
+        passed : bool — True iff every evaluated check passed.
+        checks : dict[str, dict] — per-check {value, threshold, passed}.
+        has_ground_truth : bool — whether supervised checks ran.
+        skipped : bool — True if the gate was disabled via config.
+
+    Raises
+    ------
+    ValueError
+        If ``config["fail_on_breach"]`` is True and ``passed`` is False.
+    """
+    cfg = _get_quality_gate_config(config)
+
+    if not cfg.get("enabled", True):
+        logger.info("run_quality_gate: disabled via config — skipping.")
+        return {"passed": True, "checks": {}, "has_ground_truth": False, "skipped": True}
+
+    _require_columns(df, [segment_col], "run_quality_gate")
+
+    if active_mask is None:
+        if "cluster_round2" in df.columns:
+            active_mask = df["cluster_round2"].notna()
+        else:
+            active_mask = pd.Series(True, index=df.index)
+    active = df.loc[active_mask]
+
+    checks: dict[str, Any] = {}
+
+    # ── Unsupervised checks ───────────────────────────────────────────────
+    n_distinct = int(df[segment_col].nunique(dropna=True))
+    checks["n_distinct_segments"] = {
+        "value": n_distinct,
+        "threshold": cfg["min_distinct_segments"],
+        "passed": n_distinct >= cfg["min_distinct_segments"],
+    }
+
+    if "hdb_tier" in df.columns and len(active) > 0:
+        noise_mask = active["hdb_tier"].isin(["Noise / Irregular", "Unavailable"])
+        noise_pct = float(noise_mask.mean())
+        checks["hdb_noise_or_unavailable_pct"] = {
+            "value": noise_pct,
+            "threshold": cfg["max_hdb_noise_pct"],
+            "passed": noise_pct <= cfg["max_hdb_noise_pct"],
+        }
+
+    active_bt_pct = float((active[segment_col] == "Below Threshold").mean()) if len(active) > 0 else 0.0
+    checks["active_below_threshold_pct"] = {
+        "value": active_bt_pct,
+        "threshold": cfg["max_active_below_threshold_pct"],
+        "passed": active_bt_pct <= cfg["max_active_below_threshold_pct"],
+    }
+
+    # ── Supervised checks (only when ground truth is present) ────────────────
+    has_ground_truth = label_col in df.columns and bool(df[label_col].notna().any())
+    if has_ground_truth and cluster_col in df.columns:
+        try:
+            purity_table = cluster_purity_table(df, cluster_col=cluster_col, label_col=label_col)
+            overall_purity = float(purity_table["overall_purity"].iloc[0]) if len(purity_table) else 0.0
+            checks["overall_purity"] = {
+                "value": overall_purity,
+                "threshold": cfg["min_purity"],
+                "passed": overall_purity >= cfg["min_purity"],
+            }
+            ari = compute_adjusted_rand_score(df, cluster_col=cluster_col, label_col=label_col)
+            checks["ari"] = {
+                "value": ari,
+                "threshold": cfg["min_ari"],
+                "passed": ari >= cfg["min_ari"],
+            }
+        except ValueError as exc:
+            logger.warning("run_quality_gate: skipping supervised checks — %s", exc)
+
+    passed = all(bool(c["passed"]) for c in checks.values())
+
+    for name, result in checks.items():
+        log_fn = logger.info if result["passed"] else logger.critical
+        log_fn(
+            "run_quality_gate: %-32s value=%.4f threshold=%.4f -> %s",
+            name,
+            float(result["value"]),
+            float(result["threshold"]),
+            "PASS" if result["passed"] else "FAIL",
+        )
+
+    report = {
+        "passed": passed,
+        "checks": checks,
+        "has_ground_truth": has_ground_truth,
+        "skipped": False,
+    }
+
+    if not passed and cfg.get("fail_on_breach"):
+        failed = [name for name, c in checks.items() if not c["passed"]]
+        raise ValueError(
+            f"run_quality_gate: quality gate FAILED (fail_on_breach=True). "
+            f"Breached checks: {failed}. Full report: {report}"
+        )
+
+    return report

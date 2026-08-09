@@ -1,0 +1,57 @@
+name: Segmentation CI
+
+# Scoped strictly to the extrafloat_segmentation_* package — does not build,
+# test, or otherwise touch the limit-engine modules
+# (extrafloat_limit_engine_*.py, run_extrafloat_limit_engine.py,
+# test_extrafloat_pipeline.py).
+on:
+  push:
+    paths:
+      - "extrafloat_segmentation_*.py"
+      - "run_extrafloat_segmentation.py"
+      - "test_extrafloat_segmentation.py"
+      - "requirements-segmentation*.txt"
+      - ".github/workflows/segmentation-ci.yml"
+  pull_request:
+    paths:
+      - "extrafloat_segmentation_*.py"
+      - "run_extrafloat_segmentation.py"
+      - "test_extrafloat_segmentation.py"
+      - "requirements-segmentation*.txt"
+      - ".github/workflows/segmentation-ci.yml"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements-segmentation-dev.txt
+
+      - name: Run segmentation test suite
+        run: python -m pytest test_extrafloat_segmentation.py -v
+
+      - name: Smoke-test the CLI orchestration end to end
+        run: |
+          python - <<'PY'
+          import sys
+          sys.path.insert(0, ".")
+          from test_extrafloat_segmentation import _make_agents_df
+          from run_extrafloat_segmentation import run_extrafloat_segmentation, DEFAULT_SEGMENTATION_CONFIG
+          import copy
+
+          agents_df = _make_agents_df(300)
+          config = copy.deepcopy(DEFAULT_SEGMENTATION_CONFIG)
+          config["output"]["output_dir"] = ""
+          result = run_extrafloat_segmentation(agents_df, config=config)
+
+          assert len(result) == len(agents_df), "row count changed"
+          assert "segment" in result.columns, "segment column missing"
+          assert "quality_gate" in result.attrs, "quality gate did not run"
+          print("Smoke test OK —", len(result), "agents,", result["segment"].nunique(), "distinct segments")
+          PY

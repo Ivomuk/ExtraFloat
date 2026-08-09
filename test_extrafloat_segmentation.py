@@ -943,3 +943,269 @@ class TestDriftModule:
 
         with pytest.raises(FileNotFoundError):
             load_drift_baseline("/nonexistent/path/baseline.csv")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Optional dependency guard rails (require_hdbscan / require_umap)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestOptionalDependencyGuards:
+    """Tests for extrafloat_segmentation_pipeline._check_optional_dependencies
+    and the require_hdbscan/require_umap config flags wired into
+    run_clustering_pipeline. A missing hdbscan/umap install used to degrade
+    cluster quality silently (hdb_tier="Unavailable" for every active agent,
+    or a raw column slice fed to HDBSCAN instead of a real embedding) with
+    only a log line marking the difference. These tests confirm that is now
+    a loud, opt-in failure mode instead of a silent one.
+    """
+
+    def _small_inputs(self, n=50):
+        rng = np.random.RandomState(0)
+        X_pca = rng.randn(n, 5)
+        df = pd.DataFrame({
+            "cash_out_vol_1m": rng.rand(n) * 10,
+            "cash_in_vol_1m": rng.rand(n) * 10,
+            "payment_vol_1m": rng.rand(n) * 10,
+            "voucher_volume_1m": rng.rand(n) * 10,
+        })
+        return df, X_pca, list(df.columns)
+
+    def test_defaults_require_both(self):
+        from extrafloat_segmentation_pipeline import DEFAULT_CLUSTERING_CONFIG
+
+        assert DEFAULT_CLUSTERING_CONFIG["require_hdbscan"] is True
+        assert DEFAULT_CLUSTERING_CONFIG["require_umap"] is True
+
+    def test_missing_hdbscan_raises_by_default(self, monkeypatch):
+        import extrafloat_segmentation_pipeline as pipe
+
+        monkeypatch.setattr(pipe, "_HDBSCAN_AVAILABLE", False)
+        df, X_pca, cols = self._small_inputs()
+        with pytest.raises(RuntimeError, match="require_hdbscan"):
+            pipe.run_clustering_pipeline(
+                df, X_pca, cols, config={"kmeans_round1_k": 2, "kmeans_round2_k": 2}
+            )
+
+    def test_missing_umap_raises_by_default(self, monkeypatch):
+        import extrafloat_segmentation_pipeline as pipe
+
+        monkeypatch.setattr(pipe, "_UMAP_AVAILABLE", False)
+        df, X_pca, cols = self._small_inputs()
+        with pytest.raises(RuntimeError, match="require_umap"):
+            pipe.run_clustering_pipeline(
+                df, X_pca, cols, config={"kmeans_round1_k": 2, "kmeans_round2_k": 2}
+            )
+
+    def test_missing_hdbscan_allowed_when_not_required(self, monkeypatch):
+        import extrafloat_segmentation_pipeline as pipe
+
+        monkeypatch.setattr(pipe, "_HDBSCAN_AVAILABLE", False)
+        df, X_pca, cols = self._small_inputs()
+        result = pipe.run_clustering_pipeline(
+            df, X_pca, cols,
+            config={"kmeans_round1_k": 2, "kmeans_round2_k": 2, "require_hdbscan": False},
+        )
+        assert result.attrs["degraded_mode"]["hdbscan_unavailable"] is True
+
+    def test_degraded_mode_false_when_all_available(self):
+        from extrafloat_segmentation_pipeline import run_clustering_pipeline
+
+        df, X_pca, cols = self._small_inputs()
+        result = run_clustering_pipeline(
+            df, X_pca, cols, config={"kmeans_round1_k": 2, "kmeans_round2_k": 2}
+        )
+        assert result.attrs["degraded_mode"] == {
+            "hdbscan_unavailable": False,
+            "umap_unavailable": False,
+        }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Quality gate (extrafloat_segmentation_validation.run_quality_gate)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestQualityGate:
+    """Tests for run_quality_gate — the automated post-clustering sanity
+    check that was previously missing from the main orchestration entirely
+    (the validation module existed but nothing called it)."""
+
+    def _clean_df(self, n=100):
+        """Agents with perfect agreement between ensemble_cluster and
+        agent_category, no HDBSCAN noise, and a healthy segment spread."""
+        rng = np.random.RandomState(0)
+        segments = (["Silver"] * (n // 2)) + (["Gold"] * (n - n // 2))
+        return pd.DataFrame({
+            "segment": segments,
+            "ensemble_cluster": segments,  # cluster == category -> perfect purity/ARI
+            "agent_category": segments,
+            "hdb_tier": ["Silver Strong"] * (n // 2) + ["Gold Power"] * (n - n // 2),
+            "cluster_round2": np.arange(n),  # all "active" (non-NaN)
+        })
+
+    def test_clean_data_passes(self):
+        from extrafloat_segmentation_validation import run_quality_gate
+
+        report = run_quality_gate(self._clean_df())
+        assert report["passed"] is True
+        assert report["has_ground_truth"] is True
+        assert report["checks"]["overall_purity"]["value"] == pytest.approx(1.0)
+        assert report["checks"]["ari"]["value"] == pytest.approx(1.0)
+
+    def test_all_noise_fails_hdb_check(self):
+        from extrafloat_segmentation_validation import run_quality_gate
+
+        df = self._clean_df()
+        df["hdb_tier"] = "Noise / Irregular"
+        report = run_quality_gate(df)
+        assert report["passed"] is False
+        assert report["checks"]["hdb_noise_or_unavailable_pct"]["passed"] is False
+
+    def test_single_segment_fails_distinct_check(self):
+        from extrafloat_segmentation_validation import run_quality_gate
+
+        df = self._clean_df()
+        df["segment"] = "Below Threshold"
+        report = run_quality_gate(df)
+        assert report["checks"]["n_distinct_segments"]["passed"] is False
+
+    def test_disabled_via_config_is_skipped(self):
+        from extrafloat_segmentation_validation import run_quality_gate
+
+        report = run_quality_gate(self._clean_df(), config={"enabled": False})
+        assert report["skipped"] is True
+        assert report["passed"] is True
+        assert report["checks"] == {}
+
+    def test_fail_on_breach_raises(self):
+        from extrafloat_segmentation_validation import run_quality_gate
+
+        df = self._clean_df()
+        df["hdb_tier"] = "Noise / Irregular"
+        with pytest.raises(ValueError, match="quality gate FAILED"):
+            run_quality_gate(df, config={"fail_on_breach": True})
+
+    def test_no_ground_truth_skips_supervised_checks(self):
+        from extrafloat_segmentation_validation import run_quality_gate
+
+        df = self._clean_df().drop(columns=["agent_category"])
+        report = run_quality_gate(df)
+        assert report["has_ground_truth"] is False
+        assert "overall_purity" not in report["checks"]
+        assert "ari" not in report["checks"]
+
+    def test_missing_segment_col_raises(self):
+        from extrafloat_segmentation_validation import run_quality_gate
+
+        df = self._clean_df().drop(columns=["segment"])
+        with pytest.raises(ValueError, match="Missing required column"):
+            run_quality_gate(df)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Final segment stability (extrafloat_segmentation_pipeline.compute_final_segment_stability)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestFinalSegmentStability:
+    """Tests for compute_final_segment_stability — unlike the existing
+    Round-1-KMeans-only stability report, this re-runs the full active-agent
+    stage (GMM/UMAP/HDBSCAN/segment mapping) across seeds so it reflects the
+    reproducibility of the *segment* an agent actually lands in."""
+
+    def _get_inputs(self, n=80):
+        from extrafloat_segmentation_features import prepare_features
+
+        df = _make_agents_df(n)
+        feat_df, _, X_pca, sel_cols = prepare_features(df)
+        return feat_df, X_pca, sel_cols
+
+    def test_returns_expected_keys(self):
+        from extrafloat_segmentation_pipeline import compute_final_segment_stability
+
+        feat_df, X_pca, sel_cols = self._get_inputs()
+        active_mask = pd.Series(True, index=feat_df.index)
+        report = compute_final_segment_stability(
+            feat_df, active_mask, sel_cols,
+            config={"kmeans_round1_k": 2, "kmeans_round2_k": 2, "stability_n_seeds": 2},
+        )
+        for key in ("segment_consistency_rate", "segment_ari_mean", "segment_ari_std", "n_seeds", "n_active"):
+            assert key in report, f"missing key '{key}'"
+        assert report["n_seeds"] == 2
+        assert report["n_active"] == len(feat_df)
+        assert 0.0 <= report["segment_consistency_rate"] <= 1.0
+
+    def test_default_report_when_n_seeds_below_two(self):
+        from extrafloat_segmentation_pipeline import (
+            DEFAULT_FINAL_STABILITY_REPORT,
+            compute_final_segment_stability,
+        )
+
+        feat_df, X_pca, sel_cols = self._get_inputs(30)
+        active_mask = pd.Series(True, index=feat_df.index)
+        report = compute_final_segment_stability(
+            feat_df, active_mask, sel_cols, config={"stability_n_seeds": 1}
+        )
+        assert report == DEFAULT_FINAL_STABILITY_REPORT
+
+    def test_default_report_when_no_active_agents(self):
+        from extrafloat_segmentation_pipeline import (
+            DEFAULT_FINAL_STABILITY_REPORT,
+            compute_final_segment_stability,
+        )
+
+        feat_df, X_pca, sel_cols = self._get_inputs(30)
+        active_mask = pd.Series(False, index=feat_df.index)
+        report = compute_final_segment_stability(
+            feat_df, active_mask, sel_cols, config={"stability_n_seeds": 2}
+        )
+        assert report == DEFAULT_FINAL_STABILITY_REPORT
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# _assign_sub_label cleanup regression (redundant no-op ternary removed)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestAssignSubLabel:
+    """Regression tests for extrafloat_segmentation_profiling._assign_sub_label
+    after removing its no-op isinstance ternary (behavior-preserving cleanup,
+    plus non-numeric inputs now coerce to 0 instead of raising)."""
+
+    def _cfg(self):
+        from extrafloat_segmentation_profiling import DEFAULT_PROFILING_CONFIG
+
+        return DEFAULT_PROFILING_CONFIG
+
+    def test_high_cash_out(self):
+        from extrafloat_segmentation_profiling import _assign_sub_label
+
+        row = pd.Series({"cash_out": 2.0, "cash_in": 0.5, "payments": 0.5})
+        assert _assign_sub_label(row, self._cfg()) == "High Cash-Out"
+
+    def test_high_cash_in(self):
+        from extrafloat_segmentation_profiling import _assign_sub_label
+
+        row = pd.Series({"cash_out": 0.5, "cash_in": 2.0, "payments": 0.5})
+        assert _assign_sub_label(row, self._cfg()) == "High Cash-In"
+
+    def test_balanced_when_all_low(self):
+        from extrafloat_segmentation_profiling import _assign_sub_label
+
+        row = pd.Series({"cash_out": 0.9, "cash_in": 0.9, "payments": 0.9})
+        assert _assign_sub_label(row, self._cfg()) == "Balanced"
+
+    def test_missing_values_default_to_zero_not_error(self):
+        from extrafloat_segmentation_profiling import _assign_sub_label
+
+        row = pd.Series({})
+        assert _assign_sub_label(row, self._cfg()) == "Balanced"
+
+    def test_non_numeric_values_coerce_instead_of_raising(self):
+        from extrafloat_segmentation_profiling import _assign_sub_label
+
+        row = pd.Series({"cash_out": None, "cash_in": np.nan, "payments": 0.2})
+        # Should not raise TypeError/ValueError, and falls back to 0.0 for
+        # unparseable/missing entries.
+        assert _assign_sub_label(row, self._cfg()) == "Balanced"

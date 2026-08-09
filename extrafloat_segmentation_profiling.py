@@ -161,16 +161,9 @@ def _assign_sub_label(row: pd.Series, cfg: dict[str, Any]) -> str:  # noqa: ARG0
 
     Priority: High Cash-Out > High Cash-In > Payments-Led > Balanced.
     """
-    co_lift = float(row.get("cash_out", np.nan) if not isinstance(row.get("cash_out"), float)
-                    else row.get("cash_out", np.nan))
-    ci_lift = float(row.get("cash_in", np.nan) if not isinstance(row.get("cash_in"), float)
-                    else row.get("cash_in", np.nan))
-    pay_lift = float(row.get("payments", np.nan) if not isinstance(row.get("payments"), float)
-                     else row.get("payments", np.nan))
-
-    co = co_lift if not np.isnan(co_lift) else 0.0
-    ci = ci_lift if not np.isnan(ci_lift) else 0.0
-    pay = pay_lift if not np.isnan(pay_lift) else 0.0
+    co = pd.to_numeric(pd.Series([row.get("cash_out")]), errors="coerce").fillna(0.0).iloc[0]
+    ci = pd.to_numeric(pd.Series([row.get("cash_in")]), errors="coerce").fillna(0.0).iloc[0]
+    pay = pd.to_numeric(pd.Series([row.get("payments")]), errors="coerce").fillna(0.0).iloc[0]
 
     co_thresh = cfg.get("cash_out_lift_gold", 1.5)
     ci_thresh = cfg.get("cash_in_lift_platinum", 1.8)

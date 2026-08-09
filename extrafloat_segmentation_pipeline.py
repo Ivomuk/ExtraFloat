@@ -131,6 +131,21 @@ DEFAULT_CLUSTERING_CONFIG: dict[str, Any] = {
     # ── Cluster stability reporting ───────────────────────────────────────────
     "stability_n_seeds": 3,
     "sample_cap_silhouette": 20000,
+    # Full-pipeline (GMM/UMAP/HDBSCAN/segment) stability re-run across seeds.
+    # O(stability_n_seeds) full active-pipeline re-runs — off by default;
+    # meant for scheduled/offline validation, not every production run.
+    # See compute_final_segment_stability().
+    "full_stability_check": False,
+    # ── Optional dependency requirements ───────────────────────────────────────
+    # HDBSCAN/UMAP are "soft" (importable-or-not) dependencies. When required
+    # (the default) a missing install raises RuntimeError at the start of
+    # run_clustering_pipeline instead of silently degrading cluster quality
+    # (missing HDBSCAN -> hdb_tier="Unavailable" for every active agent;
+    # missing UMAP -> HDBSCAN receives a raw PCA-scaled column slice instead
+    # of a real embedding). Set to False only for a deliberately degraded
+    # local/dev run.
+    "require_hdbscan": True,
+    "require_umap": True,
 }
 
 
@@ -150,6 +165,58 @@ def _get_clustering_config(config: dict | None) -> dict[str, Any]:
         else:
             merged[k] = v
     return merged
+
+
+def _check_optional_dependencies(cfg: dict[str, Any]) -> dict[str, bool]:
+    """Verify optional ML dependencies (hdbscan, umap-learn) against config.
+
+    HDBSCAN and UMAP are import-optional: when absent, the pipeline used to
+    keep running and silently degrade — HDBSCAN missing meant every active
+    agent's ``hdb_tier`` became the string "Unavailable" (collapsing the
+    ensemble label and hence the business ``segment``), and UMAP missing
+    meant HDBSCAN was fed a meaningless raw column slice instead of a real
+    embedding — with only a log line marking the difference. For a pipeline
+    whose output sizes real credit limits downstream, a silently degraded
+    run is worse than a run that refuses to start.
+
+    Parameters
+    ----------
+    cfg : Clustering config (post `_get_clustering_config`).
+
+    Returns
+    -------
+    dict with keys ``hdbscan_available`` / ``umap_available``.
+
+    Raises
+    ------
+    RuntimeError
+        If ``require_hdbscan``/``require_umap`` is True (the default) and
+        the corresponding package is not installed.
+    """
+    status = {
+        "hdbscan_available": _HDBSCAN_AVAILABLE,
+        "umap_available": _UMAP_AVAILABLE,
+    }
+
+    if cfg.get("require_hdbscan", True) and not _HDBSCAN_AVAILABLE:
+        raise RuntimeError(
+            "run_clustering_pipeline: hdbscan is not installed but "
+            "require_hdbscan=True (the default). Install with "
+            "'pip install hdbscan', or explicitly set "
+            "config['clustering']['require_hdbscan']=False to allow a "
+            "degraded run (hdb_tier will be 'Unavailable' for all active "
+            "agents, which collapses ensemble/segment quality)."
+        )
+    if cfg.get("require_umap", True) and not _UMAP_AVAILABLE:
+        raise RuntimeError(
+            "run_clustering_pipeline: umap-learn is not installed but "
+            "require_umap=True (the default). Install with "
+            "'pip install umap-learn', or explicitly set "
+            "config['clustering']['require_umap']=False to allow a "
+            "degraded run (HDBSCAN will receive a raw PCA-scaled column "
+            "slice instead of a UMAP embedding)."
+        )
+    return status
 
 
 def _run_kmeans_round1(
@@ -958,6 +1025,164 @@ def _compute_stability_metrics(
     return report
 
 
+DEFAULT_FINAL_STABILITY_REPORT: dict[str, Any] = {
+    "segment_consistency_rate": float("nan"),
+    "segment_ari_mean": float("nan"),
+    "segment_ari_std": float("nan"),
+    "n_seeds": 0,
+    "n_active": 0,
+}
+
+
+def _run_active_pipeline_once(
+    features_df: pd.DataFrame,
+    active_mask: pd.Series,
+    selected_cols: list[str],
+    cfg: dict[str, Any],
+    rng: np.random.RandomState,
+) -> pd.Series:
+    """Run GMM -> UMAP/HDBSCAN -> ensemble -> segment mapping once for active agents.
+
+    Factored out of the inline steps in `run_clustering_pipeline` so
+    `compute_final_segment_stability` can re-run just the active-agent
+    stage under a fresh seed without duplicating that orchestration logic.
+
+    Returns
+    -------
+    pd.Series of segment strings, indexed like *features_df* (agents outside
+    *active_mask* get BUSINESS_SEGMENTS[0], "Below Threshold").
+    """
+    out_ensemble = pd.Series(DORMANT_FILL_LABEL, index=features_df.index, dtype="object")
+
+    if active_mask.sum() == 0:
+        return _map_ensemble_to_segment(out_ensemble, features_df, cfg)
+
+    X_pca_active, X_scaled_active = _get_active_pca(
+        features_df, active_mask, selected_cols, cfg, rng
+    )
+    gmm_labels, _ = _run_gmm(X_pca_active, cfg, rng)
+    active_index = features_df.index[active_mask]
+    gmm_series = pd.Series(gmm_labels, index=active_index, dtype="Int64")
+
+    try:
+        if cfg.get("use_umap_for_hdbscan", True):
+            X_hdbscan = _get_active_umap(X_scaled_active, cfg, rng)
+        else:
+            X_hdbscan = X_pca_active
+        hdb_labels = _run_hdbscan(X_hdbscan, cfg)
+        features_df_active = features_df.loc[active_mask].reset_index(drop=True)
+        hdb_tier_active = _map_hdb_to_tier(hdb_labels, features_df_active, cfg)
+        hdb_series = pd.Series(hdb_tier_active.values, index=active_index, dtype="object")
+    except ImportError:
+        hdb_series = pd.Series("Unavailable", index=active_index, dtype="object")
+
+    ensemble_active = _build_ensemble_labels(gmm_series, hdb_series)
+    ensemble_active = ensemble_active.replace({ENSEMBLE_MISSING_LABEL: DORMANT_FILL_LABEL})
+    out_ensemble.loc[active_index] = ensemble_active.values
+
+    return _map_ensemble_to_segment(out_ensemble, features_df, cfg)
+
+
+def compute_final_segment_stability(
+    features_df: pd.DataFrame,
+    active_mask: pd.Series,
+    selected_cols: list[str],
+    config: dict | None = None,
+    n_seeds: int | None = None,
+) -> dict[str, Any]:
+    """Measure reproducibility of the *final business segment*, not just Round-1 KMeans.
+
+    `_compute_stability_metrics` (used inside `run_clustering_pipeline`) only
+    re-runs the Round-1 KMeans stage across seeds — it says nothing about
+    whether the GMM/UMAP/HDBSCAN/composite-scoring stages downstream, which
+    are what actually decide an agent's ``segment``, are themselves
+    reproducible. A pipeline can report "stable" while individual agents'
+    tiers (and hence the credit limits derived from them) are seed-sensitive.
+
+    This function re-runs the full active-agent stage `n_seeds` times under
+    different seeds and reports how consistently each agent lands in the
+    same segment. It is O(n_seeds) full active-pipeline re-runs, so it is
+    intended for scheduled/offline validation runs rather than every
+    production invocation — call it explicitly; it is not part of
+    `run_clustering_pipeline`.
+
+    Parameters
+    ----------
+    features_df : Agent feature DataFrame (post feature engineering).
+    active_mask : Boolean mask of non-dormant agents, e.g. from
+                  `_identify_dormant_mask(features_df, cfg)` or
+                  `features_df["cluster_round2"].notna()` on an
+                  already-clustered DataFrame.
+    selected_cols : Feature columns used for scaling/PCA.
+    config : Clustering config (same shape as DEFAULT_CLUSTERING_CONFIG).
+    n_seeds : Override `stability_n_seeds` from config.
+
+    Returns
+    -------
+    dict with keys: segment_consistency_rate (fraction of agents assigned
+    the *same* segment in every seed run), segment_ari_mean, segment_ari_std
+    (pairwise Adjusted Rand Index across seed pairs on the full segment
+    column), n_seeds, n_active.
+    """
+    from itertools import combinations  # noqa: PLC0415
+    from sklearn.metrics import adjusted_rand_score  # noqa: PLC0415
+
+    cfg = _get_clustering_config(config)
+    seeds = int(n_seeds) if n_seeds is not None else int(cfg.get("stability_n_seeds", 3))
+    base_seed = int(cfg.get("random_state", 42))
+
+    if seeds < 2:
+        logger.warning(
+            "compute_final_segment_stability: n_seeds=%d < 2 — "
+            "returning default report.",
+            seeds,
+        )
+        return deepcopy(DEFAULT_FINAL_STABILITY_REPORT)
+
+    n_active = int(active_mask.sum())
+    if n_active == 0:
+        logger.warning(
+            "compute_final_segment_stability: no active agents — "
+            "returning default report."
+        )
+        return deepcopy(DEFAULT_FINAL_STABILITY_REPORT)
+
+    seed_segments: list[pd.Series] = []
+    for i in range(seeds):
+        seed = base_seed + i * 137  # deterministic but varied, matches _compute_stability_metrics
+        rng = np.random.RandomState(seed)
+        seed_segments.append(
+            _run_active_pipeline_once(features_df, active_mask, selected_cols, cfg, rng)
+        )
+
+    matrix = pd.concat(seed_segments, axis=1)
+    matrix.columns = [f"seed_{i}" for i in range(seeds)]
+
+    consistency = float((matrix.nunique(axis=1) == 1).mean())
+    ari_values = [
+        adjusted_rand_score(matrix.iloc[:, a], matrix.iloc[:, b])
+        for a, b in combinations(range(seeds), 2)
+    ]
+
+    report = {
+        "segment_consistency_rate": consistency,
+        "segment_ari_mean": float(np.mean(ari_values)),
+        "segment_ari_std": float(np.std(ari_values)),
+        "n_seeds": seeds,
+        "n_active": n_active,
+    }
+    logger.info(
+        "compute_final_segment_stability: consistency=%.3f, segment ARI "
+        "mean=%.3f ± %.3f (%d seeds, %d active agents)",
+        report["segment_consistency_rate"],
+        report["segment_ari_mean"],
+        report["segment_ari_std"],
+        seeds,
+        n_active,
+    )
+    return report
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # PUBLIC API
 # ─────────────────────────────────────────────────────────────────────────────
@@ -997,6 +1222,7 @@ def run_clustering_pipeline(
             segment         : Business segment from BUSINESS_SEGMENTS
     """
     cfg = _get_clustering_config(config)
+    dep_status = _check_optional_dependencies(cfg)
     rng = np.random.RandomState(cfg["random_state"])
 
     if X_pca.shape[0] != len(features_df):
@@ -1092,6 +1318,20 @@ def run_clustering_pipeline(
 
     # ── Attach stability report as DataFrame metadata ─────────────────────────
     out.attrs["stability_report"] = stability_report
+
+    # ── Flag degraded runs (only reachable when require_* was explicitly
+    #    set to False, since _check_optional_dependencies already raised
+    #    above otherwise) so callers can propagate the caveat downstream. ──
+    out.attrs["degraded_mode"] = {
+        "hdbscan_unavailable": not dep_status["hdbscan_available"],
+        "umap_unavailable": not dep_status["umap_available"],
+    }
+    if any(out.attrs["degraded_mode"].values()):
+        logger.warning(
+            "run_clustering_pipeline: completed in DEGRADED MODE — %s. "
+            "Cluster/segment quality is reduced; see out.attrs['degraded_mode'].",
+            out.attrs["degraded_mode"],
+        )
 
     # Log summary
     seg_counts = out["segment"].value_counts().to_dict()

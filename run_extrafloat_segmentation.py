@@ -32,7 +32,11 @@ import numpy as np
 import pandas as pd
 
 from extrafloat_segmentation_features import prepare_features, REQUIRED_COLUMNS
-from extrafloat_segmentation_pipeline import run_clustering_pipeline, BUSINESS_SEGMENTS
+from extrafloat_segmentation_pipeline import (
+    run_clustering_pipeline,
+    compute_final_segment_stability,
+    BUSINESS_SEGMENTS,
+)
 from extrafloat_segmentation_profiling import (
     build_cluster_pack_profiles,
     build_cluster_tiers,
@@ -46,6 +50,10 @@ from extrafloat_segmentation_drift import (
     load_drift_baseline,
     save_drift_baseline,
     DEFAULT_DRIFT_CONFIG,
+)
+from extrafloat_segmentation_validation import (
+    run_quality_gate,
+    DEFAULT_QUALITY_GATE_CONFIG,
 )
 
 logger = logging.getLogger(__name__)
@@ -118,6 +126,9 @@ DEFAULT_SEGMENTATION_CONFIG: dict[str, Any] = {
     },
     "drift": {
         **DEFAULT_DRIFT_CONFIG,
+    },
+    "quality_gate": {
+        **DEFAULT_QUALITY_GATE_CONFIG,
     },
 }
 
@@ -392,6 +403,37 @@ def run_extrafloat_segmentation(
             stability.get("n_seeds", 0),
         )
 
+    # ── Step 2b: Full-pipeline segment stability (optional, expensive) ───────
+    clustering_cfg = cfg.get("clustering", {})
+    if clustering_cfg.get("full_stability_check", False):
+        logger.info(
+            "run_extrafloat_segmentation: step 2b — full-pipeline segment "
+            "stability check (this re-runs the active-agent pipeline across "
+            "multiple seeds and is significantly more expensive than the "
+            "Round-1-only stability report above)."
+        )
+        active_mask_for_stability = (
+            features_df["cluster_round2"].notna()
+            if "cluster_round2" in features_df.columns
+            else pd.Series(True, index=features_df.index)
+        )
+        final_stability = compute_final_segment_stability(
+            features_df=features_df,
+            active_mask=active_mask_for_stability,
+            selected_cols=selected_cols,
+            config=clustering_cfg,
+        )
+        features_df.attrs["final_stability_report"] = final_stability
+        logger.info(
+            "run_extrafloat_segmentation: final segment stability — "
+            "consistency=%.3f, ARI mean=%.3f ± %.3f (%d seeds, %d active agents)",
+            final_stability.get("segment_consistency_rate", float("nan")),
+            final_stability.get("segment_ari_mean", float("nan")),
+            final_stability.get("segment_ari_std", float("nan")),
+            final_stability.get("n_seeds", 0),
+            final_stability.get("n_active", 0),
+        )
+
     seg_col = cfg["output"].get("final_segment_col", "segment")
     if seg_col != "segment" and "segment" in features_df.columns:
         features_df = features_df.rename(columns={"segment": seg_col})
@@ -458,6 +500,32 @@ def run_extrafloat_segmentation(
     else:
         logger.info(
             "run_extrafloat_segmentation: step 5 — no reference lists provided, skipping."
+        )
+
+    # ── Step 5b: Quality Gate ─────────────────────────────────────────────────
+    # Runs before intermediate columns (cluster_round2, hdb_tier, ensemble_cluster)
+    # are trimmed away in Step 6, and after agent_category (if any) is merged in
+    # Step 5, so both the unsupervised and supervised checks have what they need.
+    logger.info("run_extrafloat_segmentation: step 5b — quality gate.")
+    quality_gate_report = run_quality_gate(
+        features_df,
+        config=cfg.get("quality_gate"),
+        segment_col=seg_col,
+    )
+    features_df.attrs["quality_gate"] = quality_gate_report
+    if quality_gate_report.get("skipped"):
+        logger.info("run_extrafloat_segmentation: quality gate disabled via config — skipped.")
+    elif quality_gate_report["passed"]:
+        logger.info("run_extrafloat_segmentation: quality gate PASSED.")
+    else:
+        failed_checks = [
+            name for name, c in quality_gate_report["checks"].items() if not c["passed"]
+        ]
+        logger.critical(
+            "run_extrafloat_segmentation: quality gate FAILED — breached "
+            "checks: %s. Full report: %s",
+            failed_checks,
+            quality_gate_report["checks"],
         )
 
     # ── Step 6: Join MSISDN + Trim Output ────────────────────────────────────
@@ -743,6 +811,28 @@ def main(argv: list[str] | None = None) -> None:
             f"  critical={drift.get('n_critical', 0)}"
             f"  warning={drift.get('n_warning', 0)}"
             f"  [{status}]"
+        )
+
+    quality_gate = result.attrs.get("quality_gate", {})
+    if quality_gate and not quality_gate.get("skipped"):
+        gate_status = "PASSED" if quality_gate.get("passed") else "FAILED"
+        failed_checks = [
+            name for name, c in quality_gate.get("checks", {}).items() if not c["passed"]
+        ]
+        print(
+            f"\nQuality gate  [{gate_status}]"
+            + (f"  breached: {failed_checks}" if failed_checks else "")
+        )
+
+    final_stability = result.attrs.get("final_stability_report", {})
+    if final_stability.get("n_seeds", 0) > 0:
+        print(
+            f"\nFinal segment stability  "
+            f"consistency={final_stability['segment_consistency_rate']:.3f}  "
+            f"ARI={final_stability['segment_ari_mean']:.3f} ± "
+            f"{final_stability['segment_ari_std']:.3f}"
+            f"  ({final_stability['n_seeds']} seeds, "
+            f"{final_stability['n_active']} active agents)"
         )
 
     out_path = os.path.join(args.output, "agent_segments.csv")
