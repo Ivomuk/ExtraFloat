@@ -155,6 +155,15 @@ def _make_agents_df(n: int = 80, **col_overrides) -> pd.DataFrame:
             if isinstance(v, float) and v > 0:
                 row[k] = abs(v * (1.0 + 0.4 * rng.randn()))
         row["agent_msisdn"] = 256780000000 + i
+        # Vary activation_dt per agent so tenure_years isn't a constant
+        # column — _engineer_date_features silently drops constant columns,
+        # which would otherwise make tenure_years vanish from every
+        # scorecard's "efficiency" factor without anyone noticing (this is
+        # exactly the failure mode compute_raw_kpi_frame's fail-closed
+        # default is meant to catch — it caught it here).
+        days_ago = int(rng.randint(30, 3650))
+        activation_date = pd.Timestamp("2025-11-16") - pd.Timedelta(days=days_ago)
+        row["activation_dt"] = activation_date.strftime("%Y%m%d")
         rows.append(row)
     df = pd.DataFrame(rows)
     for col, val in col_overrides.items():
@@ -1442,6 +1451,16 @@ class TestScoringOrchestration:
         save_scorecard(scorecard, scorecard_path)
         return scorecard_path, scorecard
 
+    @staticmethod
+    def _scoring_cfg(scorecard_path, **overrides) -> dict:
+        """scoring config pointed at a calibrated (provisional-by-default)
+        scorecard, with allow_provisional_scorecard explicitly opted in —
+        these tests exercise the scoring mechanism itself, not the
+        provisional-scorecard guard (see test_provisional_scorecard_*)."""
+        cfg = {"scorecard_path": scorecard_path, "allow_provisional_scorecard": True}
+        cfg.update(overrides)
+        return cfg
+
     def test_default_config_requires_scorecard(self):
         from run_extrafloat_segmentation import DEFAULT_SEGMENTATION_CONFIG
 
@@ -1485,13 +1504,51 @@ class TestScoringOrchestration:
         result = run_extrafloat_segmentation(agents_df, config=cfg)  # should not raise
         assert "capacity_tier" not in result.columns
 
+    def test_provisional_scorecard_rejected_by_default(self, tmp_path):
+        """A provisional scorecard (the default from calibrate_capacity_scorecard)
+        must never run silently in what looks like a production config."""
+        from run_extrafloat_segmentation import run_extrafloat_segmentation
+
+        agents_df = self._small_agents_df()
+        scorecard_path, scorecard = self._calibrated_scorecard_path(agents_df, tmp_path)
+        assert scorecard["calibration_metadata"]["is_provisional"] is True
+
+        cfg = self._no_output_cfg(scoring={"scorecard_path": scorecard_path})
+        with pytest.raises(ValueError, match="provisional"):
+            run_extrafloat_segmentation(agents_df, config=cfg)
+
+    def test_provisional_scorecard_allowed_with_explicit_opt_in(self, tmp_path):
+        from run_extrafloat_segmentation import run_extrafloat_segmentation
+
+        agents_df = self._small_agents_df()
+        scorecard_path, _ = self._calibrated_scorecard_path(agents_df, tmp_path)
+
+        cfg = self._no_output_cfg(
+            scoring={"scorecard_path": scorecard_path, "allow_provisional_scorecard": True}
+        )
+        result = run_extrafloat_segmentation(agents_df, config=cfg)  # should not raise
+        assert "capacity_tier" in result.columns
+
+    def test_non_provisional_scorecard_runs_without_opt_in(self, tmp_path):
+        from run_extrafloat_segmentation import run_extrafloat_segmentation
+
+        agents_df = self._small_agents_df()
+        scorecard_path, scorecard = self._calibrated_scorecard_path(
+            agents_df, tmp_path, is_provisional=False, cutoff_version="reviewed_v1"
+        )
+        assert scorecard["calibration_metadata"]["is_provisional"] is False
+
+        cfg = self._no_output_cfg(scoring={"scorecard_path": scorecard_path})
+        result = run_extrafloat_segmentation(agents_df, config=cfg)  # should not raise
+        assert "capacity_tier" in result.columns
+
     def test_configured_scorecard_produces_capacity_columns(self, tmp_path):
         from run_extrafloat_segmentation import run_extrafloat_segmentation
 
         agents_df = self._small_agents_df()
         scorecard_path, scorecard = self._calibrated_scorecard_path(agents_df, tmp_path)
 
-        cfg = self._no_output_cfg(scoring={"scorecard_path": scorecard_path})
+        cfg = self._no_output_cfg(scoring=self._scoring_cfg(scorecard_path))
         result = run_extrafloat_segmentation(agents_df, config=cfg)
 
         for col in ("capacity_score", "capacity_tier_raw", "capacity_tier",
@@ -1512,7 +1569,7 @@ class TestScoringOrchestration:
         scorecard_path, _ = self._calibrated_scorecard_path(agents_df, tmp_path)
 
         cfg = self._no_output_cfg(
-            scoring={"scorecard_path": scorecard_path},
+            scoring=self._scoring_cfg(scorecard_path),
             output={"output_dir": "", "emit_legacy_aliases": False},
         )
         result = run_extrafloat_segmentation(agents_df, config=cfg)
@@ -1526,7 +1583,7 @@ class TestScoringOrchestration:
         agents_df = self._small_agents_df()
         scorecard_path, _ = self._calibrated_scorecard_path(agents_df, tmp_path)
 
-        cfg = self._no_output_cfg(scoring={"scorecard_path": scorecard_path})
+        cfg = self._no_output_cfg(scoring=self._scoring_cfg(scorecard_path))
         result = run_extrafloat_segmentation(agents_df, config=cfg)
         assert not any(c.startswith("diag_") for c in result.columns)
 
@@ -1539,7 +1596,7 @@ class TestScoringOrchestration:
         agents_df = self._small_agents_df()
         scorecard_path, _ = self._calibrated_scorecard_path(agents_df, tmp_path)
 
-        cfg = self._no_output_cfg(scoring={"scorecard_path": scorecard_path})
+        cfg = self._no_output_cfg(scoring=self._scoring_cfg(scorecard_path))
         result = run_extrafloat_segmentation(agents_df, config=cfg)
         assert "is_anomaly" in result.columns
         assert "diag_is_anomaly" not in result.columns
@@ -1553,7 +1610,7 @@ class TestScoringOrchestration:
         scorecard_path, _ = self._calibrated_scorecard_path(agents_df, tmp_path)
 
         cfg = self._no_output_cfg(
-            scoring={"scorecard_path": scorecard_path},
+            scoring=self._scoring_cfg(scorecard_path),
             clustering={"enable_anomaly_detection": False},
         )
         result = run_extrafloat_segmentation(agents_df, config=cfg)
@@ -1566,7 +1623,7 @@ class TestScoringOrchestration:
 
         agents_df = self._small_agents_df()
         scorecard_path, _ = self._calibrated_scorecard_path(agents_df, tmp_path)
-        cfg = self._no_output_cfg(scoring={"scorecard_path": scorecard_path})
+        cfg = self._no_output_cfg(scoring=self._scoring_cfg(scorecard_path))
 
         monkeypatch.setattr(pipe, "_HDBSCAN_AVAILABLE", False)
         result = run_extrafloat_segmentation(agents_df, config=cfg)
@@ -1585,9 +1642,9 @@ class TestScoringOrchestration:
         agents_df = self._small_agents_df()
         scorecard_path, _ = self._calibrated_scorecard_path(agents_df, tmp_path)
 
-        cfg_on = self._no_output_cfg(scoring={"scorecard_path": scorecard_path})
+        cfg_on = self._no_output_cfg(scoring=self._scoring_cfg(scorecard_path))
         cfg_off = self._no_output_cfg(
-            scoring={"scorecard_path": scorecard_path},
+            scoring=self._scoring_cfg(scorecard_path),
             clustering={"enable_anomaly_detection": False},
         )
         result_on = run_extrafloat_segmentation(agents_df, config=cfg_on)
@@ -1615,7 +1672,7 @@ class TestScoringOrchestration:
         save_drift_baseline(dev_df, features=drift_features, config={"baseline_save_path": baseline_path})
 
         cfg = self._no_output_cfg(
-            scoring={"scorecard_path": scorecard_path},
+            scoring=self._scoring_cfg(scorecard_path),
             drift={"baseline_path": baseline_path, "drift_features": drift_features},
         )
         result = run_extrafloat_segmentation(agents_df, config=cfg)
@@ -1629,7 +1686,7 @@ class TestScoringOrchestration:
         scorecard_path, _ = self._calibrated_scorecard_path(agents_df, tmp_path)
 
         cfg = self._no_output_cfg(
-            scoring={"scorecard_path": scorecard_path},
+            scoring=self._scoring_cfg(scorecard_path),
             clustering={"enable_diagnostics": True},
         )
         result = run_extrafloat_segmentation(agents_df, config=cfg)
@@ -1637,7 +1694,7 @@ class TestScoringOrchestration:
             assert col in result.columns
         # capacity_tier must be identical whether or not diagnostics ran —
         # diagnostics never feeds capacity scoring.
-        cfg_no_diag = self._no_output_cfg(scoring={"scorecard_path": scorecard_path})
+        cfg_no_diag = self._no_output_cfg(scoring=self._scoring_cfg(scorecard_path))
         result_no_diag = run_extrafloat_segmentation(agents_df, config=cfg_no_diag)
         assert (
             result.set_index("agent_msisdn")["capacity_tier"]
@@ -1652,7 +1709,7 @@ class TestScoringOrchestration:
         agents_df = self._small_agents_df(80)
         scorecard_path, _ = self._calibrated_scorecard_path(agents_df, tmp_path)
 
-        cfg = self._no_output_cfg(scoring={"scorecard_path": scorecard_path})
+        cfg = self._no_output_cfg(scoring=self._scoring_cfg(scorecard_path))
         full_result = run_extrafloat_segmentation(agents_df, config=cfg)
 
         subset_df = agents_df.iloc[:40].reset_index(drop=True)
@@ -1670,7 +1727,7 @@ class TestScoringOrchestration:
         agents_df = self._small_agents_df()
         scorecard_path, _ = self._calibrated_scorecard_path(agents_df, tmp_path)
 
-        cfg = self._no_output_cfg(scoring={"scorecard_path": scorecard_path})
+        cfg = self._no_output_cfg(scoring=self._scoring_cfg(scorecard_path))
         result = run_extrafloat_segmentation(agents_df, config=cfg)
         assert "tier_drift_report" in result.attrs
         assert "psi" in result.attrs["tier_drift_report"]
@@ -1681,7 +1738,7 @@ class TestScoringOrchestration:
         agents_df = self._small_agents_df()
         scorecard_path, _ = self._calibrated_scorecard_path(agents_df, tmp_path)
 
-        cfg = self._no_output_cfg(scoring={"scorecard_path": scorecard_path})
+        cfg = self._no_output_cfg(scoring=self._scoring_cfg(scorecard_path))
         result = run_extrafloat_segmentation(agents_df, config=cfg)
         quality_gate = result.attrs.get("quality_gate", {})
         assert quality_gate.get("skipped") is False

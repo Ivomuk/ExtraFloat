@@ -64,6 +64,9 @@ jobs:
           config = copy.deepcopy(DEFAULT_SEGMENTATION_CONFIG)
           config["output"]["output_dir"] = ""
           config["scoring"]["scorecard_path"] = scorecard_path
+          # Provisional scorecards are blocked by default (scoring.allow_provisional_scorecard);
+          # this smoke test deliberately uses one, so opt in explicitly.
+          config["scoring"]["allow_provisional_scorecard"] = True
 
           result = run_extrafloat_segmentation(agents_df, config=config)
 

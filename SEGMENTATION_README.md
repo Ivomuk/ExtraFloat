@@ -98,15 +98,28 @@ Below Threshold, New Bronze, Bronze, Silver, Gold, Platinum, Titanium, Diamond
 ```
 
 An agent's `capacity_tier` comes from a **frozen, versioned scorecard**:
-raw KPIs are aggregated into three factor groups (value/activity/efficiency,
-default weights 50/30/20), each normalized against a *frozen* reference
-range fixed at calibration time (not recomputed from the current run's
-population), blended into one `capacity_score` in `[0, 1]`, and bucketed
-against *frozen* cutoff thresholds. Given the same scorecard, the same
-agent feature values always produce the same score and tier — regardless
-of which other agents are in the run. Agents below the scorecard's
-`min_tenure_years` are downgraded one tier; dormant agents (identified by
-a weighted composite inactivity score) always land in "Below Threshold".
+each *individual* KPI (e.g. `cash_out_value_3m`, `tenure_years`) is
+normalized independently against its own *frozen* reference range fixed
+at calibration time (not recomputed from the current run's population),
+combined into one of three factor groups (value/activity/efficiency) via
+explicit within-group KPI weights, then blended across groups (default
+group weights 50/30/20) into one `capacity_score` in `[0, 1]`, and
+bucketed against *frozen* cutoff thresholds. Given the same scorecard, the
+same agent feature values always produce the same score and tier —
+regardless of which other agents are in the run. Agents below the
+scorecard's `min_tenure_years` are downgraded one tier; dormant agents
+(identified by a weighted composite inactivity score) always land in
+"Below Threshold".
+
+Normalizing each KPI independently *before* combining — rather than
+averaging/summing raw KPIs of different units and scales together first —
+matters concretely: an earlier version of this scorecard averaged
+`commission_per_value_3m`/`commission_per_value_6m` (ratios near 0.01)
+directly with raw `tenure_years` (range 0–20+) inside the "efficiency"
+factor, letting whichever had the larger raw scale silently dominate. Each
+factor group also only keeps the *widest* available window per KPI (e.g.
+`cash_out_value_3m` but not also `cash_out_value_1m`) — summing overlapping
+windows double-counted the most recent month.
 
 A scorecard is produced offline by `calibrate_capacity_scorecard`
 (typically via `calibrate_scorecard.py`) and is a human-reviewed
@@ -116,12 +129,24 @@ governance artifact, not something a production run fits itself — see
 — calibrated against synthetic/tiny sample data, not reviewed against real
 production data. Treat any provisional scorecard's cutoffs as a
 placeholder proving the mechanism works end to end, not as calibrated
-business thresholds.
+business thresholds. `run_extrafloat_segmentation` refuses to apply a
+provisional scorecard by default (`scoring.allow_provisional_scorecard=False`)
+— see [Reliability features](#reliability-features).
+
+Determinism is not the same as validity. Reproducing the same number every
+time says nothing about whether that number tracks real outcomes
+(sustainable capacity, repayment behavior, fairness across regions/agent
+types) — that validation is exactly what's blocked on real data; see
+[Known limitations](#known-limitations--open-items).
 
 ## Running it
 
 A scorecard is **required** — a run with no scorecard configured raises
-`ValueError` by default (`scoring.allow_missing_scorecard=False`).
+`ValueError` by default (`scoring.allow_missing_scorecard=False`). A freshly
+calibrated scorecard is also **provisional by default** and is likewise
+refused unless explicitly allowed (`scoring.allow_provisional_scorecard=False`)
+— pass `--final` to `calibrate_scorecard.py` once it's been reviewed, or
+set `allow_provisional_scorecard=True` for a deliberate non-production run.
 
 ```bash
 pip install -r requirements-segmentation-dev.txt
@@ -129,8 +154,10 @@ pip install -r requirements-segmentation-dev.txt
 # 1. Calibrate a scorecard (offline, human-reviewed step)
 python calibrate_scorecard.py --agents development_agents.csv \
     --out scorecards/capacity_scorecard_v0.json
+    # add --final once reviewed, to clear is_provisional
 
-# 2. Run the pipeline against it
+# 2. Run the pipeline against it (add allow_provisional_scorecard=True via
+#    --config/JSON, or --final above, before this will run without it)
 python run_extrafloat_segmentation.py --agents agents.csv \
     --scorecard scorecards/capacity_scorecard_v0.json \
     --output segmentation_outputs/
@@ -172,6 +199,22 @@ Required input columns are listed in `extrafloat_segmentation_features.REQUIRED_
   `scoring.allow_missing_scorecard`, default `False`): a run with no usable
   scorecard raises `ValueError` before producing any output, rather than
   silently returning agents with no tier.
+- **Provisional-scorecard guard rail** (`scoring.allow_provisional_scorecard`,
+  default `False`): a scorecard whose `calibration_metadata.is_provisional`
+  is `True` (the default from `calibrate_capacity_scorecard` until
+  `--final`/`is_provisional=False` is passed) is refused with `ValueError`
+  rather than silently applying unreviewed cutoffs to what looks like a
+  production run.
+- **Fail-closed on missing scorecard inputs** (`scoring.on_missing_column`,
+  default `"raise"`): if a scorecard-declared KPI column is entirely absent
+  from the input data (e.g. an upstream schema regression), scoring raises
+  `ValueError` rather than silently computing that factor as 0.0 for every
+  affected agent — a partial computation on a governed financial score
+  would mean different agents (or different runs) get scored under
+  different effective definitions with no visible error. Set to `"zero"`
+  only for a deliberate degraded research/dev run, never for governed
+  scoring. `calibrate_scorecard.py --allow-missing-columns` is the matching
+  escape hatch for offline calibration.
 - **Anomaly detection, on by default but never blocking**
   (`clustering.enable_anomaly_detection`, default `True`): `flag_anomalies`
   runs HDBSCAN alone (no GMM, no UMAP) on every production run to flag
@@ -261,13 +304,40 @@ describe the limit engine's internals.
 
 ## Known limitations / open items
 
+A round of external review distinguished "deterministic" from "valid":
+reproducing the same tier every time proves the mechanism works, not that
+higher tiers track real sustainable capacity, better float utilization,
+lower credit loss, or fairness across regions/agent types — call it
+**engineering framework: solid; deployable business segmentation: not yet
+demonstrated.** That review's structural findings (silent zero-fill on
+missing inputs, permissive `validate_scorecard`, unenforced provisional
+status, unit-mixing inside the "efficiency" factor, overlapping-window
+double-counting) are fixed — see the fail-closed/provisional-guard bullets
+above and the per-KPI normalization described under
+[Business tiers](#business-tiers). What's still open:
+
 - **Blocked on real data** — deliberately not started, not half-built:
-  - The scorecard's factor-group weights, normalization ranges, and tier
-    cutoffs are hand-set/provisionally-calibrated defaults, not validated
-    against real outcomes — no real labeled dataset exists in this repo yet.
-  - No temporal / out-of-time validation (month-over-month tier-churn
-    checking) — needs real multi-month snapshots to build and calibrate
-    against; nothing in this repo currently has more than one snapshot date.
+  - The scorecard's factor-group weights, within-group KPI weights,
+    normalization ranges, and tier cutoffs are hand-set/provisionally-
+    calibrated defaults, not validated against real outcomes — no real
+    labeled dataset exists in this repo yet.
+  - **No temporal / out-of-time validation** — the single biggest missing
+    evaluation. What's needed once real data exists: calibrate on one
+    historical period, apply the frozen scorecard to later months, measure
+    tier migration matrices and stability, check outcome monotonicity by
+    tier (do higher tiers actually perform better), verify tier
+    transitions correspond to genuine KPI changes rather than noise,
+    backtest against any downstream limit/exposure policy, and segment
+    all of the above by tenure/geography/agent profile/activity level.
+    Nothing in this repo currently has more than one snapshot date to do
+    any of this against.
+- **Quality gate defaults are permissive by design, not yet a real gate**:
+  `fail_on_breach=False`, `min_purity`/`min_ari=0.0`, a 2-tier diversity
+  floor out of 8, and up to 50% of active agents allowed below threshold —
+  today this is an observability report, not a deployment gate. Set
+  `quality_gate.fail_on_breach=True` (and tighten the other thresholds)
+  once real-data calibration gives them meaning; flipping it by default
+  before that would just break every run for no calibrated reason.
 - **Not attempted this pass** — no formal packaging (`src/` layout,
   `pyproject.toml`): this is still a flat script collection at the repo
   root, alongside legacy exploratory `cl_file*.txt` dumps that fed the

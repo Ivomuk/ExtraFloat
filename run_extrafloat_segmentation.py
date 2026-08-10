@@ -158,6 +158,13 @@ DEFAULT_SEGMENTATION_CONFIG: dict[str, Any] = {
         # pipeline, so a run without a scorecard has nothing to compute.
         "scorecard_path": "",
         "allow_missing_scorecard": False,
+        # A provisional scorecard (calibration_metadata.is_provisional=True)
+        # has not been reviewed against real production data — its cutoffs
+        # are a placeholder proving the mechanism works end to end, not
+        # approved business thresholds. Default False so a provisional
+        # scorecard can never be applied to what looks like a production
+        # run by accident; set True only for a deliberate non-production run.
+        "allow_provisional_scorecard": False,
     },
     # GMM/HDBSCAN diagnostic clustering — anomaly flagging and archetype
     # research only. Never decides capacity_tier. See DEFAULT_CLUSTERING_CONFIG
@@ -653,7 +660,23 @@ def run_extrafloat_segmentation(
     scorecard: dict[str, Any] | None = None
     if scorecard_path and os.path.isfile(scorecard_path):
         scorecard = load_scorecard(scorecard_path)
-        capacity_df = compute_agent_capacity(features_df, scorecard, is_dormant=is_dormant)
+
+        is_provisional = bool(
+            scorecard.get("calibration_metadata", {}).get("is_provisional", False)
+        )
+        if is_provisional and not scoring_cfg.get("allow_provisional_scorecard", False):
+            raise ValueError(
+                f"run_extrafloat_segmentation: scorecard at '{scorecard_path}' "
+                f"is provisional (cutoff_version="
+                f"{scorecard.get('cutoff_version')!r}) — its cutoffs are a "
+                f"calibration placeholder, not reviewed business thresholds. "
+                f"Set scoring.allow_provisional_scorecard=True only for a "
+                f"deliberate non-production run."
+            )
+
+        capacity_df = compute_agent_capacity(
+            features_df, scorecard, is_dormant=is_dormant, config=scoring_cfg
+        )
         features_df = _concat_preserving_attrs(features_df, capacity_df)
         logger.info(
             "run_extrafloat_segmentation: capacity scoring complete via "

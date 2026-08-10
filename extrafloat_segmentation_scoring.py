@@ -18,26 +18,53 @@ individually reproducible nor auditable.
 
 This module replaces that mechanism with a deterministic, per-agent
 "capacity score": a small number of business-KPI factor groups (value,
-activity, efficiency), each normalized against a *frozen* reference range
-fixed at calibration time (not recomputed from the current run's
-population), blended into a single [0, 1] score, and bucketed against
-*frozen* cutoff thresholds. Given the same scorecard, the same agent
-feature values always produce the same score and tier — regardless of
-which other agents are present in the run. That invariant is the entire
-point and is asserted directly in the test suite
-(test_extrafloat_segmentation_scoring.py).
+activity, efficiency). Each *individual KPI* is normalized independently
+against a *frozen* reference range fixed at calibration time (not
+recomputed from the current run's population), combined into a per-group
+score via explicit within-group weights, then blended across groups into a
+single [0, 1] score, and bucketed against *frozen* cutoff thresholds.
+Given the same scorecard, the same agent feature values always produce the
+same score and tier — regardless of which other agents are present in the
+run. That invariant is the entire point and is asserted directly in the
+test suite (test_extrafloat_segmentation_scoring.py).
+
+Determinism alone does not make a score valid — reproducing the same
+number every time says nothing about whether that number tracks real
+outcomes (sustainable capacity, repayment behavior, fairness across
+regions/agent types). Every scorecard produced so far in this repo is
+calibrated against small synthetic/sample populations and is explicitly
+marked provisional (`calibration_metadata.is_provisional`) — see
+`run_extrafloat_segmentation.py`'s `scoring.allow_provisional_scorecard`
+guard (default False) and SEGMENTATION_README.md.
+
+KPI normalization, not raw-KPI aggregation
+--------------------------------------------
+An earlier version of this module aggregated *raw* KPI columns per group
+(e.g. averaging `commission_per_value_3m`, `commission_per_value_6m`, and
+`tenure_years` directly) before normalizing the group total. That mixed
+unlike units and scales inside one mean — a ratio near 0.01 and a
+tenure value that can run into the tens would not contribute comparably,
+with whichever had the larger raw scale silently dominating. This version
+normalizes each KPI column independently first (`compute_raw_kpi_frame` +
+`_apply_normalization`), *then* combines the already-normalized,
+comparable [0, 1] values within a group via explicit per-KPI weights
+(`compute_group_scores`). It also fails closed on missing scorecard-declared
+columns by default (`compute_raw_kpi_frame`'s `on_missing_column="raise"`)
+rather than silently zero-filling an entire factor for some agents and not
+others — see the module's `on_missing_column` config for the explicit
+research/dev escape hatch.
 
 Governance model
 -----------------
-A "scorecard" (normalization ranges + group weights + tier cutoffs) is a
-versioned artifact, produced offline by `calibrate_capacity_scorecard`
-(typically via the `calibrate_scorecard.py` CLI) and reviewed/signed off by
-a human before being pointed at from production config
-(`scoring.scorecard_path`). Production scoring (`compute_capacity_score`,
-`compute_agent_capacity`) only ever *reads* a scorecard — it never fits
-one. This mirrors how `extrafloat_segmentation_drift.py` separates
-baseline creation (`save_drift_baseline`) from baseline consumption
-(`build_drift_report`).
+A "scorecard" (normalization ranges + group/within-group weights + tier
+cutoffs) is a versioned artifact, produced offline by
+`calibrate_capacity_scorecard` (typically via the `calibrate_scorecard.py`
+CLI) and reviewed/signed off by a human before being pointed at from
+production config (`scoring.scorecard_path`). Production scoring
+(`compute_capacity_score`, `compute_agent_capacity`) only ever *reads* a
+scorecard — it never fits one. This mirrors how
+`extrafloat_segmentation_drift.py` separates baseline creation
+(`save_drift_baseline`) from baseline consumption (`build_drift_report`).
 
 This module is intentionally free of clustering-library imports (no
 sklearn, hdbscan, umap) so it stays importable in minimal environments —
@@ -50,6 +77,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 from copy import deepcopy
 from datetime import datetime, timezone
@@ -64,7 +92,12 @@ logger = logging.getLogger(__name__)
 # CONSTANTS
 # ─────────────────────────────────────────────────────────────────────────────
 
-SCORECARD_SCHEMA_VERSION: str = "1.0"
+# Bumped from "1.0": factor_groups columns changed shape (list -> {kpi: weight}
+# mapping) and normalization is now keyed by individual KPI column instead of
+# by factor-group name. validate_scorecard rejects any other version outright
+# — there is no migration shim, recalibrate with the current
+# calibrate_capacity_scorecard.
+SCORECARD_SCHEMA_VERSION: str = "2.0"
 
 # The canonical business tier ladder. Owned here, not by
 # extrafloat_segmentation_pipeline.py — that module is diagnostics-only and
@@ -80,28 +113,42 @@ BUSINESS_SEGMENTS: tuple[str, ...] = (
     "Diamond",
 )
 
-# Factor groups: each maps a business-meaning bucket to the raw KPI columns
-# that feed it and the aggregation used to combine them into one raw value
-# per agent. Lifted from extrafloat_segmentation_pipeline._compute_composite_score's
-# value_cols / activity_cols / efficiency_cols (same columns, same intent —
-# "how much value moves through this agent", "how active is this agent",
-# "how efficiently does this agent convert activity into commission").
+# Factor groups: each maps a business-meaning bucket to the individual raw
+# KPI columns that feed it and the explicit weight each KPI carries *within*
+# that group (must sum to ~1.0 per group; validated by validate_scorecard).
+# Descends from extrafloat_segmentation_pipeline._compute_composite_score's
+# value_cols / activity_cols / efficiency_cols (same intent — "how much
+# value moves through this agent", "how active is this agent", "how
+# efficiently does this agent convert activity into commission") with two
+# changes from that lineage:
+#   1. Only the widest available window per KPI is kept (e.g.
+#      cash_out_value_3m but not also cash_out_value_1m) — the 1-month
+#      window sits inside the 3/6-month window, so summing both silently
+#      double-counted the most recent month. If deliberate recency
+#      weighting is wanted later, it should be an explicit, calibrated
+#      weight, not an emergent side effect of overlapping raw sums.
+#   2. Each KPI is normalized independently before being combined (see
+#      compute_group_scores) rather than aggregated in raw units first.
 CAPACITY_FACTOR_GROUPS: dict[str, dict[str, Any]] = {
     "value": {
-        "columns": [
-            "commission", "cash_out_value_1m", "cash_out_value_3m",
-            "cash_in_value_1m", "cash_in_value_6m",
-            "payment_value_1m", "payment_value_3m",
-        ],
-        "agg": "sum",
+        "columns": {
+            "commission": 0.25,
+            "cash_out_value_3m": 0.25,
+            "cash_in_value_6m": 0.25,
+            "payment_value_3m": 0.25,
+        },
     },
     "activity": {
-        "columns": ["cash_out_vol_1m", "cash_out_vol_3m"],
-        "agg": "sum",
+        "columns": {
+            "cash_out_vol_3m": 1.0,
+        },
     },
     "efficiency": {
-        "columns": ["commission_per_value_3m", "commission_per_value_6m", "tenure_years"],
-        "agg": "mean",
+        "columns": {
+            "commission_per_value_3m": 1.0 / 3.0,
+            "commission_per_value_6m": 1.0 / 3.0,
+            "tenure_years": 1.0 / 3.0,
+        },
     },
 }
 
@@ -121,6 +168,12 @@ DEFAULT_SCORING_CONFIG: dict[str, Any] = {
     # Minimum tenure (years) required to hold any tier above the lowest.
     # Agents below this are downgraded one tier regardless of score.
     "min_tenure_years": 0.25,
+    # "raise" (default): compute_raw_kpi_frame / compute_capacity_score
+    # raise ValueError if a scorecard-declared KPI column is entirely
+    # absent from the input data, rather than silently scoring that factor
+    # as 0.0 for every affected agent. Set to "zero" only for a deliberate
+    # degraded research/dev run — never as a default for governed scoring.
+    "on_missing_column": "raise",
 }
 
 
@@ -140,47 +193,79 @@ def _get_scoring_config(config: dict | None) -> dict[str, Any]:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def compute_raw_factor_frame(
+def compute_raw_kpi_frame(
     df: pd.DataFrame,
     factor_groups: dict[str, dict[str, Any]] | None = None,
+    on_missing_column: str = "raise",
 ) -> pd.DataFrame:
-    """Aggregate raw KPI columns into one raw value per factor group per agent.
+    """Extract one raw column per individual KPI referenced by *factor_groups*.
 
-    Row-wise only (sum/mean across *columns* of the same row) — never
-    touches other rows — which is what makes downstream scoring
-    population-independent.
+    Row-wise only (no cross-row aggregation) — this is what keeps
+    downstream scoring population-independent.
+
+    Fails closed by default: if any scorecard-declared KPI column is
+    entirely absent from *df* (e.g. an upstream schema regression), raises
+    `ValueError` rather than silently scoring that factor as 0.0 for every
+    affected agent. A partial computation on a governed financial score
+    means two runs — or two agents scored in the same run against
+    different data sources — could be scored under different effective
+    definitions with no visible error, which is worse than refusing to run.
 
     Parameters
     ----------
     df : Agent feature DataFrame (raw, pre-normalization).
-    factor_groups : Mapping of group_name -> {"columns": [...], "agg": "sum"|"mean"}.
+    factor_groups : Mapping of group_name -> {"columns": {kpi: weight, ...}}.
                      Defaults to CAPACITY_FACTOR_GROUPS.
+    on_missing_column : "raise" (default) or "zero" — an explicit escape
+                     hatch for research/dev use. Never set "zero" as a
+                     default for governed/production scoring.
 
     Returns
     -------
-    pd.DataFrame indexed like *df*, one column per factor group.
+    pd.DataFrame indexed like *df*, one column per unique KPI referenced
+    across all factor groups.
+
+    Raises
+    ------
+    ValueError
+        If a declared KPI column is missing and `on_missing_column="raise"`,
+        or if `on_missing_column` is not one of "raise"/"zero".
     """
     if factor_groups is None:
         factor_groups = CAPACITY_FACTOR_GROUPS
+    if on_missing_column not in ("raise", "zero"):
+        raise ValueError(
+            f"compute_raw_kpi_frame: on_missing_column must be 'raise' or "
+            f"'zero', got {on_missing_column!r}."
+        )
+
+    required_cols = sorted(
+        {col for spec in factor_groups.values() for col in spec.get("columns", {})}
+    )
+    missing = [c for c in required_cols if c not in df.columns]
+
+    if missing:
+        if on_missing_column == "raise":
+            raise ValueError(
+                f"compute_raw_kpi_frame: scorecard-declared KPI column(s) "
+                f"missing from input data: {missing}. Refusing to silently "
+                f"score under a different effective definition. Pass "
+                f"on_missing_column='zero' to explicitly allow a degraded "
+                f"run (research/dev only — never for governed scoring)."
+            )
+        logger.warning(
+            "compute_raw_kpi_frame: scorecard-declared KPI column(s) "
+            "missing from input data — defaulting to 0.0 for %s "
+            "(on_missing_column='zero').",
+            missing,
+        )
 
     out = pd.DataFrame(index=df.index)
-    for group_name, spec in factor_groups.items():
-        cols = [c for c in spec.get("columns", []) if c in df.columns]
-        agg = spec.get("agg", "sum")
-
-        if not cols:
-            logger.warning(
-                "compute_raw_factor_frame: none of %s found for group '%s' — "
-                "raw value defaulted to 0.0.",
-                spec.get("columns", []),
-                group_name,
-            )
-            out[group_name] = 0.0
-            continue
-
-        block = df[cols].apply(pd.to_numeric, errors="coerce").fillna(0.0)
-        out[group_name] = block.sum(axis=1) if agg == "sum" else block.mean(axis=1)
-
+    for col in required_cols:
+        if col in df.columns:
+            out[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
+        else:
+            out[col] = 0.0
     return out
 
 
@@ -188,7 +273,7 @@ def _fit_normalization_params(
     raw_frame: pd.DataFrame,
     upper_quantile: float = 0.99,
 ) -> dict[str, dict[str, float]]:
-    """Fit a frozen [ref_min, ref_max] normalization range per factor-group column.
+    """Fit a frozen [ref_min, ref_max] normalization range per KPI column.
 
     ref_min is always 0.0 (these are non-negative business KPIs). ref_max is
     the *upper_quantile* of the calibration population, deterministic given
@@ -205,12 +290,12 @@ def _apply_normalization(
     raw_frame: pd.DataFrame,
     normalization: dict[str, dict[str, float]],
 ) -> pd.DataFrame:
-    """Apply a frozen normalization range to each factor-group column.
+    """Apply a frozen normalization range to each KPI column.
 
     Values are clipped to [0, 1] — an agent scoring above the calibration
-    population's frozen ceiling on a factor clips to 1.0 on that factor
-    rather than silently shifting everyone else's normalization (which is
-    what a live re-fit / live quantile would do).
+    population's frozen ceiling on a KPI clips to 1.0 on that KPI rather
+    than silently shifting everyone else's normalization (which is what a
+    live re-fit / live quantile would do).
     """
     out = pd.DataFrame(index=raw_frame.index)
     for col in raw_frame.columns:
@@ -225,16 +310,55 @@ def _apply_normalization(
     return out
 
 
+def compute_group_scores(
+    normalized_kpi_frame: pd.DataFrame,
+    factor_groups: dict[str, dict[str, Any]],
+) -> pd.DataFrame:
+    """Combine per-KPI normalized values into one [0, 1] score per factor group.
+
+    Each factor group's columns are combined via a weighted sum using the
+    group's explicit within-group KPI weights (`validate_scorecard` enforces
+    these sum to ~1.0), so a group's combined score stays in [0, 1] as long
+    as every input KPI was already normalized to [0, 1] beforehand.
+    Normalizing each KPI independently *before* this step — rather than
+    averaging/summing raw KPIs of different units and scales first — is
+    what keeps e.g. a large-scale raw `tenure_years` value from silently
+    dominating a mean shared with small-scale commission ratios.
+
+    Parameters
+    ----------
+    normalized_kpi_frame : Output of `_apply_normalization` on a
+                            `compute_raw_kpi_frame` result — one column per
+                            individual KPI, each already in [0, 1].
+    factor_groups : Mapping of group_name -> {"columns": {kpi: weight, ...}}.
+
+    Returns
+    -------
+    pd.DataFrame indexed like *normalized_kpi_frame*, one column per factor
+    group.
+    """
+    out = pd.DataFrame(index=normalized_kpi_frame.index)
+    for group_name, spec in factor_groups.items():
+        weighted_cols = spec.get("columns", {})
+        group_score = pd.Series(0.0, index=normalized_kpi_frame.index)
+        for col, weight in weighted_cols.items():
+            if col not in normalized_kpi_frame.columns:
+                continue
+            group_score = group_score + float(weight) * normalized_kpi_frame[col]
+        out[group_name] = group_score.clip(lower=0.0, upper=1.0)
+    return out
+
+
 def _blend_group_score(
-    normalized_frame: pd.DataFrame,
+    group_score_frame: pd.DataFrame,
     group_weights: dict[str, float],
 ) -> pd.Series:
-    """Weighted sum of normalized factor-group columns -> one score per agent, in [0, 1]."""
-    score = pd.Series(0.0, index=normalized_frame.index)
+    """Weighted sum of per-group [0, 1] scores -> one score per agent, in [0, 1]."""
+    score = pd.Series(0.0, index=group_score_frame.index)
     for group_name, weight in group_weights.items():
-        if group_name not in normalized_frame.columns:
+        if group_name not in group_score_frame.columns:
             continue
-        score = score + float(weight) * normalized_frame[group_name]
+        score = score + float(weight) * group_score_frame[group_name]
     return score.clip(lower=0.0, upper=1.0)
 
 
@@ -243,49 +367,146 @@ def _blend_group_score(
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+def _check_finite(value: Any, label: str) -> float:
+    """Coerce *value* to float and raise ValueError if missing/non-numeric/non-finite."""
+    try:
+        fv = float(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"validate_scorecard: {label} is not numeric: {value!r}.") from None
+    if not math.isfinite(fv):
+        raise ValueError(f"validate_scorecard: {label} must be finite, got {value!r}.")
+    return fv
+
+
 def validate_scorecard(scorecard: dict[str, Any]) -> None:
     """Raise ValueError if *scorecard* is structurally invalid.
 
     Checked invariants:
-        - required top-level keys present
-        - group_weights sum to ~1.0
-        - cutoffs are strictly ascending and one shorter than tiers
-        - normalization ranges are non-degenerate (ref_max >= ref_min)
+        - required top-level keys present, including a schema-compatible
+          `scorecard_version` (must equal SCORECARD_SCHEMA_VERSION exactly
+          — no migration shim; recalibrate with the current code instead)
+        - group_weights: finite, non-negative, sum to ~1.0, and reference
+          only factor groups that actually exist
+        - factor_groups: each has a non-empty `columns` mapping whose
+          within-group weights are finite, non-negative, and sum to ~1.0
+        - tiers: non-empty, no duplicate names, no empty/blank names
+        - cutoffs: correct count for the tier list, strictly ascending,
+          finite, and within [0, 1] when `score_scale == "0_to_1"`
+        - normalization: an entry for every KPI column referenced by
+          factor_groups, each with a finite, non-degenerate
+          (`ref_max >= ref_min`) range
+
+    Deliberately NOT checked here (by design, not oversight):
+        - whether a *provisional* scorecard should be allowed to run — that
+          is a deployment-mode policy decision, not a structural-validity
+          one, and lives in `run_extrafloat_segmentation.py`'s
+          `scoring.allow_provisional_scorecard` guard instead.
     """
     required_keys = (
         "scorecard_version", "cutoff_version", "factor_groups", "group_weights",
-        "normalization", "cutoffs", "tiers",
+        "normalization", "score_scale", "cutoffs", "tiers", "calibration_metadata",
     )
     missing = [k for k in required_keys if k not in scorecard]
     if missing:
         raise ValueError(f"validate_scorecard: missing required key(s): {missing}")
 
-    weights = scorecard["group_weights"]
-    total = sum(float(w) for w in weights.values())
+    version = scorecard["scorecard_version"]
+    if version != SCORECARD_SCHEMA_VERSION:
+        raise ValueError(
+            f"validate_scorecard: scorecard_version {version!r} is not "
+            f"compatible with this codebase's SCORECARD_SCHEMA_VERSION "
+            f"{SCORECARD_SCHEMA_VERSION!r}. Recalibrate with the current "
+            f"calibrate_capacity_scorecard rather than loading an "
+            f"older-format scorecard."
+        )
+
+    factor_groups = scorecard["factor_groups"]
+    group_weights = scorecard["group_weights"]
+
+    unknown_group_refs = [g for g in group_weights if g not in factor_groups]
+    if unknown_group_refs:
+        raise ValueError(
+            f"validate_scorecard: group_weights references unknown factor "
+            f"group(s) not present in factor_groups: {unknown_group_refs}."
+        )
+
+    for group_name, w in group_weights.items():
+        fw = _check_finite(w, f"group_weights[{group_name!r}]")
+        if fw < 0:
+            raise ValueError(
+                f"validate_scorecard: group_weights[{group_name!r}]={fw} must be >= 0."
+            )
+    total = sum(float(w) for w in group_weights.values())
     if abs(total - 1.0) > 1e-6:
         raise ValueError(
             f"validate_scorecard: group_weights must sum to 1.0 (got {total:.6f})."
         )
 
+    all_kpi_cols: set[str] = set()
+    for group_name, spec in factor_groups.items():
+        cols = spec.get("columns")
+        if not cols:
+            raise ValueError(
+                f"validate_scorecard: factor_groups[{group_name!r}] has no columns."
+            )
+        for col, w in cols.items():
+            fw = _check_finite(w, f"factor_groups[{group_name!r}][{col!r}]")
+            if fw < 0:
+                raise ValueError(
+                    f"validate_scorecard: factor_groups[{group_name!r}][{col!r}]"
+                    f"={fw} must be >= 0."
+                )
+            all_kpi_cols.add(col)
+        group_total = sum(float(w) for w in cols.values())
+        if abs(group_total - 1.0) > 1e-6:
+            raise ValueError(
+                f"validate_scorecard: factor_groups[{group_name!r}] "
+                f"within-group weights must sum to 1.0 (got {group_total:.6f})."
+            )
+
     tiers = scorecard["tiers"]
+    if not tiers:
+        raise ValueError("validate_scorecard: tiers must not be empty.")
+    if any(not str(t).strip() for t in tiers):
+        raise ValueError(f"validate_scorecard: tiers must not contain empty names: {tiers}")
+    if len(set(tiers)) != len(tiers):
+        raise ValueError(f"validate_scorecard: tiers must not contain duplicate names: {tiers}")
+
     cutoffs = scorecard["cutoffs"]
     if len(cutoffs) != len(tiers) - 1:
         raise ValueError(
             f"validate_scorecard: expected {len(tiers) - 1} cutoffs for "
             f"{len(tiers)} tiers, got {len(cutoffs)}."
         )
-    if list(cutoffs) != sorted(cutoffs):
+    cutoffs_f = [_check_finite(c, "cutoffs entry") for c in cutoffs]
+    if cutoffs_f != sorted(cutoffs_f):
         raise ValueError(f"validate_scorecard: cutoffs must be strictly ascending: {cutoffs}")
-    if len(set(cutoffs)) != len(cutoffs):
-        raise ValueError(f"validate_scorecard: cutoffs must be strictly ascending (no ties): {cutoffs}")
+    if len(set(cutoffs_f)) != len(cutoffs_f):
+        raise ValueError(
+            f"validate_scorecard: cutoffs must be strictly ascending (no ties): {cutoffs}"
+        )
+    if scorecard.get("score_scale") == "0_to_1":
+        out_of_range = [c for c in cutoffs_f if not (0.0 <= c <= 1.0)]
+        if out_of_range:
+            raise ValueError(
+                f"validate_scorecard: cutoffs must lie within [0, 1] for "
+                f"score_scale='0_to_1', got out-of-range value(s): {out_of_range}."
+            )
 
-    for col, params in scorecard["normalization"].items():
-        ref_min = float(params.get("ref_min", 0.0))
-        ref_max = float(params.get("ref_max", 0.0))
+    normalization = scorecard["normalization"]
+    missing_norm = sorted(c for c in all_kpi_cols if c not in normalization)
+    if missing_norm:
+        raise ValueError(
+            f"validate_scorecard: normalization missing entries for KPI "
+            f"column(s) referenced by factor_groups: {missing_norm}."
+        )
+    for col, params in normalization.items():
+        ref_min = _check_finite(params.get("ref_min", 0.0), f"normalization[{col!r}]['ref_min']")
+        ref_max = _check_finite(params.get("ref_max", 0.0), f"normalization[{col!r}]['ref_max']")
         if ref_max < ref_min:
             raise ValueError(
-                f"validate_scorecard: normalization['{col}'] has ref_max < ref_min "
-                f"({ref_max} < {ref_min})."
+                f"validate_scorecard: normalization[{col!r}] has ref_max < "
+                f"ref_min ({ref_max} < {ref_min})."
             )
 
 
@@ -304,14 +525,17 @@ def calibrate_capacity_scorecard(
     cutoff_version: str = "provisional_v0",
     is_provisional: bool = True,
     population_description: str = "",
+    on_missing_column: str = "raise",
     config: dict | None = None,
 ) -> dict[str, Any]:
     """Fit a versioned capacity scorecard from a development population.
 
     This is an *offline* calibration step — a human decision, not something
     a production run does implicitly. It is never called from
-    `run_extrafloat_segmentation`. Fits the normalization ranges once, then
-    resolves tier cutoffs from one of three sources (in priority order):
+    `run_extrafloat_segmentation`. Fits per-KPI normalization ranges once,
+    combines normalized KPIs into per-group scores via each factor group's
+    within-group weights, blends groups via *group_weights*, then resolves
+    tier cutoffs from one of three sources (in priority order):
 
     1. *cutoffs* passed explicitly — used verbatim.
     2. *target_tier_proportions* — cutoffs are the quantiles of the blended
@@ -330,7 +554,9 @@ def calibrate_capacity_scorecard(
     ----------
     development_df : Agent feature DataFrame used to fit normalization ranges
                       and (if not given explicitly) tier cutoffs.
-    factor_groups   : Defaults to CAPACITY_FACTOR_GROUPS.
+    factor_groups   : Defaults to CAPACITY_FACTOR_GROUPS. Each group's
+                      `columns` dict maps KPI -> within-group weight
+                      (must sum to ~1.0 per group).
     group_weights   : Defaults to DEFAULT_GROUP_WEIGHTS.
     cutoffs         : Optional explicit ascending cutoff list, length len(tiers)-1.
     target_tier_proportions : Optional dict {tier_name: proportion} or list of
@@ -339,9 +565,15 @@ def calibrate_capacity_scorecard(
     cutoff_version  : Free-form version label stored in the scorecard.
     is_provisional  : Stored in calibration_metadata; True means this
                       scorecard has not yet been reviewed against real
-                      production data and should not be treated as final.
+                      production data and should not be treated as final —
+                      see `run_extrafloat_segmentation.py`'s
+                      `scoring.allow_provisional_scorecard` guard.
     population_description : Free-text note on what *development_df* is
                       (sample size, date range, source) for audit purposes.
+    on_missing_column : Passed to `compute_raw_kpi_frame` — "raise"
+                      (default) fails closed if *development_df* is missing
+                      a scorecard-declared KPI column; "zero" is an
+                      explicit research/dev escape hatch.
     config          : Scoring config; see DEFAULT_SCORING_CONFIG.
 
     Returns
@@ -363,13 +595,29 @@ def calibrate_capacity_scorecard(
             f"calibrate_capacity_scorecard: group_weights must sum to 1.0 "
             f"(got {total_weight:.6f})."
         )
+    for group_name, spec in factor_groups.items():
+        cols = spec.get("columns")
+        if not cols:
+            raise ValueError(
+                f"calibrate_capacity_scorecard: factor_groups[{group_name!r}] "
+                f"has no columns."
+            )
+        group_total = sum(float(w) for w in cols.values())
+        if abs(group_total - 1.0) > 1e-6:
+            raise ValueError(
+                f"calibrate_capacity_scorecard: factor_groups[{group_name!r}] "
+                f"within-group weights must sum to 1.0 (got {group_total:.6f})."
+            )
 
-    raw_frame = compute_raw_factor_frame(development_df, factor_groups)
-    normalization = _fit_normalization_params(
-        raw_frame, upper_quantile=float(cfg["normalization_upper_quantile"])
+    raw_kpi_frame = compute_raw_kpi_frame(
+        development_df, factor_groups, on_missing_column=on_missing_column
     )
-    normalized_frame = _apply_normalization(raw_frame, normalization)
-    blended_score = _blend_group_score(normalized_frame, group_weights)
+    normalization = _fit_normalization_params(
+        raw_kpi_frame, upper_quantile=float(cfg["normalization_upper_quantile"])
+    )
+    normalized_kpi_frame = _apply_normalization(raw_kpi_frame, normalization)
+    group_scores = compute_group_scores(normalized_kpi_frame, factor_groups)
+    blended_score = _blend_group_score(group_scores, group_weights)
 
     n_tiers = len(tiers)
 
@@ -519,17 +767,30 @@ def load_scorecard(path: str) -> dict[str, Any]:
 def compute_capacity_score(
     features_df: pd.DataFrame,
     scorecard: dict[str, Any],
+    config: dict | None = None,
 ) -> pd.Series:
     """Compute the deterministic capacity score for each agent in *features_df*.
 
-    Uses only the frozen `scorecard["normalization"]` ranges and
+    Uses only the frozen `scorecard["normalization"]` ranges,
+    `scorecard["factor_groups"]` within-group weights, and
     `scorecard["group_weights"]` — never anything derived from
     *features_df* itself, so the result for a given agent's feature values
     is identical regardless of which other agents are present.
+
+    Parameters
+    ----------
+    config : Scoring config; only `on_missing_column` is consulted here
+             (default "raise" — see `compute_raw_kpi_frame`).
     """
-    raw_frame = compute_raw_factor_frame(features_df, scorecard["factor_groups"])
-    normalized_frame = _apply_normalization(raw_frame, scorecard["normalization"])
-    return _blend_group_score(normalized_frame, scorecard["group_weights"])
+    cfg = _get_scoring_config(config)
+    raw_kpi_frame = compute_raw_kpi_frame(
+        features_df,
+        scorecard["factor_groups"],
+        on_missing_column=cfg.get("on_missing_column", "raise"),
+    )
+    normalized_kpi_frame = _apply_normalization(raw_kpi_frame, scorecard["normalization"])
+    group_scores = compute_group_scores(normalized_kpi_frame, scorecard["factor_groups"])
+    return _blend_group_score(group_scores, scorecard["group_weights"])
 
 
 def assign_capacity_tier(
@@ -599,6 +860,7 @@ def compute_agent_capacity(
     features_df: pd.DataFrame,
     scorecard: dict[str, Any],
     is_dormant: pd.Series | None = None,
+    config: dict | None = None,
 ) -> pd.DataFrame:
     """Top-level orchestrator: score -> raw tier -> tenure safety cap -> dormant override.
 
@@ -610,6 +872,8 @@ def compute_agent_capacity(
     is_dormant   : Optional boolean Series aligned with *features_df*. Dormant
                    agents are force-set to the lowest tier regardless of score
                    (matching the clustering pipeline's dormant handling).
+    config       : Scoring config; only `on_missing_column` is consulted
+                   here — see `compute_capacity_score`.
 
     Returns
     -------
@@ -620,7 +884,7 @@ def compute_agent_capacity(
     validate_scorecard(scorecard)
     tiers = list(scorecard["tiers"])
 
-    score = compute_capacity_score(features_df, scorecard)
+    score = compute_capacity_score(features_df, scorecard, config=config)
     tier_raw = assign_capacity_tier(score, scorecard)
 
     tenure_years = (

@@ -62,10 +62,20 @@ def _build_parser() -> argparse.ArgumentParser:
         "--raw", action="store_true",
         help=(
             "Treat --agents as already containing the raw KPI columns "
-            "(commission, cash_out_value_1m, ...) with no feature "
+            "(commission, cash_out_value_3m, ...) with no feature "
             "engineering needed. By default the CSV is run through "
             "prepare_features first, matching what run_extrafloat_segmentation "
             "would see."
+        ),
+    )
+    p.add_argument(
+        "--allow-missing-columns", action="store_true",
+        help=(
+            "Allow calibration to proceed with a scorecard-declared KPI "
+            "column entirely absent from --agents, zero-filling it instead "
+            "of failing closed (the default). Research/dev use only — a "
+            "scorecard calibrated this way has an ill-defined normalization "
+            "range for the missing KPI."
         ),
     )
     p.add_argument(
@@ -109,13 +119,18 @@ def main(argv: list[str] | None = None) -> None:
             print(f"error: --target-proportions is not valid JSON — {exc}", file=sys.stderr)
             sys.exit(1)
 
-    scorecard = calibrate_capacity_scorecard(
-        development_df,
-        target_tier_proportions=target_proportions,
-        cutoff_version=args.cutoff_version,
-        is_provisional=not args.final,
-        population_description=args.population_description,
-    )
+    try:
+        scorecard = calibrate_capacity_scorecard(
+            development_df,
+            target_tier_proportions=target_proportions,
+            cutoff_version=args.cutoff_version,
+            is_provisional=not args.final,
+            population_description=args.population_description,
+            on_missing_column="zero" if args.allow_missing_columns else "raise",
+        )
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        sys.exit(1)
 
     try:
         save_scorecard(scorecard, args.out, overwrite=args.force)
