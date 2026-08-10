@@ -18,252 +18,264 @@ and lower(profile) like '%agent%'
 ) b0
 cross join snapshots s
 ),
-transactions as (
+transactions_by_txn as (
 select
 b.msisdn as phonenumber,
 b.snapshot_dt,
 b.split,
+t.telecomid,
 max(case
 when t.tbl_dt between try_cast(date_format(date_add('month', -6, date_parse(cast(b.snapshot_dt as varchar), '%Y%m%d')), '%Y%m%d') as bigint)
 and b.snapshot_dt
 and t.tranname = 'XtraFloat Dispatch'
 then t.tbl_dt end
-) as Last_disbursement_date,
+) as Last_disbursement_date__l1,
 max(case
 when t.tbl_dt between try_cast(date_format(date_add('month', -6, date_parse(cast(b.snapshot_dt as varchar), '%Y%m%d')), '%Y%m%d') as bigint)
 and b.snapshot_dt
 and t.tranname = 'XtraFloat Payment'
 then t.tbl_dt end
-) as Last_repayment_date,
-/* penalties */
-count(distinct t.telecomid) filter (
-where t.tbl_dt between try_cast(date_format(date_add('month', -1, date_parse(cast(b.snapshot_dt as varchar), '%Y%m%d')), '%Y%m%d') as bigint)
+) as Last_repayment_date__l1,
+max(case
+when t.tbl_dt between try_cast(date_format(date_add('month', -1, date_parse(cast(b.snapshot_dt as varchar), '%Y%m%d')), '%Y%m%d') as bigint)
 and b.snapshot_dt
 and t.tranname = 'XtraFloat Penalty'
-) as penalties_1M,
-/* disbursement volumes */
-count(distinct t.telecomid) filter (
-where t.tbl_dt between try_cast(date_format(date_add('month', -1, date_parse(cast(b.snapshot_dt as varchar), '%Y%m%d')), '%Y%m%d') as bigint)
+then 1 else 0 end
+) as penalties_1M__flag,
+max(case
+when t.tbl_dt between try_cast(date_format(date_add('month', -1, date_parse(cast(b.snapshot_dt as varchar), '%Y%m%d')), '%Y%m%d') as bigint)
 and b.snapshot_dt
 and t.tranname = 'XtraFloat Dispatch'
-) as disbursement_vol_1M,
-count(distinct t.telecomid) filter (
-where t.tbl_dt between try_cast(date_format(date_add('day', -29, date_parse(cast(b.snapshot_dt as varchar), '%Y%m%d')), '%Y%m%d') as bigint)
+then 1 else 0 end
+) as disbursement_vol_1M__flag,
+max(case
+when t.tbl_dt between try_cast(date_format(date_add('day', -29, date_parse(cast(b.snapshot_dt as varchar), '%Y%m%d')), '%Y%m%d') as bigint)
 and b.snapshot_dt
 and t.tranname = 'XtraFloat Dispatch'
-) as disbursement_vol_M1,
-count(distinct t.telecomid) filter (
-where t.tbl_dt between try_cast(date_format(date_add('day', -59, date_parse(cast(b.snapshot_dt as varchar), '%Y%m%d')), '%Y%m%d') as bigint)
+then 1 else 0 end
+) as disbursement_vol_M1__flag,
+max(case
+when t.tbl_dt between try_cast(date_format(date_add('day', -59, date_parse(cast(b.snapshot_dt as varchar), '%Y%m%d')), '%Y%m%d') as bigint)
 and try_cast(date_format(date_add('day', -30, date_parse(cast(b.snapshot_dt as varchar), '%Y%m%d')), '%Y%m%d') as bigint)
 and t.tranname = 'XtraFloat Dispatch'
-) as disbursement_vol_M2,
-count(distinct t.telecomid) filter (
-where t.tbl_dt between try_cast(date_format(date_add('day', -89, date_parse(cast(b.snapshot_dt as varchar), '%Y%m%d')), '%Y%m%d') as bigint)
+then 1 else 0 end
+) as disbursement_vol_M2__flag,
+max(case
+when t.tbl_dt between try_cast(date_format(date_add('day', -89, date_parse(cast(b.snapshot_dt as varchar), '%Y%m%d')), '%Y%m%d') as bigint)
 and try_cast(date_format(date_add('day', -60, date_parse(cast(b.snapshot_dt as varchar), '%Y%m%d')), '%Y%m%d') as bigint)
 and t.tranname = 'XtraFloat Dispatch'
-) as disbursement_vol_M3,
-count(distinct t.telecomid) filter (
-where t.tbl_dt between try_cast(date_format(date_add('day', -119, date_parse(cast(b.snapshot_dt as varchar), '%Y%m%d')), '%Y%m%d') as bigint)
+then 1 else 0 end
+) as disbursement_vol_M3__flag,
+max(case
+when t.tbl_dt between try_cast(date_format(date_add('day', -119, date_parse(cast(b.snapshot_dt as varchar), '%Y%m%d')), '%Y%m%d') as bigint)
 and try_cast(date_format(date_add('day', -90, date_parse(cast(b.snapshot_dt as varchar), '%Y%m%d')), '%Y%m%d') as bigint)
 and t.tranname = 'XtraFloat Dispatch'
-) as disbursement_vol_M4,
-count(distinct t.telecomid) filter (
-where t.tbl_dt between try_cast(date_format(date_add('day', -149, date_parse(cast(b.snapshot_dt as varchar), '%Y%m%d')), '%Y%m%d') as bigint)
+then 1 else 0 end
+) as disbursement_vol_M4__flag,
+max(case
+when t.tbl_dt between try_cast(date_format(date_add('day', -149, date_parse(cast(b.snapshot_dt as varchar), '%Y%m%d')), '%Y%m%d') as bigint)
 and try_cast(date_format(date_add('day', -120, date_parse(cast(b.snapshot_dt as varchar), '%Y%m%d')), '%Y%m%d') as bigint)
 and t.tranname = 'XtraFloat Dispatch'
-) as disbursement_vol_M5,
-count(distinct t.telecomid) filter (
-where t.tbl_dt between try_cast(date_format(date_add('day', -179, date_parse(cast(b.snapshot_dt as varchar), '%Y%m%d')), '%Y%m%d') as bigint)
+then 1 else 0 end
+) as disbursement_vol_M5__flag,
+max(case
+when t.tbl_dt between try_cast(date_format(date_add('day', -179, date_parse(cast(b.snapshot_dt as varchar), '%Y%m%d')), '%Y%m%d') as bigint)
 and try_cast(date_format(date_add('day', -150, date_parse(cast(b.snapshot_dt as varchar), '%Y%m%d')), '%Y%m%d') as bigint)
 and t.tranname = 'XtraFloat Dispatch'
-) as disbursement_vol_M6,
-/* disbursement values */
+then 1 else 0 end
+) as disbursement_vol_M6__flag,
 sum(case
 when t.tbl_dt between try_cast(date_format(date_add('month', -1, date_parse(cast(b.snapshot_dt as varchar), '%Y%m%d')), '%Y%m%d') as bigint)
 and b.snapshot_dt
 and t.tranname = 'XtraFloat Dispatch'
 then try_cast(t.amount as bigint)
-end) as disbursement_val_1M,
+end) as disbursement_val_1M__l1,
 sum(case
 when t.tbl_dt between try_cast(date_format(date_add('day', -29, date_parse(cast(b.snapshot_dt as varchar), '%Y%m%d')), '%Y%m%d') as bigint)
 and b.snapshot_dt
 and t.tranname = 'XtraFloat Dispatch'
 then try_cast(t.amount as bigint)
-end) as disbursement_val_M1,
+end) as disbursement_val_M1__l1,
 sum(case
 when t.tbl_dt between try_cast(date_format(date_add('day', -59, date_parse(cast(b.snapshot_dt as varchar), '%Y%m%d')), '%Y%m%d') as bigint)
 and try_cast(date_format(date_add('day', -30, date_parse(cast(b.snapshot_dt as varchar), '%Y%m%d')), '%Y%m%d') as bigint)
 and t.tranname = 'XtraFloat Dispatch'
 then try_cast(t.amount as bigint)
-end) as disbursement_val_M2,
+end) as disbursement_val_M2__l1,
 sum(case
 when t.tbl_dt between try_cast(date_format(date_add('day', -89, date_parse(cast(b.snapshot_dt as varchar), '%Y%m%d')), '%Y%m%d') as bigint)
 and try_cast(date_format(date_add('day', -60, date_parse(cast(b.snapshot_dt as varchar), '%Y%m%d')), '%Y%m%d') as bigint)
 and t.tranname = 'XtraFloat Dispatch'
 then try_cast(t.amount as bigint)
-end) as disbursement_val_M3,
+end) as disbursement_val_M3__l1,
 sum(case
 when t.tbl_dt between try_cast(date_format(date_add('day', -119, date_parse(cast(b.snapshot_dt as varchar), '%Y%m%d')), '%Y%m%d') as bigint)
 and try_cast(date_format(date_add('day', -90, date_parse(cast(b.snapshot_dt as varchar), '%Y%m%d')), '%Y%m%d') as bigint)
 and t.tranname = 'XtraFloat Dispatch'
 then try_cast(t.amount as bigint)
-end) as disbursement_val_M4,
+end) as disbursement_val_M4__l1,
 sum(case
 when t.tbl_dt between try_cast(date_format(date_add('day', -149, date_parse(cast(b.snapshot_dt as varchar), '%Y%m%d')), '%Y%m%d') as bigint)
 and try_cast(date_format(date_add('day', -120, date_parse(cast(b.snapshot_dt as varchar), '%Y%m%d')), '%Y%m%d') as bigint)
 and t.tranname = 'XtraFloat Dispatch'
 then try_cast(t.amount as bigint)
-end) as disbursement_val_M5,
-
+end) as disbursement_val_M5__l1,
 sum(case
 when t.tbl_dt between try_cast(date_format(date_add('day', -179, date_parse(cast(b.snapshot_dt as varchar), '%Y%m%d')), '%Y%m%d') as bigint)
 and try_cast(date_format(date_add('day', -150, date_parse(cast(b.snapshot_dt as varchar), '%Y%m%d')), '%Y%m%d') as bigint)
 and t.tranname = 'XtraFloat Dispatch'
 then try_cast(t.amount as bigint)
-end) as disbursement_val_M6,
-/* repayment volumes */
-count(distinct t.telecomid) filter (
-where t.tbl_dt between try_cast(date_format(date_add('month', -1, date_parse(cast(b.snapshot_dt as varchar), '%Y%m%d')), '%Y%m%d') as bigint)
+end) as disbursement_val_M6__l1,
+max(case
+when t.tbl_dt between try_cast(date_format(date_add('month', -1, date_parse(cast(b.snapshot_dt as varchar), '%Y%m%d')), '%Y%m%d') as bigint)
 and b.snapshot_dt
 and t.tranname = 'XtraFloat Payment'
-) as repayment_vol_1M,
-count(distinct t.telecomid) filter (
-where t.tbl_dt between try_cast(date_format(date_add('day', -29, date_parse(cast(b.snapshot_dt as varchar), '%Y%m%d')), '%Y%m%d') as bigint)
+then 1 else 0 end
+) as repayment_vol_1M__flag,
+max(case
+when t.tbl_dt between try_cast(date_format(date_add('day', -29, date_parse(cast(b.snapshot_dt as varchar), '%Y%m%d')), '%Y%m%d') as bigint)
 and b.snapshot_dt
 and t.tranname = 'XtraFloat Payment'
-) as Repayment_vol_M1,
-count(distinct t.telecomid) filter (
-where t.tbl_dt between try_cast(date_format(date_add('day', -59, date_parse(cast(b.snapshot_dt as varchar), '%Y%m%d')), '%Y%m%d') as bigint)
+then 1 else 0 end
+) as Repayment_vol_M1__flag,
+max(case
+when t.tbl_dt between try_cast(date_format(date_add('day', -59, date_parse(cast(b.snapshot_dt as varchar), '%Y%m%d')), '%Y%m%d') as bigint)
 and try_cast(date_format(date_add('day', -30, date_parse(cast(b.snapshot_dt as varchar), '%Y%m%d')), '%Y%m%d') as bigint)
 and t.tranname = 'XtraFloat Payment'
-) as Repayment_vol_M2,
-count(distinct t.telecomid) filter (
-where t.tbl_dt between try_cast(date_format(date_add('day', -89, date_parse(cast(b.snapshot_dt as varchar), '%Y%m%d')), '%Y%m%d') as bigint)
+then 1 else 0 end
+) as Repayment_vol_M2__flag,
+max(case
+when t.tbl_dt between try_cast(date_format(date_add('day', -89, date_parse(cast(b.snapshot_dt as varchar), '%Y%m%d')), '%Y%m%d') as bigint)
 and try_cast(date_format(date_add('day', -60, date_parse(cast(b.snapshot_dt as varchar), '%Y%m%d')), '%Y%m%d') as bigint)
 and t.tranname = 'XtraFloat Payment'
-) as Repayment_vol_M3,
-count(distinct t.telecomid) filter (
-where t.tbl_dt between try_cast(date_format(date_add('day', -119, date_parse(cast(b.snapshot_dt as varchar), '%Y%m%d')), '%Y%m%d') as bigint)
+then 1 else 0 end
+) as Repayment_vol_M3__flag,
+max(case
+when t.tbl_dt between try_cast(date_format(date_add('day', -119, date_parse(cast(b.snapshot_dt as varchar), '%Y%m%d')), '%Y%m%d') as bigint)
 and try_cast(date_format(date_add('day', -90, date_parse(cast(b.snapshot_dt as varchar), '%Y%m%d')), '%Y%m%d') as bigint)
 and t.tranname = 'XtraFloat Payment'
-) as Repayment_vol_M4,
-count(distinct t.telecomid) filter (
-where t.tbl_dt between try_cast(date_format(date_add('day', -149, date_parse(cast(b.snapshot_dt as varchar), '%Y%m%d')), '%Y%m%d') as bigint)
+then 1 else 0 end
+) as Repayment_vol_M4__flag,
+max(case
+when t.tbl_dt between try_cast(date_format(date_add('day', -149, date_parse(cast(b.snapshot_dt as varchar), '%Y%m%d')), '%Y%m%d') as bigint)
 and try_cast(date_format(date_add('day', -120, date_parse(cast(b.snapshot_dt as varchar), '%Y%m%d')), '%Y%m%d') as bigint)
 and t.tranname = 'XtraFloat Payment'
-) as Repayment_vol_M5,
-count(distinct t.telecomid) filter (
-where t.tbl_dt between try_cast(date_format(date_add('day', -179, date_parse(cast(b.snapshot_dt as varchar), '%Y%m%d')), '%Y%m%d') as bigint)
+then 1 else 0 end
+) as Repayment_vol_M5__flag,
+max(case
+when t.tbl_dt between try_cast(date_format(date_add('day', -179, date_parse(cast(b.snapshot_dt as varchar), '%Y%m%d')), '%Y%m%d') as bigint)
 and try_cast(date_format(date_add('day', -150, date_parse(cast(b.snapshot_dt as varchar), '%Y%m%d')), '%Y%m%d') as bigint)
 and t.tranname = 'XtraFloat Payment'
-) as Repayment_vol_M6,
-/* repayment values */
+then 1 else 0 end
+) as Repayment_vol_M6__flag,
 sum(case
 when t.tbl_dt between try_cast(date_format(date_add('month', -1, date_parse(cast(b.snapshot_dt as varchar), '%Y%m%d')), '%Y%m%d') as bigint)
 and b.snapshot_dt
 and t.tranname = 'XtraFloat Payment'
 then -1 * cast(t.amount as double)
-end) as repayment_val_1M,
+end) as repayment_val_1M__l1,
 sum(case
 when t.tbl_dt between try_cast(date_format(date_add('day', -29, date_parse(cast(b.snapshot_dt as varchar), '%Y%m%d')), '%Y%m%d') as bigint)
 and b.snapshot_dt
 and t.tranname = 'XtraFloat Payment'
 then -1 * cast(t.amount as double)
-end) as Repayment_val_M1,
-
+end) as Repayment_val_M1__l1,
 sum(case
 when t.tbl_dt between try_cast(date_format(date_add('day', -59, date_parse(cast(b.snapshot_dt as varchar), '%Y%m%d')), '%Y%m%d') as bigint)
 and try_cast(date_format(date_add('day', -30, date_parse(cast(b.snapshot_dt as varchar), '%Y%m%d')), '%Y%m%d') as bigint)
 and t.tranname = 'XtraFloat Payment'
 then -1 * cast(t.amount as double)
-end) as Repayment_val_M2,
+end) as Repayment_val_M2__l1,
 sum(case
 when t.tbl_dt between try_cast(date_format(date_add('day', -89, date_parse(cast(b.snapshot_dt as varchar), '%Y%m%d')), '%Y%m%d') as bigint)
 and try_cast(date_format(date_add('day', -60, date_parse(cast(b.snapshot_dt as varchar), '%Y%m%d')), '%Y%m%d') as bigint)
 and t.tranname = 'XtraFloat Payment'
 then -1 * cast(t.amount as double)
-end) as Repayment_val_M3,
+end) as Repayment_val_M3__l1,
 sum(case
 when t.tbl_dt between try_cast(date_format(date_add('day', -119, date_parse(cast(b.snapshot_dt as varchar), '%Y%m%d')), '%Y%m%d') as bigint)
 and try_cast(date_format(date_add('day', -90, date_parse(cast(b.snapshot_dt as varchar), '%Y%m%d')), '%Y%m%d') as bigint)
 and t.tranname = 'XtraFloat Payment'
 then -1 * cast(t.amount as double)
-end) as Repayment_val_M4,
+end) as Repayment_val_M4__l1,
 sum(case
 when t.tbl_dt between try_cast(date_format(date_add('day', -149, date_parse(cast(b.snapshot_dt as varchar), '%Y%m%d')), '%Y%m%d') as bigint)
 and try_cast(date_format(date_add('day', -120, date_parse(cast(b.snapshot_dt as varchar), '%Y%m%d')), '%Y%m%d') as bigint)
 and t.tranname = 'XtraFloat Payment'
 then -1 * cast(t.amount as double)
-end) as Repayment_val_M5,
+end) as Repayment_val_M5__l1,
 sum(case
 when t.tbl_dt between try_cast(date_format(date_add('day', -179, date_parse(cast(b.snapshot_dt as varchar), '%Y%m%d')), '%Y%m%d') as bigint)
 and try_cast(date_format(date_add('day', -150, date_parse(cast(b.snapshot_dt as varchar), '%Y%m%d')), '%Y%m%d') as bigint)
 and t.tranname = 'XtraFloat Payment'
 then -1 * cast(t.amount as double)
-end) as Repayment_val_M6,
-/* 3M blocks */
-count(distinct t.telecomid) filter (
-where t.tbl_dt between try_cast(date_format(date_add('month', -3, date_parse(cast(b.snapshot_dt as varchar), '%Y%m%d')), '%Y%m%d') as bigint)
+end) as Repayment_val_M6__l1,
+max(case
+when t.tbl_dt between try_cast(date_format(date_add('month', -3, date_parse(cast(b.snapshot_dt as varchar), '%Y%m%d')), '%Y%m%d') as bigint)
 and b.snapshot_dt
 and t.tranname = 'XtraFloat Penalty'
-) as penalties_3M,
-count(distinct t.telecomid) filter (
-where t.tbl_dt between try_cast(date_format(date_add('month', -3, date_parse(cast(b.snapshot_dt as varchar), '%Y%m%d')), '%Y%m%d') as bigint)
+then 1 else 0 end
+) as penalties_3M__flag,
+max(case
+when t.tbl_dt between try_cast(date_format(date_add('month', -3, date_parse(cast(b.snapshot_dt as varchar), '%Y%m%d')), '%Y%m%d') as bigint)
 and b.snapshot_dt
 and t.tranname = 'XtraFloat Dispatch'
-) as disbursement_vol_3M,
+then 1 else 0 end
+) as disbursement_vol_3M__flag,
 sum(case
 when t.tbl_dt between try_cast(date_format(date_add('month', -3, date_parse(cast(b.snapshot_dt as varchar), '%Y%m%d')), '%Y%m%d') as bigint)
 and b.snapshot_dt
 and t.tranname = 'XtraFloat Dispatch'
 then try_cast(t.amount as bigint)
-end) as disbursement_val_3M,
-count(distinct t.telecomid) filter (
-where t.tbl_dt between try_cast(date_format(date_add('month', -3, date_parse(cast(b.snapshot_dt as varchar), '%Y%m%d')), '%Y%m%d') as bigint)
+end) as disbursement_val_3M__l1,
+max(case
+when t.tbl_dt between try_cast(date_format(date_add('month', -3, date_parse(cast(b.snapshot_dt as varchar), '%Y%m%d')), '%Y%m%d') as bigint)
 and b.snapshot_dt
 and t.tranname = 'XtraFloat Payment'
-) as repayment_vol_3M,
+then 1 else 0 end
+) as repayment_vol_3M__flag,
 sum(case
 when t.tbl_dt between try_cast(date_format(date_add('month', -3, date_parse(cast(b.snapshot_dt as varchar), '%Y%m%d')), '%Y%m%d') as bigint)
 and b.snapshot_dt
 and t.tranname = 'XtraFloat Payment'
 then -1 * cast(t.amount as double)
-end) as repayment_val_3M,
-/* 6M blocks */
-count(distinct t.telecomid) filter (
-where t.tbl_dt between try_cast(date_format(date_add('month', -6, date_parse(cast(b.snapshot_dt as varchar), '%Y%m%d')), '%Y%m%d') as bigint)
+end) as repayment_val_3M__l1,
+max(case
+when t.tbl_dt between try_cast(date_format(date_add('month', -6, date_parse(cast(b.snapshot_dt as varchar), '%Y%m%d')), '%Y%m%d') as bigint)
 and b.snapshot_dt
 and t.tranname = 'XtraFloat Penalty'
-) as penalties_6M,
-count(distinct t.telecomid) filter (
-where t.tbl_dt between try_cast(date_format(date_add('month', -6, date_parse(cast(b.snapshot_dt as varchar), '%Y%m%d')), '%Y%m%d') as bigint)
+then 1 else 0 end
+) as penalties_6M__flag,
+max(case
+when t.tbl_dt between try_cast(date_format(date_add('month', -6, date_parse(cast(b.snapshot_dt as varchar), '%Y%m%d')), '%Y%m%d') as bigint)
 and b.snapshot_dt
 and t.tranname = 'XtraFloat Dispatch'
-) as disbursement_vol_6M,
+then 1 else 0 end
+) as disbursement_vol_6M__flag,
 sum(case
 when t.tbl_dt between try_cast(date_format(date_add('month', -6, date_parse(cast(b.snapshot_dt as varchar), '%Y%m%d')), '%Y%m%d') as bigint)
 and b.snapshot_dt
 and t.tranname = 'XtraFloat Dispatch'
 then try_cast(t.amount as bigint)
-end) as disbursement_val_6M,
-
-count(distinct t.telecomid) filter (
-where t.tbl_dt between try_cast(date_format(date_add('month', -6, date_parse(cast(b.snapshot_dt as varchar), '%Y%m%d')), '%Y%m%d') as bigint)
+end) as disbursement_val_6M__l1,
+max(case
+when t.tbl_dt between try_cast(date_format(date_add('month', -6, date_parse(cast(b.snapshot_dt as varchar), '%Y%m%d')), '%Y%m%d') as bigint)
 and b.snapshot_dt
 and t.tranname = 'XtraFloat Payment'
-) as repayment_vol_6M,
+then 1 else 0 end
+) as repayment_vol_6M__flag,
 sum(case
 when t.tbl_dt between try_cast(date_format(date_add('month', -6, date_parse(cast(b.snapshot_dt as varchar), '%Y%m%d')), '%Y%m%d') as bigint)
 and b.snapshot_dt
 and t.tranname = 'XtraFloat Payment'
 then -1 * cast(t.amount as double)
-end) as repayment_val_6M,
-/* forward-looking penalties in the next 30 days */
-count(distinct t.telecomid) filter (
-where t.tbl_dt between try_cast(date_format(date_add('day', 1, date_parse(cast(b.snapshot_dt as varchar), '%Y%m%d')), '%Y%m%d') as bigint)
+end) as repayment_val_6M__l1,
+max(case
+when t.tbl_dt between try_cast(date_format(date_add('day', 1, date_parse(cast(b.snapshot_dt as varchar), '%Y%m%d')), '%Y%m%d') as bigint)
 and try_cast(date_format(date_add('day', 30, date_parse(cast(b.snapshot_dt as varchar), '%Y%m%d')), '%Y%m%d') as bigint)
 and t.tranname = 'XtraFloat Penalty'
-) as future_penalties_30D
+then 1 else 0 end
+) as future_penalties_30D__flag
 from base b
 left join devdata.xtrafloat_daily_trans t
 on t.phonenumber = b.msisdn
@@ -274,7 +286,61 @@ and t.tranname in ('XtraFloat Dispatch', 'XtraFloat Payment', 'XtraFloat Penalty
 group by
 b.msisdn,
 b.snapshot_dt,
-b.split
+b.split,
+t.telecomid
+),
+transactions as (
+select
+phonenumber,
+snapshot_dt,
+split,
+max(Last_disbursement_date__l1) as Last_disbursement_date,
+max(Last_repayment_date__l1) as Last_repayment_date,
+sum(penalties_1M__flag) as penalties_1M,
+sum(disbursement_vol_1M__flag) as disbursement_vol_1M,
+sum(disbursement_vol_M1__flag) as disbursement_vol_M1,
+sum(disbursement_vol_M2__flag) as disbursement_vol_M2,
+sum(disbursement_vol_M3__flag) as disbursement_vol_M3,
+sum(disbursement_vol_M4__flag) as disbursement_vol_M4,
+sum(disbursement_vol_M5__flag) as disbursement_vol_M5,
+sum(disbursement_vol_M6__flag) as disbursement_vol_M6,
+sum(disbursement_val_1M__l1) as disbursement_val_1M,
+sum(disbursement_val_M1__l1) as disbursement_val_M1,
+sum(disbursement_val_M2__l1) as disbursement_val_M2,
+sum(disbursement_val_M3__l1) as disbursement_val_M3,
+sum(disbursement_val_M4__l1) as disbursement_val_M4,
+sum(disbursement_val_M5__l1) as disbursement_val_M5,
+sum(disbursement_val_M6__l1) as disbursement_val_M6,
+sum(repayment_vol_1M__flag) as repayment_vol_1M,
+sum(Repayment_vol_M1__flag) as Repayment_vol_M1,
+sum(Repayment_vol_M2__flag) as Repayment_vol_M2,
+sum(Repayment_vol_M3__flag) as Repayment_vol_M3,
+sum(Repayment_vol_M4__flag) as Repayment_vol_M4,
+sum(Repayment_vol_M5__flag) as Repayment_vol_M5,
+sum(Repayment_vol_M6__flag) as Repayment_vol_M6,
+sum(repayment_val_1M__l1) as repayment_val_1M,
+sum(Repayment_val_M1__l1) as Repayment_val_M1,
+sum(Repayment_val_M2__l1) as Repayment_val_M2,
+sum(Repayment_val_M3__l1) as Repayment_val_M3,
+sum(Repayment_val_M4__l1) as Repayment_val_M4,
+sum(Repayment_val_M5__l1) as Repayment_val_M5,
+sum(Repayment_val_M6__l1) as Repayment_val_M6,
+sum(penalties_3M__flag) as penalties_3M,
+sum(disbursement_vol_3M__flag) as disbursement_vol_3M,
+sum(disbursement_val_3M__l1) as disbursement_val_3M,
+sum(repayment_vol_3M__flag) as repayment_vol_3M,
+sum(repayment_val_3M__l1) as repayment_val_3M,
+sum(penalties_6M__flag) as penalties_6M,
+sum(disbursement_vol_6M__flag) as disbursement_vol_6M,
+sum(disbursement_val_6M__l1) as disbursement_val_6M,
+sum(repayment_vol_6M__flag) as repayment_vol_6M,
+sum(repayment_val_6M__l1) as repayment_val_6M,
+sum(future_penalties_30D__flag) as future_penalties_30D
+from transactions_by_txn
+group by
+phonenumber,
+snapshot_dt,
+split
 )
 select distinct
 a.*,
