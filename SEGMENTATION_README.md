@@ -139,19 +139,15 @@ Required input columns are listed in `extrafloat_segmentation_features.REQUIRED_
 
 ## What data actually feeds this pipeline
 
-`transaction_capacity_features_sample.txt` (repo root) shows the real MTN
-MoMo KPI-mart schema: `agent_msisdn`, `snapshot_dt`, `agent_profile`,
-`account_balance`, `average_balance`, `commission`, and
+The real MTN MoMo KPI-mart schema is: `agent_msisdn`, `snapshot_dt`,
+`agent_profile`, `account_balance`, `average_balance`, `commission`, and
 `cash_out`/`cash_in`/`payment` × `vol`/`value`/`peers`/`comm`/`cust` split
 into 1m/3m/6m windows, plus `cust_1m/3m/6m` and `vol_1m/3m/6m` totals
-(~57 columns). That sample is only 4 agents on a single snapshot date
-(2025-11-15), with no `agent_category`/whitelist ground-truth column and no
-`voucher_volume_1m` column (the dormant-detection composite score already
-degrades gracefully when that column is absent). It confirms the schema but
-is not enough to validate anything statistically — there is currently no
-real multi-month or labeled dataset available in this repo to calibrate
-against, which is why the two remaining rigor items below are deliberately
-un-started rather than half-built against nothing.
+(~57 columns), as exercised by `_make_agents_df()` in
+`test_extrafloat_segmentation.py`. There is currently no real multi-month
+or labeled dataset available in this repo to calibrate against, which is
+why the two remaining rigor items below are deliberately un-started rather
+than half-built against nothing.
 
 ## Integration boundary
 

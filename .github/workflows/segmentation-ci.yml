@@ -1,22 +1,27 @@
 name: Segmentation CI
 
-# Scoped strictly to the extrafloat_segmentation_* package — does not build,
-# test, or otherwise touch the limit-engine modules
+# This branch (claude/segmentation-capacity-tier-primary) contains the
+# segmentation package only — the limit-engine modules
 # (extrafloat_limit_engine_*.py, run_extrafloat_limit_engine.py,
-# test_extrafloat_pipeline.py).
+# test_extrafloat_pipeline.py) do not exist here; see
+# claude/segmentation-solution-review-ls9qpc or main for the full repo.
 on:
   push:
     paths:
       - "extrafloat_segmentation_*.py"
       - "run_extrafloat_segmentation.py"
+      - "calibrate_scorecard.py"
       - "test_extrafloat_segmentation.py"
+      - "test_extrafloat_segmentation_scoring.py"
       - "requirements-segmentation*.txt"
       - ".github/workflows/segmentation-ci.yml"
   pull_request:
     paths:
       - "extrafloat_segmentation_*.py"
       - "run_extrafloat_segmentation.py"
+      - "calibrate_scorecard.py"
       - "test_extrafloat_segmentation.py"
+      - "test_extrafloat_segmentation_scoring.py"
       - "requirements-segmentation*.txt"
       - ".github/workflows/segmentation-ci.yml"
 
@@ -34,24 +39,36 @@ jobs:
         run: pip install -r requirements-segmentation-dev.txt
 
       - name: Run segmentation test suite
-        run: python -m pytest test_extrafloat_segmentation.py -v
+        run: python -m pytest test_extrafloat_segmentation.py test_extrafloat_segmentation_scoring.py -v
 
       - name: Smoke-test the CLI orchestration end to end
         run: |
           python - <<'PY'
-          import sys
+          import sys, tempfile, os
           sys.path.insert(0, ".")
           from test_extrafloat_segmentation import _make_agents_df
+          from extrafloat_segmentation_features import prepare_features
+          from extrafloat_segmentation_scoring import calibrate_capacity_scorecard, save_scorecard
           from run_extrafloat_segmentation import run_extrafloat_segmentation, DEFAULT_SEGMENTATION_CONFIG
           import copy
 
           agents_df = _make_agents_df(300)
+
+          # A scorecard is required by default on this branch — calibrate a
+          # provisional one from the same population for the smoke test.
+          dev_df, _, _, _ = prepare_features(agents_df)
+          scorecard = calibrate_capacity_scorecard(dev_df, population_description="CI smoke test")
+          scorecard_path = os.path.join(tempfile.mkdtemp(), "scorecard.json")
+          save_scorecard(scorecard, scorecard_path)
+
           config = copy.deepcopy(DEFAULT_SEGMENTATION_CONFIG)
           config["output"]["output_dir"] = ""
+          config["scoring"]["scorecard_path"] = scorecard_path
+
           result = run_extrafloat_segmentation(agents_df, config=config)
 
           assert len(result) == len(agents_df), "row count changed"
-          assert "segment" in result.columns, "segment column missing"
+          assert "capacity_tier" in result.columns, "capacity_tier column missing"
           assert "quality_gate" in result.attrs, "quality gate did not run"
-          print("Smoke test OK —", len(result), "agents,", result["segment"].nunique(), "distinct segments")
+          print("Smoke test OK —", len(result), "agents,", result["capacity_tier"].nunique(), "distinct tiers")
           PY
