@@ -49,7 +49,9 @@ import numpy as np
 import pandas as pd
 
 from extrafloat_segmentation_features import prepare_features, REQUIRED_COLUMNS
+import extrafloat_segmentation_pipeline as _segmentation_pipeline_module
 from extrafloat_segmentation_pipeline import (
+    flag_anomalies,
     run_diagnostic_clustering,
     compute_diagnostic_ensemble_stability,
     _identify_dormant_mask,
@@ -94,6 +96,9 @@ SEGMENT_OUTPUT_COLUMNS: tuple[str, ...] = (
     "capacity_safety_flags",
     "scorecard_version",
     "cutoff_version",
+    # ── Anomaly detection (default on; see clustering.enable_anomaly_detection) ──
+    "is_anomaly",
+    "anomaly_cluster_hdb_raw",
     # ── Diagnostic clustering (optional; see clustering.enable_diagnostics) ──
     "diag_cluster_id_gmm",
     "diag_cluster_hdb_raw",
@@ -107,10 +112,11 @@ SEGMENT_OUTPUT_COLUMNS: tuple[str, ...] = (
     "tier",
 )
 
-# Diagnostic cluster-ID columns are opt-in noise for most consumers;
-# diag_is_anomaly and diag_hdb_tier are kept as regular (non-intermediate)
-# output since they're directly useful diagnostic signals on their own.
+# Raw HDBSCAN cluster-ID columns are opt-in noise for most consumers;
+# is_anomaly, diag_is_anomaly, and diag_hdb_tier are kept as regular
+# (non-intermediate) output since they're directly useful signals on their own.
 INTERMEDIATE_COLUMNS: tuple[str, ...] = (
+    "anomaly_cluster_hdb_raw",
     "diag_cluster_id_gmm",
     "diag_cluster_hdb_raw",
 )
@@ -260,6 +266,24 @@ def _join_msisdn(result: pd.DataFrame, original_df: pd.DataFrame) -> pd.DataFram
     return result
 
 
+def _concat_preserving_attrs(base: pd.DataFrame, addition: pd.DataFrame) -> pd.DataFrame:
+    """`pd.concat([base, addition], axis=1)` that preserves *base*.attrs.
+
+    pandas does not reliably propagate DataFrame.attrs through concat — it
+    resets to `{}` whenever the inputs' attrs dicts don't match exactly,
+    which they never will here since *addition* (a freshly-computed
+    capacity/anomaly DataFrame) starts with empty attrs. Without this,
+    reports already attached to *base* earlier in the pipeline (e.g.
+    `drift_report` from step 1b) would be silently dropped the moment
+    step 2's capacity-scoring concat ran, before ever reaching
+    `_build_run_manifest` / `_collect_alerts`.
+    """
+    prior_attrs = dict(base.attrs)
+    out = pd.concat([base, addition], axis=1)
+    out.attrs.update(prior_attrs)
+    return out
+
+
 def _trim_output_columns(
     result: pd.DataFrame,
     keep_intermediate: bool,
@@ -361,6 +385,7 @@ def _build_run_manifest(
         ),
         "drift_report": df.attrs.get("drift_report"),
         "tier_drift_report": df.attrs.get("tier_drift_report"),
+        "anomaly_report": df.attrs.get("anomaly_report"),
         "diagnostic_stability_report": df.attrs.get("diagnostic_stability_report"),
         "quality_gate": df.attrs.get("quality_gate"),
         "diag_degraded_mode": df.attrs.get("diag_degraded_mode"),
@@ -403,6 +428,17 @@ def _collect_alerts(df: pd.DataFrame) -> list[dict[str, Any]]:
             "message": (
                 f"Diagnostic clustering ran in degraded mode: {degraded}. "
                 f"capacity_tier is unaffected — diagnostics never feed it."
+            ),
+        })
+
+    anomaly_report = df.attrs.get("anomaly_report") or {}
+    if anomaly_report and not anomaly_report.get("hdbscan_available", True):
+        alerts.append({
+            "severity": "warning",
+            "source": "anomaly_detection",
+            "message": (
+                "Anomaly detection ran without hdbscan installed — "
+                "is_anomaly defaulted to False for all agents this run."
             ),
         })
 
@@ -618,7 +654,7 @@ def run_extrafloat_segmentation(
     if scorecard_path and os.path.isfile(scorecard_path):
         scorecard = load_scorecard(scorecard_path)
         capacity_df = compute_agent_capacity(features_df, scorecard, is_dormant=is_dormant)
-        features_df = pd.concat([features_df, capacity_df], axis=1)
+        features_df = _concat_preserving_attrs(features_df, capacity_df)
         logger.info(
             "run_extrafloat_segmentation: capacity scoring complete via "
             "scorecard '%s' (cutoff_version=%s).",
@@ -659,6 +695,43 @@ def run_extrafloat_segmentation(
             f"run_extrafloat_segmentation: scoring.scorecard_path "
             f"'{scorecard_path}' does not exist and "
             f"allow_missing_scorecard=False."
+        )
+
+    # ── Step 2b: Anomaly Detection (default on, lightweight) ─────────────────
+    # Independent of both capacity scoring succeeding and diagnostics being
+    # enabled — HDBSCAN only (no GMM, no UMAP), cheap enough to run on every
+    # production run. Degrades gracefully (is_anomaly=False) rather than
+    # raising when hdbscan isn't installed; see flag_anomalies().
+    if clustering_cfg.get("enable_anomaly_detection", True):
+        logger.info("run_extrafloat_segmentation: step 2b — anomaly detection.")
+        anomaly_df = flag_anomalies(
+            features_df=features_df,
+            selected_cols=selected_cols,
+            active_mask=~is_dormant,
+            config=clustering_cfg,
+        )
+        features_df = _concat_preserving_attrs(features_df, anomaly_df)
+
+        n_active = int((~is_dormant).sum())
+        n_anomalies = int(features_df["is_anomaly"].sum())
+        features_df.attrs["anomaly_report"] = {
+            # Read via the module (not a bound `from ... import`) so this
+            # reflects monkeypatched/runtime availability, matching how
+            # flag_anomalies() itself checks it.
+            "hdbscan_available": bool(_segmentation_pipeline_module._HDBSCAN_AVAILABLE),
+            "n_active": n_active,
+            "n_anomalies": n_anomalies,
+            "anomaly_rate": (n_anomalies / n_active) if n_active > 0 else float("nan"),
+        }
+        if not features_df.attrs["anomaly_report"]["hdbscan_available"]:
+            logger.warning(
+                "run_extrafloat_segmentation: step 2b — hdbscan not "
+                "installed; is_anomaly defaulted to False for all agents."
+            )
+    else:
+        logger.info(
+            "run_extrafloat_segmentation: step 2b — anomaly detection "
+            "disabled (clustering.enable_anomaly_detection=False)."
         )
 
     # ── Step 3: Diagnostic Clustering (optional) ──────────────────────────────

@@ -242,6 +242,81 @@ class TestPrepareFeatures:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+class TestFlagAnomalies:
+    """Tests for extrafloat_segmentation_pipeline.flag_anomalies — the
+    lightweight, HDBSCAN-only anomaly check that runs by default
+    (clustering.enable_anomaly_detection) independent of the full
+    diagnostics bundle, and degrades gracefully instead of raising when
+    hdbscan is unavailable."""
+
+    def _get_small_inputs(self, n=80):
+        from extrafloat_segmentation_features import prepare_features
+        from extrafloat_segmentation_pipeline import _identify_dormant_mask, DEFAULT_CLUSTERING_CONFIG
+
+        df = _make_agents_df(n)
+        feat_df, _, _, sel_cols = prepare_features(df)
+        active_mask = ~_identify_dormant_mask(feat_df, DEFAULT_CLUSTERING_CONFIG)
+        return feat_df, sel_cols, active_mask
+
+    def test_output_has_required_columns(self):
+        from extrafloat_segmentation_pipeline import flag_anomalies
+
+        feat_df, sel_cols, active_mask = self._get_small_inputs()
+        result = flag_anomalies(feat_df, sel_cols, active_mask)
+        for col in ("is_anomaly", "anomaly_cluster_hdb_raw"):
+            assert col in result.columns
+
+    def test_row_count_and_index_preserved(self):
+        from extrafloat_segmentation_pipeline import flag_anomalies
+
+        feat_df, sel_cols, active_mask = self._get_small_inputs()
+        result = flag_anomalies(feat_df, sel_cols, active_mask)
+        assert len(result) == len(feat_df)
+        assert list(result.index) == list(feat_df.index)
+
+    def test_is_anomaly_matches_hdb_noise_label(self):
+        from extrafloat_segmentation_pipeline import HDBSCAN_NOISE_LABEL, flag_anomalies
+
+        feat_df, sel_cols, active_mask = self._get_small_inputs()
+        result = flag_anomalies(feat_df, sel_cols, active_mask)
+        active_result = result.loc[active_mask]
+        expected = active_result["anomaly_cluster_hdb_raw"] == HDBSCAN_NOISE_LABEL
+        assert (active_result["is_anomaly"] == expected).all()
+
+    def test_dormant_agents_never_flagged_as_anomaly(self):
+        from extrafloat_segmentation_pipeline import flag_anomalies
+
+        feat_df, sel_cols, active_mask = self._get_small_inputs()
+        result = flag_anomalies(feat_df, sel_cols, active_mask)
+        dormant_result = result.loc[~active_mask]
+        assert not dormant_result["is_anomaly"].any()
+        assert dormant_result["anomaly_cluster_hdb_raw"].isna().all()
+
+    def test_no_active_agents_returns_all_false(self):
+        import pandas as pd
+        from extrafloat_segmentation_pipeline import flag_anomalies
+
+        feat_df, sel_cols, _ = self._get_small_inputs()
+        no_active = pd.Series(False, index=feat_df.index)
+        result = flag_anomalies(feat_df, sel_cols, no_active)
+        assert not result["is_anomaly"].any()
+        assert result["anomaly_cluster_hdb_raw"].isna().all()
+
+    def test_missing_hdbscan_degrades_gracefully_not_raise(self, monkeypatch):
+        import extrafloat_segmentation_pipeline as pipe
+
+        monkeypatch.setattr(pipe, "_HDBSCAN_AVAILABLE", False)
+        feat_df, sel_cols, active_mask = self._get_small_inputs()
+        result = pipe.flag_anomalies(feat_df, sel_cols, active_mask)  # must not raise
+        assert not result["is_anomaly"].any()
+        assert result["anomaly_cluster_hdb_raw"].isna().all()
+
+    def test_enabled_by_default_in_clustering_config(self):
+        from extrafloat_segmentation_pipeline import DEFAULT_CLUSTERING_CONFIG
+
+        assert DEFAULT_CLUSTERING_CONFIG["enable_anomaly_detection"] is True
+
+
 class TestDiagnosticClustering:
     """Tests for extrafloat_segmentation_pipeline.run_diagnostic_clustering —
     GMM/HDBSCAN diagnostics only. Never assigns a business tier; that is
@@ -1174,6 +1249,27 @@ class TestCollectAlerts:
         assert alerts[0]["severity"] == "warning"
         assert alerts[0]["source"] == "diag_degraded_mode"
 
+    def test_anomaly_detection_missing_hdbscan_produces_warning_alert(self):
+        from run_extrafloat_segmentation import _collect_alerts
+
+        df = self._base_df()
+        df.attrs["anomaly_report"] = {
+            "hdbscan_available": False, "n_active": 10, "n_anomalies": 0, "anomaly_rate": 0.0,
+        }
+        alerts = _collect_alerts(df)
+        assert len(alerts) == 1
+        assert alerts[0]["severity"] == "warning"
+        assert alerts[0]["source"] == "anomaly_detection"
+
+    def test_anomaly_detection_with_hdbscan_available_produces_no_alert(self):
+        from run_extrafloat_segmentation import _collect_alerts
+
+        df = self._base_df()
+        df.attrs["anomaly_report"] = {
+            "hdbscan_available": True, "n_active": 10, "n_anomalies": 2, "anomaly_rate": 0.2,
+        }
+        assert _collect_alerts(df) == []
+
     def test_failed_quality_gate_produces_critical_alert(self):
         from run_extrafloat_segmentation import _collect_alerts
 
@@ -1272,8 +1368,8 @@ class TestRunManifest:
         for key in (
             "generated_at_utc", "git_commit_sha", "package_versions", "config",
             "n_input_rows", "n_output_rows", "n_distinct_tiers",
-            "drift_report", "tier_drift_report", "diagnostic_stability_report",
-            "quality_gate", "diag_degraded_mode", "alerts",
+            "drift_report", "tier_drift_report", "anomaly_report",
+            "diagnostic_stability_report", "quality_gate", "diag_degraded_mode", "alerts",
         ):
             assert key in manifest, f"manifest missing key '{key}'"
         assert manifest["n_input_rows"] == 3
@@ -1433,6 +1529,98 @@ class TestScoringOrchestration:
         cfg = self._no_output_cfg(scoring={"scorecard_path": scorecard_path})
         result = run_extrafloat_segmentation(agents_df, config=cfg)
         assert not any(c.startswith("diag_") for c in result.columns)
+
+    def test_anomaly_detection_on_by_default_without_diagnostics(self, tmp_path):
+        """is_anomaly must appear even with clustering.enable_diagnostics
+        left at its default False — it's independent of the full
+        diagnostics bundle."""
+        from run_extrafloat_segmentation import run_extrafloat_segmentation
+
+        agents_df = self._small_agents_df()
+        scorecard_path, _ = self._calibrated_scorecard_path(agents_df, tmp_path)
+
+        cfg = self._no_output_cfg(scoring={"scorecard_path": scorecard_path})
+        result = run_extrafloat_segmentation(agents_df, config=cfg)
+        assert "is_anomaly" in result.columns
+        assert "diag_is_anomaly" not in result.columns
+        assert "anomaly_report" in result.attrs
+        assert result.attrs["anomaly_report"]["hdbscan_available"] is True
+
+    def test_anomaly_detection_disabled_via_config(self, tmp_path):
+        from run_extrafloat_segmentation import run_extrafloat_segmentation
+
+        agents_df = self._small_agents_df()
+        scorecard_path, _ = self._calibrated_scorecard_path(agents_df, tmp_path)
+
+        cfg = self._no_output_cfg(
+            scoring={"scorecard_path": scorecard_path},
+            clustering={"enable_anomaly_detection": False},
+        )
+        result = run_extrafloat_segmentation(agents_df, config=cfg)
+        assert "is_anomaly" not in result.columns
+        assert "anomaly_report" not in result.attrs
+
+    def test_anomaly_detection_missing_hdbscan_degrades_and_alerts(self, tmp_path, monkeypatch):
+        import extrafloat_segmentation_pipeline as pipe
+        from run_extrafloat_segmentation import run_extrafloat_segmentation
+
+        agents_df = self._small_agents_df()
+        scorecard_path, _ = self._calibrated_scorecard_path(agents_df, tmp_path)
+        cfg = self._no_output_cfg(scoring={"scorecard_path": scorecard_path})
+
+        monkeypatch.setattr(pipe, "_HDBSCAN_AVAILABLE", False)
+        result = run_extrafloat_segmentation(agents_df, config=cfg)
+
+        assert "is_anomaly" in result.columns
+        assert not result["is_anomaly"].any()
+        assert result.attrs["anomaly_report"]["hdbscan_available"] is False
+        alert_sources = [a["source"] for a in result.attrs.get("alerts", [])]
+        assert "anomaly_detection" in alert_sources
+
+    def test_capacity_tier_unaffected_by_anomaly_detection_toggle(self, tmp_path):
+        """capacity_tier must be identical whether or not anomaly detection
+        ran — it's a pure aside, never an input to scoring."""
+        from run_extrafloat_segmentation import run_extrafloat_segmentation
+
+        agents_df = self._small_agents_df()
+        scorecard_path, _ = self._calibrated_scorecard_path(agents_df, tmp_path)
+
+        cfg_on = self._no_output_cfg(scoring={"scorecard_path": scorecard_path})
+        cfg_off = self._no_output_cfg(
+            scoring={"scorecard_path": scorecard_path},
+            clustering={"enable_anomaly_detection": False},
+        )
+        result_on = run_extrafloat_segmentation(agents_df, config=cfg_on)
+        result_off = run_extrafloat_segmentation(agents_df, config=cfg_off)
+        assert (
+            result_on.set_index("agent_msisdn")["capacity_tier"]
+            == result_off.set_index("agent_msisdn")["capacity_tier"]
+        ).all()
+
+    def test_drift_report_survives_past_capacity_scoring_concat(self, tmp_path):
+        """Regression test: pd.concat used to silently drop .attrs set
+        earlier in the pipeline (e.g. drift_report from step 1b) once
+        capacity scoring's pd.concat ran, because pandas doesn't propagate
+        DataFrame.attrs through concat by default."""
+        from run_extrafloat_segmentation import run_extrafloat_segmentation
+        from extrafloat_segmentation_features import prepare_features
+        from extrafloat_segmentation_drift import save_drift_baseline
+
+        agents_df = self._small_agents_df()
+        scorecard_path, _ = self._calibrated_scorecard_path(agents_df, tmp_path)
+
+        dev_df, _, _, _ = prepare_features(agents_df)
+        baseline_path = str(tmp_path / "baseline.csv")
+        drift_features = ["commission", "cash_out_value_1m", "tenure_years"]
+        save_drift_baseline(dev_df, features=drift_features, config={"baseline_save_path": baseline_path})
+
+        cfg = self._no_output_cfg(
+            scoring={"scorecard_path": scorecard_path},
+            drift={"baseline_path": baseline_path, "drift_features": drift_features},
+        )
+        result = run_extrafloat_segmentation(agents_df, config=cfg)
+        assert "drift_report" in result.attrs
+        assert "overall_psi" in result.attrs["drift_report"]
 
     def test_diagnostics_enabled_produces_diag_columns(self, tmp_path):
         from run_extrafloat_segmentation import run_extrafloat_segmentation

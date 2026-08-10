@@ -88,8 +88,15 @@ DEFAULT_CLUSTERING_CONFIG: dict[str, Any] = {
     # When False (default), run_diagnostic_clustering is never called from
     # run_extrafloat_segmentation — capacity scoring (deterministic scorecard)
     # is the only thing that decides an agent's tier. Set True to also run
-    # GMM/HDBSCAN diagnostics (anomaly flagging, archetype research) alongside.
+    # the full GMM/HDBSCAN diagnostics bundle (archetype research, plus a
+    # second, UMAP-space anomaly signal: diag_is_anomaly) alongside.
     "enable_diagnostics": False,
+    # When True (default), flag_anomalies runs on every production run —
+    # HDBSCAN only (no GMM, no UMAP) directly on the same PCA space used
+    # elsewhere in this module, cheap enough to run unconditionally. Unlike
+    # enable_diagnostics, a missing hdbscan install degrades gracefully
+    # here (is_anomaly=False) rather than raising. See flag_anomalies().
+    "enable_anomaly_detection": True,
     # ── Dormant detection (multi-product composite inactivity score) ──────────
     "dormant_inactivity_cols": [
         "cash_out_vol_1m",
@@ -795,6 +802,86 @@ def compute_diagnostic_ensemble_stability(
 # ─────────────────────────────────────────────────────────────────────────────
 # PUBLIC API
 # ─────────────────────────────────────────────────────────────────────────────
+
+
+def flag_anomalies(
+    features_df: pd.DataFrame,
+    selected_cols: list[str],
+    active_mask: pd.Series,
+    config: dict | None = None,
+) -> pd.DataFrame:
+    """Lightweight, dependency-graceful anomaly flagging via HDBSCAN.
+
+    Runs HDBSCAN alone — no GMM, no UMAP — directly on the same PCA space
+    (`_get_active_pca`) used elsewhere in this module. That makes it cheap
+    enough to run on every production run by default
+    (`clustering.enable_anomaly_detection`, default True), independent of
+    the full diagnostics bundle (`clustering.enable_diagnostics`, default
+    False, which additionally runs GMM + UMAP and computes its own
+    UMAP-space anomaly signal, `diag_is_anomaly`). The two signals are
+    computed on different embeddings (this one: raw PCA space; diagnostics:
+    UMAP embedding) and can disagree — that's expected, not a bug.
+
+    Unlike `run_diagnostic_clustering`, a missing `hdbscan` install
+    degrades gracefully here (`is_anomaly=False` for every agent, logged as
+    a warning) rather than raising `RuntimeError`. This path is meant to
+    run unconditionally as part of every production run; refusing to
+    compute `capacity_tier` over a missing *optional* dependency for an
+    *auxiliary* signal would defeat that.
+
+    Parameters
+    ----------
+    features_df : Agent feature DataFrame (post feature engineering).
+    selected_cols : Feature columns used for scaling/PCA.
+    active_mask : Boolean mask of non-dormant agents, e.g. from
+                  `_identify_dormant_mask(features_df, cfg)`.
+    config : Clustering config (same shape as DEFAULT_CLUSTERING_CONFIG).
+
+    Returns
+    -------
+    pd.DataFrame indexed like *features_df* with columns:
+        is_anomaly              : bool, True for HDBSCAN noise points among
+                                   active agents (always False for dormant
+                                   agents and whenever hdbscan is unavailable
+                                   or there are no active agents).
+        anomaly_cluster_hdb_raw : Int64, raw HDBSCAN label (pd.NA for
+                                   dormant agents / when hdbscan unavailable).
+    """
+    cfg = _get_clustering_config(config)
+
+    out = pd.DataFrame(index=features_df.index)
+    out["is_anomaly"] = False
+    out["anomaly_cluster_hdb_raw"] = pd.array([pd.NA] * len(features_df), dtype="Int64")
+
+    if not _HDBSCAN_AVAILABLE:
+        logger.warning(
+            "flag_anomalies: hdbscan is not installed — is_anomaly "
+            "defaulting to False for all agents. Install with "
+            "'pip install hdbscan' to enable anomaly flagging, or set "
+            "config['clustering']['enable_anomaly_detection']=False to "
+            "silence this warning."
+        )
+        return out
+
+    if active_mask.sum() == 0:
+        logger.info("flag_anomalies: no active agents — nothing to flag.")
+        return out
+
+    rng = np.random.RandomState(cfg["random_state"])
+    X_pca_active, _ = _get_active_pca(features_df, active_mask, selected_cols, cfg, rng)
+    hdb_labels = _run_hdbscan(X_pca_active, cfg)
+
+    active_index = features_df.index[active_mask]
+    out.loc[active_index, "anomaly_cluster_hdb_raw"] = hdb_labels
+    out.loc[active_index, "is_anomaly"] = hdb_labels == HDBSCAN_NOISE_LABEL
+
+    n_anomalies = int(out["is_anomaly"].sum())
+    logger.info(
+        "flag_anomalies: %d/%d active agents flagged as anomalies (HDBSCAN noise).",
+        n_anomalies,
+        int(active_mask.sum()),
+    )
+    return out
 
 
 def run_diagnostic_clustering(

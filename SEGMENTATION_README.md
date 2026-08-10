@@ -2,9 +2,12 @@
 
 Assigns MTN Mobile Money (Uganda) agents to 8 business tiers
 (`capacity_tier`) from transactional KPIs, using a deterministic, versioned
-capacity scorecard as the sole tiering mechanism. GMM+HDBSCAN clustering is
-available as opt-in diagnostics (anomaly flagging, archetype research) but
-never decides an agent's tier.
+capacity scorecard as the sole tiering mechanism. A lightweight,
+HDBSCAN-only anomaly check (`is_anomaly`) runs by default alongside it to
+flag agents whose behavior doesn't resemble anything else. The full
+GMM+HDBSCAN+UMAP diagnostics bundle (archetype research, plus a second,
+deeper anomaly signal) is available as opt-in. Neither anomaly check nor
+diagnostics ever decides an agent's tier.
 
 > **Branch note.** This is `claude/segmentation-capacity-tier-primary` —
 > the deterministic scorecard fully *replaces* the old ensemble-cluster
@@ -24,7 +27,7 @@ never decides an agent's tier.
 | `extrafloat_segmentation_features.py` | Feature engineering: cleaning → date/premium/interaction features → log1p+winsorize → correlation pruning → RobustScaler+PCA |
 | `extrafloat_segmentation_scoring.py` | **Deterministic capacity scorecard** — calibration, versioned persistence, per-agent scoring/tiering, tenure safety cap. The sole source of `capacity_tier`. |
 | `calibrate_scorecard.py` | CLI for the offline, human-reviewed scorecard calibration step (`calibrate_capacity_scorecard` + `save_scorecard`) |
-| `extrafloat_segmentation_pipeline.py` | GMM+HDBSCAN **diagnostics only** — anomaly flagging, archetype research. Opt-in, never assigns a business tier. |
+| `extrafloat_segmentation_pipeline.py` | `flag_anomalies()` — lightweight, HDBSCAN-only anomaly check, **on by default**. `run_diagnostic_clustering()` — full GMM+UMAP+HDBSCAN **diagnostics, opt-in**. Neither assigns a business tier. |
 | `extrafloat_segmentation_profiling.py` | Pack-based KPI profiling (research-only, opt-in) + whitelist/blacklist reference-list merge |
 | `extrafloat_segmentation_validation.py` | Purity/ARI/feature-importance validation toolkit + the automated quality gate |
 | `extrafloat_segmentation_drift.py` | PSI/KL feature-drift monitoring vs. a saved baseline, plus categorical PSI for `capacity_tier` proportions vs. scorecard calibration |
@@ -50,6 +53,14 @@ agents_df
   │                                     agents forced to lowest tier)
   │                                     → tier-proportion drift check (PSI vs.
   │                                       scorecard's calibration expectations)
+  │
+  ▼
+[2b] flag_anomalies()                  default on (clustering.enable_anomaly_detection,
+  │                                     default True) — HDBSCAN only (no GMM, no
+  │                                     UMAP) on the same PCA space, is_anomaly /
+  │                                     anomaly_cluster_hdb_raw. Degrades gracefully
+  │                                     (is_anomaly=False) if hdbscan is missing —
+  │                                     never blocks capacity_tier.
   │
   ▼
 [3] run_diagnostic_clustering()        optional (clustering.enable_diagnostics,
@@ -137,11 +148,14 @@ config = deepcopy(DEFAULT_SEGMENTATION_CONFIG)
 config["scoring"]["scorecard_path"] = "scorecards/capacity_scorecard_v0.json"
 
 result = run_extrafloat_segmentation(agents_df, config=config)
-result[["agent_msisdn", "capacity_score", "capacity_tier"]].head()
+result[["agent_msisdn", "capacity_score", "capacity_tier", "is_anomaly"]].head()
 ```
 
-To also run diagnostic clustering (anomaly flags, archetype research)
-alongside capacity scoring: `config["clustering"]["enable_diagnostics"] = True`.
+`is_anomaly` is computed by default (`clustering.enable_anomaly_detection`,
+default `True`) — set it to `False` to skip it. To also run the full
+diagnostics bundle (archetype research, plus a second, UMAP-space anomaly
+signal `diag_is_anomaly`) alongside capacity scoring:
+`config["clustering"]["enable_diagnostics"] = True`.
 
 Required input columns are listed in `extrafloat_segmentation_features.REQUIRED_COLUMNS`.
 
@@ -158,6 +172,18 @@ Required input columns are listed in `extrafloat_segmentation_features.REQUIRED_
   `scoring.allow_missing_scorecard`, default `False`): a run with no usable
   scorecard raises `ValueError` before producing any output, rather than
   silently returning agents with no tier.
+- **Anomaly detection, on by default but never blocking**
+  (`clustering.enable_anomaly_detection`, default `True`): `flag_anomalies`
+  runs HDBSCAN alone (no GMM, no UMAP) on every production run to flag
+  agents that don't resemble any dense cluster (`is_anomaly`). Unlike the
+  full diagnostics bundle below, a missing `hdbscan` install degrades
+  gracefully here — `is_anomaly` defaults to `False` for every agent and
+  `result.attrs["anomaly_report"]["hdbscan_available"]` is `False`,
+  surfaced as a `warning`-severity alert — rather than raising, since this
+  is an auxiliary signal and `capacity_tier` must never depend on it being
+  available. It uses a different embedding (raw PCA space) than the full
+  diagnostics bundle's `diag_is_anomaly` (UMAP space), so the two can
+  legitimately disagree.
 - **Diagnostics dependency guard rails** (`clustering.require_hdbscan` /
   `clustering.require_umap`, default `True`): only evaluated when
   `clustering.enable_diagnostics=True`. A missing `hdbscan` or `umap-learn`
@@ -197,17 +223,17 @@ Required input columns are listed in `extrafloat_segmentation_features.REQUIRED_
   alongside `agent_segments.csv` as `run_manifest.json` whenever
   `output.output_dir` is set): records the resolved config, package
   versions, git commit SHA, input/output row counts, and every report
-  above (drift, tier drift, diagnostic stability, quality gate, degraded
-  mode) for a given run — so a credit-tier decision can be traced back to
-  exactly what produced it, including which `scorecard_version` /
+  above (drift, tier drift, anomaly, diagnostic stability, quality gate,
+  degraded mode) for a given run — so a credit-tier decision can be traced
+  back to exactly what produced it, including which `scorecard_version` /
   `cutoff_version` was in effect. See `_build_run_manifest()`.
 - **Structured alerts** (`result.attrs["alerts"]`, always computed): rolls
-  diag-degraded-mode/quality-gate/drift/tier-drift/diagnostic-stability
-  findings into a flat list of `{severity, source, message}` dicts. No
-  notification channel (Slack/email/etc.) is wired up yet — that's a
-  deliberate open item, see below — but any caller can consume this list
-  without knowing the shape of each individual report. The CLI prints
-  these; see `_collect_alerts()`.
+  diag-degraded-mode/anomaly-detection/quality-gate/drift/tier-drift/
+  diagnostic-stability findings into a flat list of
+  `{severity, source, message}` dicts. No notification channel
+  (Slack/email/etc.) is wired up yet — that's a deliberate open item, see
+  below — but any caller can consume this list without knowing the shape
+  of each individual report. The CLI prints these; see `_collect_alerts()`.
 
 ## What data actually feeds this pipeline
 
@@ -224,8 +250,8 @@ populations and is explicitly marked provisional (see
 
 ## Integration boundary
 
-This package's output (`capacity_score`, `capacity_tier`, plus deprecated
-`segment`/`tier` aliases — see `output.emit_legacy_aliases`) is intended to
+This package's output (`capacity_score`, `capacity_tier`, `is_anomaly`, plus
+deprecated `segment`/`tier` aliases — see `output.emit_legacy_aliases`) is intended to
 feed a separate downstream credit/float-limit engine that is **not present
 on this branch** (see the branch note at the top of this document for
 where it lives). Whether that engine should consume `capacity_tier`
@@ -253,3 +279,9 @@ describe the limit engine's internals.
   a direct per-agent port of the old cluster-level safety filter's
   tenure check; it has not been independently re-validated as the right
   rule for a per-agent, deterministic context.
+- No alert fires on a high `is_anomaly` rate itself (only on `hdbscan`
+  being unavailable) — `hdbscan_min_cluster_size`/`min_samples` are tuned
+  for a large production population, so small/synthetic runs will flag
+  most or all active agents as anomalies; that's an artifact of population
+  size vs. those defaults, not a signal worth alerting on without a
+  human-chosen threshold, which doesn't exist yet.
