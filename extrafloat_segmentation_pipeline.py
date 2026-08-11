@@ -43,6 +43,7 @@ import numpy as np
 import pandas as pd
 from sklearn.decomposition import PCA
 from sklearn.mixture import GaussianMixture
+from sklearn.neighbors import LocalOutlierFactor
 from sklearn.preprocessing import RobustScaler
 
 try:
@@ -66,6 +67,12 @@ logger = logging.getLogger(__name__)
 DORMANT_FILL_LABEL: str = "Dormant_Cluster"
 ENSEMBLE_MISSING_LABEL: str = "ENSEMBLE_MISSING"
 HDBSCAN_NOISE_LABEL: int = -1
+# scikit-learn's outlier-detector convention (LocalOutlierFactor.fit_predict,
+# IsolationForest, ...): -1 = outlier, 1 = inlier. Same integer as
+# HDBSCAN_NOISE_LABEL by coincidence of two different libraries' conventions
+# — kept as a separate constant so the two are never confused for the same
+# concept in code that reads both.
+LOF_OUTLIER_LABEL: int = -1
 
 # HDB tier names ordered from lowest to highest activity (data-driven assignment).
 # Purely descriptive labels for diagnostic clusters — NOT business tiers.
@@ -97,6 +104,19 @@ DEFAULT_CLUSTERING_CONFIG: dict[str, Any] = {
     # enable_diagnostics, a missing hdbscan install degrades gracefully
     # here (is_anomaly=False) rather than raising. See flag_anomalies().
     "enable_anomaly_detection": True,
+    # ── LOF stage 2 (two-stage anomaly filter) ──────────────────────────────
+    # flag_anomalies runs HDBSCAN first as a coarse global filter
+    # (is_global_anomaly), then — only on the agents HDBSCAN actually
+    # placed in a cluster, not the full active population — runs Local
+    # Outlier Factor to catch subtler local anomalies within an otherwise
+    # dense cluster (is_local_anomaly). Restricting LOF to the HDBSCAN
+    # survivor subset is what keeps this a "filter" rather than doubling
+    # the cost of anomaly detection outright. scikit-learn is already a
+    # hard dependency of this whole package, so this stage needs no
+    # optional-dependency guard the way HDBSCAN/UMAP do.
+    "lof_enabled": True,
+    "lof_n_neighbors": 20,
+    "lof_contamination": "auto",
     # ── Dormant detection (multi-product composite inactivity score) ──────────
     "dormant_inactivity_cols": [
         "cash_out_vol_1m",
@@ -810,17 +830,32 @@ def flag_anomalies(
     active_mask: pd.Series,
     config: dict | None = None,
 ) -> pd.DataFrame:
-    """Lightweight, dependency-graceful anomaly flagging via HDBSCAN.
+    """Two-stage anomaly filter: HDBSCAN global pass, then LOF local refinement.
 
-    Runs HDBSCAN alone — no GMM, no UMAP — directly on the same PCA space
-    (`_get_active_pca`) used elsewhere in this module. That makes it cheap
-    enough to run on every production run by default
+    Stage 1 (HDBSCAN, dependency-graceful) runs alone — no GMM, no UMAP —
+    directly on the same PCA space (`_get_active_pca`) used elsewhere in
+    this module, flagging agents that don't belong to *any* dense cluster
+    at all (`is_global_anomaly`). That's what makes this cheap enough to
+    run on every production run by default
     (`clustering.enable_anomaly_detection`, default True), independent of
     the full diagnostics bundle (`clustering.enable_diagnostics`, default
-    False, which additionally runs GMM + UMAP and computes its own
-    UMAP-space anomaly signal, `diag_is_anomaly`). The two signals are
-    computed on different embeddings (this one: raw PCA space; diagnostics:
-    UMAP embedding) and can disagree — that's expected, not a bug.
+    False, which additionally runs GMM + UMAP and computes its own,
+    differently-embedded anomaly signal, `diag_is_anomaly`).
+
+    Stage 2 (LOF, `clustering.lof_enabled`, default True) runs Local
+    Outlier Factor — but only on the agents stage 1 actually placed inside
+    an HDBSCAN cluster, not the full active population — to catch subtler
+    *local* anomalies: agents that look unremarkable globally but are
+    still off relative to their immediate cluster neighborhood
+    (`is_local_anomaly`). Restricting LOF to the HDBSCAN-survivor subset
+    is what keeps this a two-stage *filter* rather than doubling the cost
+    of anomaly detection outright. scikit-learn is already a hard
+    dependency of this package (unlike hdbscan/umap-learn), so stage 2
+    needs no optional-dependency guard — it simply doesn't run if stage 1
+    didn't (no hdbscan) or left too few in-cluster agents to be meaningful.
+
+    `is_anomaly` (the column production code should read by default) is
+    the OR of both stages — flagged if either algorithm flags it.
 
     Unlike `run_diagnostic_clustering`, a missing `hdbscan` install
     degrades gracefully here (`is_anomaly=False` for every agent, logged as
@@ -840,18 +875,29 @@ def flag_anomalies(
     Returns
     -------
     pd.DataFrame indexed like *features_df* with columns:
-        is_anomaly              : bool, True for HDBSCAN noise points among
-                                   active agents (always False for dormant
-                                   agents and whenever hdbscan is unavailable
-                                   or there are no active agents).
+        is_anomaly              : bool, True if flagged by either stage
+                                   (always False for dormant agents and
+                                   whenever hdbscan is unavailable or there
+                                   are no active agents).
+        is_global_anomaly       : bool, True for HDBSCAN noise points
+                                   among active agents (stage 1).
+        is_local_anomaly        : bool, True for LOF-flagged outliers
+                                   among agents that landed in an HDBSCAN
+                                   cluster (stage 2); always False when
+                                   stage 2 didn't run.
         anomaly_cluster_hdb_raw : Int64, raw HDBSCAN label (pd.NA for
                                    dormant agents / when hdbscan unavailable).
+        lof_score               : float, LOF's `negative_outlier_factor_`
+                                   (more negative = more anomalous), NaN
+                                   wherever stage 2 didn't run for that agent.
     """
     cfg = _get_clustering_config(config)
 
     out = pd.DataFrame(index=features_df.index)
-    out["is_anomaly"] = False
+    out["is_global_anomaly"] = False
+    out["is_local_anomaly"] = False
     out["anomaly_cluster_hdb_raw"] = pd.array([pd.NA] * len(features_df), dtype="Int64")
+    out["lof_score"] = np.nan
 
     if not _HDBSCAN_AVAILABLE:
         logger.warning(
@@ -861,10 +907,12 @@ def flag_anomalies(
             "config['clustering']['enable_anomaly_detection']=False to "
             "silence this warning."
         )
+        out["is_anomaly"] = False
         return out
 
     if active_mask.sum() == 0:
         logger.info("flag_anomalies: no active agents — nothing to flag.")
+        out["is_anomaly"] = False
         return out
 
     rng = np.random.RandomState(cfg["random_state"])
@@ -873,13 +921,56 @@ def flag_anomalies(
 
     active_index = features_df.index[active_mask]
     out.loc[active_index, "anomaly_cluster_hdb_raw"] = hdb_labels
-    out.loc[active_index, "is_anomaly"] = hdb_labels == HDBSCAN_NOISE_LABEL
+    out.loc[active_index, "is_global_anomaly"] = hdb_labels == HDBSCAN_NOISE_LABEL
+
+    # ── Stage 2: LOF on HDBSCAN survivors only ────────────────────────────
+    min_required_for_lof = 2
+    if cfg.get("lof_enabled", True):
+        in_cluster_local_mask = hdb_labels != HDBSCAN_NOISE_LABEL
+        n_in_cluster = int(in_cluster_local_mask.sum())
+
+        if n_in_cluster >= min_required_for_lof:
+            n_neighbors = max(1, min(int(cfg.get("lof_n_neighbors", 20)), n_in_cluster - 1))
+            lof = LocalOutlierFactor(
+                n_neighbors=n_neighbors,
+                contamination=cfg.get("lof_contamination", "auto"),
+            )
+            X_in_cluster = X_pca_active[in_cluster_local_mask]
+            lof_pred = lof.fit_predict(X_in_cluster)  # -1 = outlier, 1 = inlier
+
+            in_cluster_index = active_index[in_cluster_local_mask]
+            out.loc[in_cluster_index, "is_local_anomaly"] = lof_pred == LOF_OUTLIER_LABEL
+            out.loc[in_cluster_index, "lof_score"] = lof.negative_outlier_factor_
+
+            logger.info(
+                "flag_anomalies: LOF stage flagged %d/%d in-cluster agent(s) "
+                "as local anomalies (n_neighbors=%d).",
+                int((lof_pred == LOF_OUTLIER_LABEL).sum()),
+                n_in_cluster,
+                n_neighbors,
+            )
+        else:
+            logger.info(
+                "flag_anomalies: only %d in-cluster agent(s) after HDBSCAN — "
+                "skipping LOF stage (needs >= %d).",
+                n_in_cluster,
+                min_required_for_lof,
+            )
+    else:
+        logger.info("flag_anomalies: LOF stage disabled (clustering.lof_enabled=False).")
+
+    out["is_anomaly"] = out["is_global_anomaly"] | out["is_local_anomaly"]
 
     n_anomalies = int(out["is_anomaly"].sum())
+    n_global = int(out["is_global_anomaly"].sum())
+    n_local = int(out["is_local_anomaly"].sum())
     logger.info(
-        "flag_anomalies: %d/%d active agents flagged as anomalies (HDBSCAN noise).",
+        "flag_anomalies: %d/%d active agents flagged as anomalies "
+        "(%d global via HDBSCAN, %d local via LOF).",
         n_anomalies,
         int(active_mask.sum()),
+        n_global,
+        n_local,
     )
     return out
 

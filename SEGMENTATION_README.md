@@ -2,12 +2,14 @@
 
 Assigns MTN Mobile Money (Uganda) agents to 8 business tiers
 (`capacity_tier`) from transactional KPIs, using a deterministic, versioned
-capacity scorecard as the sole tiering mechanism. A lightweight,
-HDBSCAN-only anomaly check (`is_anomaly`) runs by default alongside it to
-flag agents whose behavior doesn't resemble anything else. The full
-GMM+HDBSCAN+UMAP diagnostics bundle (archetype research, plus a second,
-deeper anomaly signal) is available as opt-in. Neither anomaly check nor
-diagnostics ever decides an agent's tier.
+capacity scorecard as the sole tiering mechanism. A lightweight, two-stage
+anomaly check (`is_anomaly`) runs by default alongside it: HDBSCAN flags
+agents that don't resemble any dense cluster at all (`is_global_anomaly`),
+then Local Outlier Factor (LOF) re-examines only the agents HDBSCAN placed
+in a cluster to catch subtler, local anomalies within it
+(`is_local_anomaly`). The full GMM+HDBSCAN+UMAP diagnostics bundle
+(archetype research, plus a second, deeper anomaly signal) is available as
+opt-in. Neither anomaly check nor diagnostics ever decides an agent's tier.
 
 > **Branch note.** This is `claude/segmentation-capacity-tier-primary` —
 > the deterministic scorecard fully *replaces* the old ensemble-cluster
@@ -27,7 +29,7 @@ diagnostics ever decides an agent's tier.
 | `extrafloat_segmentation_features.py` | Feature engineering: cleaning → date/premium/interaction features → log1p+winsorize → correlation pruning → RobustScaler+PCA |
 | `extrafloat_segmentation_scoring.py` | **Deterministic capacity scorecard** — calibration, versioned persistence, per-agent scoring/tiering, tenure safety cap. The sole source of `capacity_tier`. |
 | `calibrate_scorecard.py` | CLI for the offline, human-reviewed scorecard calibration step (`calibrate_capacity_scorecard` + `save_scorecard`) |
-| `extrafloat_segmentation_pipeline.py` | `flag_anomalies()` — lightweight, HDBSCAN-only anomaly check, **on by default**. `run_diagnostic_clustering()` — full GMM+UMAP+HDBSCAN **diagnostics, opt-in**. Neither assigns a business tier. |
+| `extrafloat_segmentation_pipeline.py` | `flag_anomalies()` — lightweight, two-stage anomaly check (HDBSCAN global pass + LOF local refinement), **on by default**. `run_diagnostic_clustering()` — full GMM+UMAP+HDBSCAN **diagnostics, opt-in**. Neither assigns a business tier. |
 | `extrafloat_segmentation_profiling.py` | Pack-based KPI profiling (research-only, opt-in) + whitelist/blacklist reference-list merge |
 | `extrafloat_segmentation_validation.py` | Purity/ARI/feature-importance validation toolkit + the automated quality gate |
 | `extrafloat_segmentation_drift.py` | PSI/KL feature-drift monitoring vs. a saved baseline, plus categorical PSI for `capacity_tier` proportions vs. scorecard calibration |
@@ -56,9 +58,13 @@ agents_df
   │
   ▼
 [2b] flag_anomalies()                  default on (clustering.enable_anomaly_detection,
-  │                                     default True) — HDBSCAN only (no GMM, no
-  │                                     UMAP) on the same PCA space, is_anomaly /
-  │                                     anomaly_cluster_hdb_raw. Degrades gracefully
+  │                                     default True) — two-stage, on the same PCA
+  │                                     space (no GMM, no UMAP). Stage 1: HDBSCAN
+  │                                     flags global noise (is_global_anomaly).
+  │                                     Stage 2: LOF re-examines only the
+  │                                     HDBSCAN-survivors for local anomalies
+  │                                     (is_local_anomaly, lof_score). is_anomaly =
+  │                                     OR of both stages. Degrades gracefully
   │                                     (is_anomaly=False) if hdbscan is missing —
   │                                     never blocks capacity_tier.
   │
@@ -179,9 +185,12 @@ result[["agent_msisdn", "capacity_score", "capacity_tier", "is_anomaly"]].head()
 ```
 
 `is_anomaly` is computed by default (`clustering.enable_anomaly_detection`,
-default `True`) — set it to `False` to skip it. To also run the full
-diagnostics bundle (archetype research, plus a second, UMAP-space anomaly
-signal `diag_is_anomaly`) alongside capacity scoring:
+default `True`) — set it to `False` to skip it. It's the OR of two stages:
+`is_global_anomaly` (HDBSCAN noise) and `is_local_anomaly` (LOF, run only on
+the agents HDBSCAN placed in a cluster); disable the second stage alone via
+`clustering.lof_enabled = False`. To also run the full diagnostics bundle
+(archetype research, plus a second, UMAP-space anomaly signal
+`diag_is_anomaly`) alongside capacity scoring:
 `config["clustering"]["enable_diagnostics"] = True`.
 
 Required input columns are listed in `extrafloat_segmentation_features.REQUIRED_COLUMNS`.
@@ -217,16 +226,35 @@ Required input columns are listed in `extrafloat_segmentation_features.REQUIRED_
   escape hatch for offline calibration.
 - **Anomaly detection, on by default but never blocking**
   (`clustering.enable_anomaly_detection`, default `True`): `flag_anomalies`
-  runs HDBSCAN alone (no GMM, no UMAP) on every production run to flag
-  agents that don't resemble any dense cluster (`is_anomaly`). Unlike the
-  full diagnostics bundle below, a missing `hdbscan` install degrades
-  gracefully here — `is_anomaly` defaults to `False` for every agent and
-  `result.attrs["anomaly_report"]["hdbscan_available"]` is `False`,
+  runs a two-stage filter (no GMM, no UMAP) on every production run, on the
+  raw PCA space. Stage 1 runs HDBSCAN over all active agents and flags
+  agents that don't resemble any dense cluster at all
+  (`is_global_anomaly`). Stage 2 runs Local Outlier Factor
+  (`sklearn.neighbors.LocalOutlierFactor`), but only over the agents
+  HDBSCAN placed *inside* a cluster — it re-examines each agent against its
+  local neighborhood density to catch subtler anomalies that blend into a
+  cluster globally but stand out locally (`is_local_anomaly`, plus the
+  continuous `lof_score`, more negative = more anomalous, `NaN` for agents
+  LOF didn't run on). `is_anomaly` is the OR of both stages. Reusing
+  HDBSCAN's own output to scope stage 2 means LOF only ever runs on the
+  subset that needs it, not the whole active population. `clustering.lof_enabled`
+  (default `True`) turns off stage 2 alone, leaving stage 1 unaffected;
+  `clustering.lof_n_neighbors` (default `20`, clamped down for tiny
+  in-cluster groups) and `clustering.lof_contamination` (default `"auto"`,
+  scikit-learn's fixed-offset heuristic, not data-fit) tune it. If fewer
+  than 2 agents land in a cluster, stage 2 is skipped for that run rather
+  than raising. Unlike the full diagnostics bundle below, a missing
+  `hdbscan` install degrades the whole check gracefully — every one of
+  `is_anomaly`/`is_global_anomaly`/`is_local_anomaly` defaults to `False`
+  and `lof_score` to `NaN` for every agent, with
+  `result.attrs["anomaly_report"]["hdbscan_available"]` set to `False` and
   surfaced as a `warning`-severity alert — rather than raising, since this
   is an auxiliary signal and `capacity_tier` must never depend on it being
   available. It uses a different embedding (raw PCA space) than the full
   diagnostics bundle's `diag_is_anomaly` (UMAP space), so the two can
-  legitimately disagree.
+  legitimately disagree. `result.attrs["anomaly_report"]` additionally
+  breaks down `n_global_anomalies`/`n_local_anomalies` alongside the total
+  `n_anomalies`/`anomaly_rate`.
 - **Diagnostics dependency guard rails** (`clustering.require_hdbscan` /
   `clustering.require_umap`, default `True`): only evaluated when
   `clustering.enable_diagnostics=True`. A missing `hdbscan` or `umap-learn`
@@ -293,7 +321,8 @@ populations and is explicitly marked provisional (see
 
 ## Integration boundary
 
-This package's output (`capacity_score`, `capacity_tier`, `is_anomaly`, plus
+This package's output (`capacity_score`, `capacity_tier`, `is_anomaly` and its
+`is_global_anomaly`/`is_local_anomaly`/`lof_score` stage breakdown, plus
 deprecated `segment`/`tier` aliases — see `output.emit_legacy_aliases`) is intended to
 feed a separate downstream credit/float-limit engine that is **not present
 on this branch** (see the branch note at the top of this document for
@@ -352,6 +381,11 @@ above and the per-KPI normalization described under
 - No alert fires on a high `is_anomaly` rate itself (only on `hdbscan`
   being unavailable) — `hdbscan_min_cluster_size`/`min_samples` are tuned
   for a large production population, so small/synthetic runs will flag
-  most or all active agents as anomalies; that's an artifact of population
-  size vs. those defaults, not a signal worth alerting on without a
-  human-chosen threshold, which doesn't exist yet.
+  most or all active agents as global anomalies (all noise, no clusters to
+  run LOF over at all); that's an artifact of population size vs. those
+  defaults, not a signal worth alerting on without a human-chosen
+  threshold, which doesn't exist yet.
+- LOF's `contamination="auto"` (stage 2 of anomaly detection) uses
+  scikit-learn's fixed literature offset rather than a value fit to this
+  population, and `lof_n_neighbors=20` has not been tuned against real
+  cluster sizes — both are reasonable defaults, not calibrated ones.

@@ -253,7 +253,8 @@ class TestPrepareFeatures:
 
 class TestFlagAnomalies:
     """Tests for extrafloat_segmentation_pipeline.flag_anomalies — the
-    lightweight, HDBSCAN-only anomaly check that runs by default
+    two-stage anomaly filter (HDBSCAN global pass, then LOF local
+    refinement on HDBSCAN survivors only) that runs by default
     (clustering.enable_anomaly_detection) independent of the full
     diagnostics bundle, and degrades gracefully instead of raising when
     hdbscan is unavailable."""
@@ -266,6 +267,20 @@ class TestFlagAnomalies:
         feat_df, _, _, sel_cols = prepare_features(df)
         active_mask = ~_identify_dormant_mask(feat_df, DEFAULT_CLUSTERING_CONFIG)
         return feat_df, sel_cols, active_mask
+
+    def _get_inputs_with_real_clusters(self, n=300):
+        """Default hdbscan_min_cluster_size=1000 always calls everything
+        noise for a synthetic population this small, which never exercises
+        the LOF stage (nothing survives stage 1). Lower the thresholds so
+        HDBSCAN actually finds clusters, matching what a real production
+        population would produce at default settings."""
+        from extrafloat_segmentation_pipeline import DEFAULT_CLUSTERING_CONFIG
+
+        feat_df, sel_cols, active_mask = self._get_small_inputs(n)
+        cfg = dict(DEFAULT_CLUSTERING_CONFIG)
+        cfg["hdbscan_min_cluster_size"] = 5
+        cfg["hdbscan_min_samples"] = 1
+        return feat_df, sel_cols, active_mask, cfg
 
     def test_output_has_required_columns(self):
         from extrafloat_segmentation_pipeline import flag_anomalies
@@ -324,6 +339,104 @@ class TestFlagAnomalies:
         from extrafloat_segmentation_pipeline import DEFAULT_CLUSTERING_CONFIG
 
         assert DEFAULT_CLUSTERING_CONFIG["enable_anomaly_detection"] is True
+
+    def test_lof_enabled_by_default_in_clustering_config(self):
+        from extrafloat_segmentation_pipeline import DEFAULT_CLUSTERING_CONFIG
+
+        assert DEFAULT_CLUSTERING_CONFIG["lof_enabled"] is True
+
+    def test_output_has_two_stage_columns(self):
+        from extrafloat_segmentation_pipeline import flag_anomalies
+
+        feat_df, sel_cols, active_mask, cfg = self._get_inputs_with_real_clusters()
+        result = flag_anomalies(feat_df, sel_cols, active_mask, config=cfg)
+        for col in ("is_anomaly", "is_global_anomaly", "is_local_anomaly", "lof_score"):
+            assert col in result.columns
+
+    def test_is_anomaly_is_or_of_both_stages(self):
+        from extrafloat_segmentation_pipeline import flag_anomalies
+
+        feat_df, sel_cols, active_mask, cfg = self._get_inputs_with_real_clusters()
+        result = flag_anomalies(feat_df, sel_cols, active_mask, config=cfg)
+        expected = result["is_global_anomaly"] | result["is_local_anomaly"]
+        assert (result["is_anomaly"] == expected).all()
+
+    def test_global_anomaly_matches_hdb_noise_label(self):
+        from extrafloat_segmentation_pipeline import HDBSCAN_NOISE_LABEL, flag_anomalies
+
+        feat_df, sel_cols, active_mask, cfg = self._get_inputs_with_real_clusters()
+        result = flag_anomalies(feat_df, sel_cols, active_mask, config=cfg)
+        active_result = result.loc[active_mask]
+        expected = active_result["anomaly_cluster_hdb_raw"] == HDBSCAN_NOISE_LABEL
+        assert (active_result["is_global_anomaly"] == expected).all()
+
+    def test_lof_stage_actually_runs_on_in_cluster_agents(self):
+        """With real clusters present, LOF must produce a non-NaN score for
+        every in-cluster (non-global-anomaly, active) agent — proving stage
+        2 actually ran rather than being silently skipped."""
+        from extrafloat_segmentation_pipeline import flag_anomalies
+
+        feat_df, sel_cols, active_mask, cfg = self._get_inputs_with_real_clusters()
+        result = flag_anomalies(feat_df, sel_cols, active_mask, config=cfg)
+        in_cluster = active_mask & ~result["is_global_anomaly"]
+        assert in_cluster.sum() > 0, "test setup produced no in-cluster agents"
+        assert result.loc[in_cluster, "lof_score"].notna().all()
+
+    def test_lof_score_nan_for_global_anomalies_and_dormant(self):
+        from extrafloat_segmentation_pipeline import flag_anomalies
+
+        feat_df, sel_cols, active_mask, cfg = self._get_inputs_with_real_clusters()
+        result = flag_anomalies(feat_df, sel_cols, active_mask, config=cfg)
+        assert result.loc[result["is_global_anomaly"], "lof_score"].isna().all()
+        assert result.loc[~active_mask, "lof_score"].isna().all()
+
+    def test_local_anomaly_never_true_for_global_anomalies(self):
+        """LOF only ever runs on HDBSCAN survivors — a global anomaly can
+        never also be flagged as a local anomaly."""
+        from extrafloat_segmentation_pipeline import flag_anomalies
+
+        feat_df, sel_cols, active_mask, cfg = self._get_inputs_with_real_clusters()
+        result = flag_anomalies(feat_df, sel_cols, active_mask, config=cfg)
+        assert not (result["is_global_anomaly"] & result["is_local_anomaly"]).any()
+
+    def test_lof_disabled_skips_stage_two_only(self):
+        from extrafloat_segmentation_pipeline import flag_anomalies
+
+        feat_df, sel_cols, active_mask, cfg = self._get_inputs_with_real_clusters()
+        cfg_no_lof = dict(cfg)
+        cfg_no_lof["lof_enabled"] = False
+
+        with_lof = flag_anomalies(feat_df, sel_cols, active_mask, config=cfg)
+        without_lof = flag_anomalies(feat_df, sel_cols, active_mask, config=cfg_no_lof)
+
+        assert not without_lof["is_local_anomaly"].any()
+        assert without_lof["lof_score"].isna().all()
+        # Stage 1 is untouched by disabling stage 2.
+        assert (with_lof["is_global_anomaly"] == without_lof["is_global_anomaly"]).all()
+        assert (without_lof["is_anomaly"] == without_lof["is_global_anomaly"]).all()
+
+    def test_too_few_in_cluster_agents_skips_lof_without_raising(self):
+        """A degenerate case (e.g. exactly one non-noise cluster point)
+        must not crash LOF — it should just skip stage 2 for that run."""
+        from extrafloat_segmentation_pipeline import flag_anomalies, DEFAULT_CLUSTERING_CONFIG
+
+        feat_df, sel_cols, active_mask = self._get_small_inputs(n=10)
+        cfg = dict(DEFAULT_CLUSTERING_CONFIG)
+        cfg["hdbscan_min_cluster_size"] = 2
+        cfg["hdbscan_min_samples"] = 1
+        result = flag_anomalies(feat_df, sel_cols, active_mask, config=cfg)  # must not raise
+        assert "is_local_anomaly" in result.columns
+
+    def test_missing_hdbscan_degrades_all_two_stage_columns(self, monkeypatch):
+        import extrafloat_segmentation_pipeline as pipe
+
+        monkeypatch.setattr(pipe, "_HDBSCAN_AVAILABLE", False)
+        feat_df, sel_cols, active_mask, cfg = self._get_inputs_with_real_clusters()
+        result = pipe.flag_anomalies(feat_df, sel_cols, active_mask, config=cfg)  # must not raise
+        assert not result["is_anomaly"].any()
+        assert not result["is_global_anomaly"].any()
+        assert not result["is_local_anomaly"].any()
+        assert result["lof_score"].isna().all()
 
 
 class TestDiagnosticClustering:

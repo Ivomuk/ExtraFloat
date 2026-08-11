@@ -97,7 +97,13 @@ SEGMENT_OUTPUT_COLUMNS: tuple[str, ...] = (
     "scorecard_version",
     "cutoff_version",
     # ── Anomaly detection (default on; see clustering.enable_anomaly_detection) ──
+    # Two-stage filter: is_global_anomaly (HDBSCAN noise) + is_local_anomaly
+    # (LOF within HDBSCAN clusters, see clustering.lof_enabled); is_anomaly
+    # is the OR of both and is what most consumers should read.
     "is_anomaly",
+    "is_global_anomaly",
+    "is_local_anomaly",
+    "lof_score",
     "anomaly_cluster_hdb_raw",
     # ── Diagnostic clustering (optional; see clustering.enable_diagnostics) ──
     "diag_cluster_id_gmm",
@@ -113,8 +119,9 @@ SEGMENT_OUTPUT_COLUMNS: tuple[str, ...] = (
 )
 
 # Raw HDBSCAN cluster-ID columns are opt-in noise for most consumers;
-# is_anomaly, diag_is_anomaly, and diag_hdb_tier are kept as regular
-# (non-intermediate) output since they're directly useful signals on their own.
+# is_anomaly/is_global_anomaly/is_local_anomaly/lof_score, diag_is_anomaly,
+# and diag_hdb_tier are kept as regular (non-intermediate) output since
+# they're directly useful signals on their own.
 INTERMEDIATE_COLUMNS: tuple[str, ...] = (
     "anomaly_cluster_hdb_raw",
     "diag_cluster_id_gmm",
@@ -720,11 +727,13 @@ def run_extrafloat_segmentation(
             f"allow_missing_scorecard=False."
         )
 
-    # ── Step 2b: Anomaly Detection (default on, lightweight) ─────────────────
+    # ── Step 2b: Anomaly Detection (default on, lightweight, two-stage) ──────
     # Independent of both capacity scoring succeeding and diagnostics being
-    # enabled — HDBSCAN only (no GMM, no UMAP), cheap enough to run on every
-    # production run. Degrades gracefully (is_anomaly=False) rather than
-    # raising when hdbscan isn't installed; see flag_anomalies().
+    # enabled — stage 1 (HDBSCAN, no GMM/UMAP) flags global anomalies; stage
+    # 2 (LOF, clustering.lof_enabled) refines only the HDBSCAN survivors for
+    # subtler local anomalies. Cheap enough to run on every production run.
+    # Degrades gracefully (is_anomaly=False) rather than raising when
+    # hdbscan isn't installed; see flag_anomalies().
     if clustering_cfg.get("enable_anomaly_detection", True):
         logger.info("run_extrafloat_segmentation: step 2b — anomaly detection.")
         anomaly_df = flag_anomalies(
@@ -737,13 +746,18 @@ def run_extrafloat_segmentation(
 
         n_active = int((~is_dormant).sum())
         n_anomalies = int(features_df["is_anomaly"].sum())
+        n_global_anomalies = int(features_df["is_global_anomaly"].sum())
+        n_local_anomalies = int(features_df["is_local_anomaly"].sum())
         features_df.attrs["anomaly_report"] = {
             # Read via the module (not a bound `from ... import`) so this
             # reflects monkeypatched/runtime availability, matching how
             # flag_anomalies() itself checks it.
             "hdbscan_available": bool(_segmentation_pipeline_module._HDBSCAN_AVAILABLE),
+            "lof_enabled": bool(clustering_cfg.get("lof_enabled", True)),
             "n_active": n_active,
             "n_anomalies": n_anomalies,
+            "n_global_anomalies": n_global_anomalies,
+            "n_local_anomalies": n_local_anomalies,
             "anomaly_rate": (n_anomalies / n_active) if n_active > 0 else float("nan"),
         }
         if not features_df.attrs["anomaly_report"]["hdbscan_available"]:
