@@ -97,15 +97,14 @@ def main(argv=None):
     print("=" * 60)
 
     if "cal_pd" in df.columns:
-        scored = df[df["cal_pd"].notna()]
         results.append(check(
             "tier_1 agents all have cal_pd < 0.15",
-            (scored["risk_tier"] == "tier_1") & (scored["cal_pd"] >= 0.15),
+            (df["risk_tier"] == "tier_1") & (df["cal_pd"] >= 0.15) & df["cal_pd"].notna(),
             df, base_cols,
         ))
         results.append(check(
             "tier_4 agents all have cal_pd >= 0.65",
-            (scored["risk_tier"] == "tier_4") & (scored["cal_pd"] < 0.65),
+            (df["risk_tier"] == "tier_4") & (df["cal_pd"] < 0.65) & df["cal_pd"].notna(),
             df, base_cols,
         ))
 
