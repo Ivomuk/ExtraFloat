@@ -129,39 +129,39 @@ then telecomid end
 ) as disbursement_vol_6M,
 coalesce(sum(case
 when tbl_dt > dt_m1 and tbl_dt <= snapshot_dt and tranname = 'XtraFloat Dispatch'
-then try_cast(amount as bigint) end
+then try_cast(amount as double) end
 ), 0) as disbursement_val_1M,
 coalesce(sum(case
 when tbl_dt > dt_d30 and tbl_dt <= snapshot_dt and tranname = 'XtraFloat Dispatch'
-then try_cast(amount as bigint) end
+then try_cast(amount as double) end
 ), 0) as disbursement_val_M1,
 coalesce(sum(case
 when tbl_dt > dt_d60 and tbl_dt <= dt_d30 and tranname = 'XtraFloat Dispatch'
-then try_cast(amount as bigint) end
+then try_cast(amount as double) end
 ), 0) as disbursement_val_M2,
 coalesce(sum(case
 when tbl_dt > dt_d90 and tbl_dt <= dt_d60 and tranname = 'XtraFloat Dispatch'
-then try_cast(amount as bigint) end
+then try_cast(amount as double) end
 ), 0) as disbursement_val_M3,
 coalesce(sum(case
 when tbl_dt > dt_d120 and tbl_dt <= dt_d90 and tranname = 'XtraFloat Dispatch'
-then try_cast(amount as bigint) end
+then try_cast(amount as double) end
 ), 0) as disbursement_val_M4,
 coalesce(sum(case
 when tbl_dt > dt_d150 and tbl_dt <= dt_d120 and tranname = 'XtraFloat Dispatch'
-then try_cast(amount as bigint) end
+then try_cast(amount as double) end
 ), 0) as disbursement_val_M5,
 coalesce(sum(case
 when tbl_dt > dt_d180 and tbl_dt <= dt_d150 and tranname = 'XtraFloat Dispatch'
-then try_cast(amount as bigint) end
+then try_cast(amount as double) end
 ), 0) as disbursement_val_M6,
 coalesce(sum(case
 when tbl_dt > dt_m3 and tbl_dt <= snapshot_dt and tranname = 'XtraFloat Dispatch'
-then try_cast(amount as bigint) end
+then try_cast(amount as double) end
 ), 0) as disbursement_val_3M,
 coalesce(sum(case
 when tbl_dt > dt_m6 and tbl_dt <= snapshot_dt and tranname = 'XtraFloat Dispatch'
-then try_cast(amount as bigint) end
+then try_cast(amount as double) end
 ), 0) as disbursement_val_6M,
 count(distinct case
 when tbl_dt > dt_m1 and tbl_dt <= snapshot_dt and tranname = 'XtraFloat Payment'
