@@ -1,14 +1,16 @@
-# CreditRisk pipeline — two-phase workflow
+# CreditRisk pipeline — three-phase workflow
 #
-# Phase 1 (train): Build PD model artifacts from historical agent snapshots.
-# Phase 2 (run):   Score agents and assign credit limits.
+# Phase 0 (calibrate): Build the capacity scorecard from a labelled agent snapshot.
+# Phase 1 (train):     Build PD model artifacts from historical agent snapshots.
+# Phase 2 (run):       Score agents: segmentation → PD model → credit limit engine.
 #
 # Quick start:
 #   make install
-#   make train   TRAIN=data/agent_snapshot_train.csv VAL=data/agent_snapshot_val.csv
+#   make calibrate   TRANSACTION_FILE=data/agent_profile_snapshot.csv
+#   make train       TRAIN=data/agent_snapshot_train.csv VAL=data/agent_snapshot_val.csv
 #   make run
 
-.PHONY: install train run test test-pipeline check-artifacts help
+.PHONY: install calibrate train run test test-pipeline check-artifacts help
 
 # ── Configurable inputs (override on the command line) ──────────────────────
 TRAIN            ?= data/agent_snapshot_train.csv
@@ -23,11 +25,18 @@ CHAMPION         ?= xgb
 TRANSACTION_FILE ?= data/agent_profile_snapshot.csv
 LOAN_FILE        ?= data/loan_summary.csv
 BORROWER_FILE    ?= data/borrower_credit.csv
+SCORECARD_PATH   ?= scorecards/capacity_scorecard_v1.json
 OUTPUT           ?= output/credit_risk_output.csv
 
 # ── Setup ────────────────────────────────────────────────────────────────────
 install:
 	pip install -e ".[dev,monitor]"
+
+# ── Phase 0: Calibrate the capacity scorecard ────────────────────────────────
+calibrate:
+	python calibrate_scorecard.py \
+		--input-file    $(TRANSACTION_FILE) \
+		--output-path   $(SCORECARD_PATH)
 
 # ── Phase 1: Train the PD model ─────────────────────────────────────────────
 train:
@@ -47,7 +56,9 @@ run: check-artifacts
 		--transaction-file  $(TRANSACTION_FILE) \
 		--loan-file         $(LOAN_FILE) \
 		--borrower-file     $(BORROWER_FILE) \
+		--repayment-file    $(REPAYMENT) \
 		--artifacts-dir     $(ARTIFACTS_DIR) \
+		--scorecard-path    $(SCORECARD_PATH) \
 		--champion          $(CHAMPION) \
 		--output            $(OUTPUT)
 
@@ -71,16 +82,19 @@ help:
 	@echo "CreditRisk pipeline — available targets:"
 	@echo ""
 	@echo "  make install          Install package and dev dependencies"
-	@echo "  make train            Train the PD model (produces artifacts)"
-	@echo "  make run              Run the end-to-end credit risk pipeline"
+	@echo "  make calibrate        Phase 0 — calibrate capacity scorecard"
+	@echo "  make train            Phase 1 — train PD model (produces artifacts)"
+	@echo "  make run              Phase 2 — segmentation → PD → credit limit engine"
 	@echo "  make test             Run all tests"
 	@echo "  make test-pipeline    Run pipeline integration tests only"
 	@echo "  make check-artifacts  Verify PD model artifacts exist"
 	@echo ""
 	@echo "Key variables (override with make <target> VAR=value):"
-	@echo "  TRAIN            Training snapshot CSV  (default: $(TRAIN))"
-	@echo "  VAL              Validation snapshot CSV (default: $(VAL))"
-	@echo "  ARTIFACTS_DIR    Model artifacts dir     (default: $(ARTIFACTS_DIR))"
-	@echo "  TRANSACTION_FILE Agent profile snapshot  (default: $(TRANSACTION_FILE))"
-	@echo "  OUTPUT           Pipeline output CSV     (default: $(OUTPUT))"
+	@echo "  TRAIN            Training snapshot CSV     (default: $(TRAIN))"
+	@echo "  VAL              Validation snapshot CSV    (default: $(VAL))"
+	@echo "  ARTIFACTS_DIR    Model artifacts dir        (default: $(ARTIFACTS_DIR))"
+	@echo "  TRANSACTION_FILE Agent profile snapshot     (default: $(TRANSACTION_FILE))"
+	@echo "  SCORECARD_PATH   Capacity scorecard JSON    (default: $(SCORECARD_PATH))"
+	@echo "  REPAYMENT        Repayment history CSV      (default: $(REPAYMENT))"
+	@echo "  OUTPUT           Pipeline output CSV        (default: $(OUTPUT))"
 	@echo ""
