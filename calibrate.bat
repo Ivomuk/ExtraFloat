@@ -1,6 +1,6 @@
 @echo off
 python calibrate_scorecard.py ^
-    --agents data/agent_profile_snapshot.csv ^
+    --agents data/mfs_daily_agent_mart_20260731.csv ^
     --out scorecards/capacity_scorecard_v1.json ^
     --final ^
     --force
