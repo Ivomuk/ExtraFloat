@@ -1,0 +1,19 @@
+# Runtime dependencies for the extrafloat_segmentation_* package
+# (extrafloat_segmentation_features/pipeline/profiling/validation/drift.py,
+# run_extrafloat_segmentation.py).
+#
+# Pinned to exact versions rather than floors: GaussianMixture, HDBSCAN, and
+# UMAP internals can shift behavior across releases (init strategy, default
+# hyperparameters, tie-breaking) in ways that silently reshuffle which
+# business tier an agent is assigned to. Re-validate the full test suite
+# (test_extrafloat_segmentation.py) before bumping any of these.
+#
+# hdbscan and umap-learn are enforced at runtime by default via the
+# require_hdbscan/require_umap clustering config flags (see
+# extrafloat_segmentation_pipeline.DEFAULT_CLUSTERING_CONFIG) — do not treat
+# them as optional in a production install.
+numpy==2.4.6
+pandas==3.0.5
+scikit-learn==1.9.0
+hdbscan==0.8.44
+umap-learn==0.5.12

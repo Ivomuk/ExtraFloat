@@ -1,16 +1,17 @@
 """
 run_credit_risk_pipeline.py
 ============================
-End-to-end CreditRisk pipeline: PD model -> credit limit engine.
+End-to-end CreditRisk pipeline: segmentation -> PD model -> credit limit engine.
 
 Pipeline stages
 ---------------
 1. Load three input files (transaction, loan, borrower).
-2. Run the PD model inference pipeline -> cal_pd per agent.
-3. Build engine features from the three CSVs.
-4. Join cal_pd onto the engine features DataFrame (on agent_msisdn / msisdn).
-5. Run the credit limit engine -> assigned_limit + risk_tier + cal_pd per agent.
-6. Optionally write the result to a CSV.
+2. Run the agent segmentation pipeline -> capacity_tier per agent.
+3. Run the PD model inference pipeline -> cal_pd per agent.
+4. Build engine features from the three CSVs.
+5. Join cal_pd and capacity_tier onto the engine features DataFrame.
+6. Run the credit limit engine -> assigned_limit + risk_tier + cal_pd per agent.
+7. Optionally write the result to a CSV.
 
 Input files
 -----------
@@ -71,6 +72,7 @@ from extrafloat.io.extrafloat_data_loaders import (
 from pd_model.exceptions import ArtifactVerificationError, DataAlignmentError, MissingArtifactError
 from pd_model.logging_config import install_pii_filter
 from pd_model.modeling.inference import run_inference_pipeline
+from run_extrafloat_segmentation import run_extrafloat_segmentation
 
 logging.basicConfig(
     level=logging.INFO,
@@ -202,6 +204,7 @@ def run_credit_risk_pipeline(
     keep_intermediate: bool = False,
     engine_config: dict | None = None,
     allow_unverified_artifacts: bool = False,
+    scorecard_path: str | Path | None = None,
 ) -> pd.DataFrame:
     """
     Run the full PD model -> credit limit engine pipeline.
@@ -229,6 +232,11 @@ def run_credit_risk_pipeline(
     allow_unverified_artifacts : if True, missing or incomplete artifact checksums produce a
                                  warning instead of a RuntimeError.  Use ONLY for development
                                  or testing.  Never set True in production.
+    scorecard_path             : optional path to the capacity scorecard JSON produced by
+                                 calibrate_scorecard.py.  When provided, the segmentation stage
+                                 produces deterministic capacity_tier values.  When omitted,
+                                 segmentation runs in degraded mode (allow_missing_scorecard=True)
+                                 and capacity_tier is derived from heuristic scoring only.
 
     Returns
     -------
@@ -270,8 +278,39 @@ def run_credit_risk_pipeline(
             if "snapshot_dt" not in repayment_df.columns and "tbl_dt" not in repayment_df.columns:
                 repayment_df["snapshot_dt"] = snap_ts
 
-    # -- Stage 2: PD model scoring -------------------------------------------
-    logger.info("Stage 2: running PD model inference (champion=%s)", champion)
+    # -- Stage 2: Agent segmentation -----------------------------------------
+    logger.info("Stage 2: running agent segmentation")
+    seg_config: dict = {
+        "scoring": {
+            "scorecard_path": str(scorecard_path) if scorecard_path else "",
+            "allow_missing_scorecard": scorecard_path is None,
+        },
+        "clustering": {"enable_diagnostics": False},
+    }
+    try:
+        seg_df = run_extrafloat_segmentation(df_agent, config=seg_config)
+        seg_cols = ["agent_msisdn"] + [
+            c for c in ("capacity_score", "capacity_tier", "capacity_tier_raw", "capacity_safety_flags")
+            if c in seg_df.columns
+        ]
+        seg_out = seg_df[seg_cols].copy()
+        logger.info(
+            "Segmentation complete: %d agents | capacity_tier distribution: %s",
+            len(seg_out),
+            seg_out["capacity_tier"].value_counts().to_dict() if "capacity_tier" in seg_out.columns else "n/a",
+        )
+    except ValueError as exc:
+        logger.warning(
+            "Stage 2: segmentation skipped — %s. "
+            "capacity_tier will be absent from output. "
+            "Ensure the transaction file contains: agent_msisdn, commission, "
+            "cash_out_vol_1m, cash_out_value_1m, cash_in_value_1m.",
+            exc,
+        )
+        seg_out = pd.DataFrame(columns=["agent_msisdn"])
+
+    # -- Stage 3: PD model scoring -------------------------------------------
+    logger.info("Stage 3: running PD model inference (champion=%s)", champion)
     _check_artifacts(artifacts_dir, allow_unverified=allow_unverified_artifacts)
     pd_scored = run_inference_pipeline(
         df_raw=df_agent,
@@ -285,8 +324,8 @@ def run_credit_risk_pipeline(
         pd_scored["cal_pd"].mean() if "cal_pd" in pd_scored.columns else float("nan"),
     )
 
-    # -- Stage 3: Engine feature engineering --------------------------------
-    logger.info("Stage 3: building engine features")
+    # -- Stage 4: Engine feature engineering --------------------------------
+    logger.info("Stage 4: building engine features")
     features_df = build_extrafloat_limit_engine_features(
         borrower_limit_df=df_borrower,
         transaction_capacity_df=df_txn,
@@ -294,9 +333,9 @@ def run_credit_risk_pipeline(
     )
     logger.info("Engine features: %d agents", len(features_df))
 
-    # -- Stage 4: Join cal_pd onto engine features ---------------------------
+    # -- Stage 5: Join cal_pd and capacity_tier onto engine features ---------
     # PD model key: agent_msisdn  |  engine key: msisdn  (same identifier)
-    logger.info("Stage 4: joining PD scores onto engine features")
+    logger.info("Stage 5: joining PD scores and segmentation onto engine features")
     pd_join_cols = [c for c in ["agent_msisdn", "cal_pd", "thin_file_flag"] if c in pd_scored.columns]
     pd_join = pd_scored[pd_join_cols].rename(columns={"agent_msisdn": "msisdn"})
 
@@ -369,8 +408,27 @@ def run_credit_risk_pipeline(
             )
         features_df["is_thin_file"] = features_df["thin_file_flag"].fillna(0).astype(int)
 
-    # -- Stage 5: Run credit limit engine -----------------------------------
-    logger.info("Stage 5: running credit limit engine")
+    # Join segmentation output (capacity_tier, capacity_score) onto features_df.
+    # Left join so engine agents with no segmentation row are unaffected.
+    seg_join = seg_out.copy()
+    seg_join["agent_msisdn"] = seg_join["agent_msisdn"].astype(str).str.strip()
+    seg_join = seg_join.rename(columns={"agent_msisdn": "msisdn"})
+    seg_join["msisdn"] = _norm_msisdn(seg_join["msisdn"])
+    seg_cols_to_join = [c for c in seg_join.columns if c != "msisdn"]
+    existing_seg_cols = [c for c in seg_cols_to_join if c in features_df.columns]
+    if existing_seg_cols:
+        features_df = features_df.drop(columns=existing_seg_cols)
+    features_df = features_df.merge(
+        seg_join[["msisdn"] + seg_cols_to_join], on="msisdn", how="left"
+    )
+    matched = features_df["capacity_tier"].notna().sum() if "capacity_tier" in features_df.columns else 0
+    logger.info(
+        "Segmentation join: %d/%d engine agents matched a capacity_tier",
+        int(matched), len(features_df),
+    )
+
+    # -- Stage 6: Run credit limit engine -----------------------------------
+    logger.info("Stage 6: running credit limit engine")
     result_df = run_extrafloat_limit_engine(
         features_df,
         config=engine_config,
@@ -383,7 +441,7 @@ def run_credit_risk_pipeline(
         result_df["risk_tier"].value_counts().to_string() if "risk_tier" in result_df.columns else "n/a",
     )
 
-    # -- Stage 6: Audit columns ---------------------------------------------
+    # -- Stage 7: Audit columns ---------------------------------------------
     # score_source distinguishes legitimate population misses (agents not in
     # PD output -> "7_signal_fallback") from calibration failures that now
     # propagate as exceptions rather than silent NaN.
@@ -424,6 +482,12 @@ def _parse_args(argv=None):
         help="Snapshot date for the transaction file (YYYYMMDD). Required when using --repayment-file "
              "so Phase 2.2 can join the two files on snapshot_dt.",
     )
+    p.add_argument(
+        "--scorecard-path",
+        default=None,
+        help="Path to capacity scorecard JSON (produced by calibrate_scorecard.py). "
+             "When omitted, segmentation runs in degraded mode without deterministic tier scoring.",
+    )
     p.add_argument("--output", default=None, help="Output CSV path (omit to print summary only)")
     p.add_argument("--champion", default="xgb", choices=["xgb", "lgb"])
     p.add_argument(
@@ -454,6 +518,7 @@ def main(argv=None):
         champion=args.champion,
         keep_intermediate=args.keep_intermediate,
         allow_unverified_artifacts=args.allow_unverified_artifacts,
+        scorecard_path=args.scorecard_path,
     )
 
     if args.output:
@@ -463,7 +528,7 @@ def main(argv=None):
         logger.info("Output written to %s (%d rows, %d columns)", out_path, len(result), len(result.columns))
 
     # Always print a screen summary regardless of whether --output was given
-    preview_cols = ["msisdn", "assigned_limit", "risk_tier", "cal_pd", "thin_file_flag", "final_decision_reason", "score_source"]
+    preview_cols = ["msisdn", "assigned_limit", "risk_tier", "cal_pd", "thin_file_flag", "capacity_tier", "final_decision_reason", "score_source"]
     display = result[[c for c in preview_cols if c in result.columns]]
     print("\n=== Credit Risk Pipeline Output ===")
     print(f"Agents scored: {len(display)}")

@@ -1,0 +1,7 @@
+# Additional dependencies for developing/testing the segmentation package.
+# Install alongside requirements-segmentation.txt:
+#   pip install -r requirements-segmentation.txt -r requirements-segmentation-dev.txt
+-r requirements-segmentation.txt
+matplotlib==3.11.1
+seaborn==0.13.2
+pytest==9.1.1
