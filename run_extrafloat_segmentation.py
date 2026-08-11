@@ -467,14 +467,19 @@ def _collect_alerts(df: pd.DataFrame) -> list[dict[str, Any]]:
                 f"unaffected; no anomaly columns were produced."
             ),
         })
-    elif lof_status.startswith("invalid_config"):
+    # Checked independent of lof_status (not `lof_status.startswith(...)`)
+    # so this fires even when LOF never got a chance to run for an
+    # unrelated reason this run (e.g. hdbscan unavailable) — an invalid
+    # config and a missing dependency are two separate problems and both
+    # should be visible in one alert pass, not one masking the other.
+    if anomaly_report.get("lof_config_error"):
         alerts.append({
             "severity": "critical",
             "source": "lof_config",
             "message": (
-                f"LOF stage-2 anomaly detection disabled due to invalid "
-                f"config: {lof_status}. is_global_anomaly (stage 1) is "
-                f"unaffected; fix clustering.lof_* settings."
+                f"LOF stage-2 anomaly detection has an invalid config: "
+                f"{anomaly_report['lof_config_error']}. is_global_anomaly "
+                f"(stage 1) is unaffected; fix clustering.lof_* settings."
             ),
         })
     if anomaly_report.get("lof_clusters_failed", 0) > 0:
@@ -797,6 +802,7 @@ def run_extrafloat_segmentation(
                 # can have lof_enabled=True and still never have executed
                 # LOF (e.g. every cluster below lof_min_cluster_population).
                 "lof_status": lof_meta.get("lof_status", "unknown"),
+                "lof_config_error": lof_meta.get("lof_config_error"),
                 "lof_clusters_total": lof_meta.get("lof_clusters_total", 0),
                 "lof_clusters_ran": lof_meta.get("lof_clusters_ran", 0),
                 "lof_clusters_skipped_too_small": lof_meta.get("lof_clusters_skipped_too_small", 0),

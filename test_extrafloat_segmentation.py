@@ -532,7 +532,10 @@ class TestFlagAnomalies:
         result = flag_anomalies(feat_df, sel_cols, active_mask, config=cfg)  # must not raise
 
         lof_meta = result.attrs["lof_meta"]
-        assert lof_meta["lof_status"] == "ran"
+        # Partial success is reported distinctly from a clean "ran" — a
+        # consumer shouldn't have to cross-check lof_clusters_failed to
+        # notice one cluster errored out.
+        assert lof_meta["lof_status"] == "ran_with_failures"
         assert lof_meta["lof_clusters_failed"] == 1
         assert lof_meta["lof_clusters_ran"] >= 1
 
@@ -655,6 +658,47 @@ class TestFlagAnomalies:
 
         result = flag_anomalies(feat_df, sel_cols, active_mask, config=cfg)
         assert result.attrs["lof_meta"]["lof_status"] == "ran"
+        assert result.attrs["lof_meta"]["lof_config_error"] is None
+
+    def test_valid_lof_config_reports_no_config_error(self):
+        from extrafloat_segmentation_pipeline import flag_anomalies
+
+        feat_df, sel_cols, active_mask, cfg = self._get_inputs_with_real_clusters()
+        result = flag_anomalies(feat_df, sel_cols, active_mask, config=cfg)
+        assert result.attrs["lof_meta"]["lof_config_error"] is None
+
+    def test_lof_config_error_visible_even_when_hdbscan_unavailable(self, monkeypatch):
+        """An invalid LOF config and a missing hdbscan install are two
+        independent problems — an operator should see both from a single
+        run rather than fixing hdbscan, redeploying, and only then
+        discovering the config was also broken."""
+        import extrafloat_segmentation_pipeline as pipe
+
+        monkeypatch.setattr(pipe, "_HDBSCAN_AVAILABLE", False)
+        feat_df, sel_cols, active_mask, cfg = self._get_inputs_with_real_clusters()
+        cfg = dict(cfg)
+        cfg["lof_n_neighbors"] = -1
+
+        result = pipe.flag_anomalies(feat_df, sel_cols, active_mask, config=cfg)  # must not raise
+        lof_meta = result.attrs["lof_meta"]
+        assert lof_meta["lof_status"] == "skipped_hdbscan_unavailable"
+        assert lof_meta["lof_config_error"] is not None
+        assert "lof_n_neighbors" in lof_meta["lof_config_error"]
+
+    def test_lof_config_error_absent_when_lof_disabled(self):
+        """No point flagging a config error for settings that won't be used
+        this run."""
+        from extrafloat_segmentation_pipeline import flag_anomalies
+
+        feat_df, sel_cols, active_mask, cfg = self._get_inputs_with_real_clusters()
+        cfg = dict(cfg)
+        cfg["lof_enabled"] = False
+        cfg["lof_n_neighbors"] = -1  # would be invalid if LOF were enabled
+
+        result = flag_anomalies(feat_df, sel_cols, active_mask, config=cfg)
+        lof_meta = result.attrs["lof_meta"]
+        assert lof_meta["lof_status"] == "disabled"
+        assert lof_meta["lof_config_error"] is None
 
 
 class TestDiagnosticClustering:
@@ -2050,6 +2094,33 @@ class TestScoringOrchestration:
         assert report["lof_enabled"] is True
         assert report["lof_status"] != "ran"
         assert report["lof_clusters_ran"] == 0
+
+    def test_hdbscan_unavailable_and_invalid_lof_config_both_surface(self, tmp_path, monkeypatch):
+        """Two independent problems in one run — hdbscan missing and an
+        invalid LOF config — must both be visible via separate alerts,
+        rather than the hdbscan-unavailable path swallowing the config
+        problem until hdbscan is reinstalled."""
+        import extrafloat_segmentation_pipeline as pipe
+        from run_extrafloat_segmentation import run_extrafloat_segmentation
+
+        agents_df = self._small_agents_df()
+        scorecard_path, _ = self._calibrated_scorecard_path(agents_df, tmp_path)
+        cfg = self._no_output_cfg(
+            scoring=self._scoring_cfg(scorecard_path),
+            clustering={"lof_n_neighbors": -1},
+        )
+
+        monkeypatch.setattr(pipe, "_HDBSCAN_AVAILABLE", False)
+        result = run_extrafloat_segmentation(agents_df, config=cfg)  # must not raise
+
+        report = result.attrs["anomaly_report"]
+        assert report["hdbscan_available"] is False
+        assert report["lof_status"] == "skipped_hdbscan_unavailable"
+        assert report["lof_config_error"] is not None
+
+        alert_sources = [(a["source"], a["severity"]) for a in result.attrs.get("alerts", [])]
+        assert ("anomaly_detection", "warning") in alert_sources  # hdbscan missing
+        assert ("lof_config", "critical") in alert_sources  # config also invalid
 
     def test_capacity_tier_unaffected_by_anomaly_detection_toggle(self, tmp_path):
         """capacity_tier must be identical whether or not anomaly detection

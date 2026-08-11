@@ -268,11 +268,20 @@ Required input columns are listed in `extrafloat_segmentation_features.REQUIRED_
   not whether stage 2 actually ran (a cluster can be too small, HDBSCAN can
   find no clusters at all, or the config can be invalid),
   `anomaly_report["lof_status"]` records the real outcome —
-  `"ran"` / `"disabled"` / `"skipped_no_clusters"` /
-  `"skipped_all_clusters_too_small"` / `"invalid_config: ..."` / `"failed"`
-  / `"failed_unexpectedly"` — alongside `lof_clusters_total` /
+  `"ran"` / `"ran_with_failures"` (some clusters succeeded, others errored
+  — distinct from a clean `"ran"` so a consumer doesn't have to
+  cross-check `lof_clusters_failed` to notice) / `"disabled"` /
+  `"skipped_hdbscan_unavailable"` / `"skipped_no_active_agents"` /
+  `"skipped_no_clusters"` / `"skipped_all_clusters_too_small"` /
+  `"invalid_config: ..."` / `"failed"` (every cluster errored) /
+  `"failed_unexpectedly"` — alongside `lof_clusters_total` /
   `lof_clusters_ran` / `lof_clusters_skipped_too_small` /
-  `lof_clusters_failed`.
+  `lof_clusters_failed`. `anomaly_report["lof_config_error"]` is validated
+  and set independently of *why* stage 2 didn't run this call — e.g. it's
+  still populated when `lof_status="skipped_hdbscan_unavailable"`, so an
+  invalid config and a missing `hdbscan` install are both visible from one
+  run (two separate alerts) instead of one hiding the other until the
+  first is fixed and redeployed.
 
   Unlike the full diagnostics bundle below, a missing `hdbscan` install
   degrades the whole check gracefully — every one of

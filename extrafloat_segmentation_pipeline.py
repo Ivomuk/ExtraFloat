@@ -948,10 +948,27 @@ def flag_anomalies(
                                    (more negative = more anomalous), NaN
                                    wherever stage 2 didn't run for that agent.
     Also sets `out.attrs["lof_meta"]`, a dict describing what stage 2
-    actually did this run (see the inline comments below for keys) —
-    consumed by `run_extrafloat_segmentation` to populate
-    `anomaly_report`'s `lof_status` and related fields, since
-    `clustering.lof_enabled=True` on its own does not mean LOF ran.
+    actually did this run — consumed by `run_extrafloat_segmentation` to
+    populate `anomaly_report`, since `clustering.lof_enabled=True` on its
+    own does not mean LOF ran:
+        lof_status              : "ran" | "ran_with_failures" (some
+                                   clusters succeeded, others errored) |
+                                   "disabled" | "skipped_hdbscan_unavailable"
+                                   | "skipped_no_active_agents" |
+                                   "skipped_no_clusters" |
+                                   "skipped_all_clusters_too_small" |
+                                   "invalid_config: <reason>" | "failed"
+                                   (every cluster errored).
+        lof_config_error        : str | None — set whenever
+                                   `clustering.lof_*` config is invalid,
+                                   independent of *why* stage 2 didn't run
+                                   this call (e.g. still populated even when
+                                   lof_status="skipped_hdbscan_unavailable",
+                                   so both problems are visible at once
+                                   rather than one masking the other).
+        lof_clusters_total/ran/skipped_too_small/failed : int counts.
+        lof_skipped_cluster_sizes, lof_cluster_errors    : dicts keyed by
+                                   HDBSCAN cluster id.
     """
     cfg = _get_clustering_config(config)
 
@@ -964,6 +981,12 @@ def flag_anomalies(
     def _lof_meta(status: str, **extra: Any) -> dict[str, Any]:
         meta = {
             "lof_status": status,
+            # Set independently of lof_status/lof_enabled below — validated
+            # up front so it's visible even when LOF never gets a chance to
+            # run for an unrelated reason (e.g. hdbscan unavailable), so a
+            # deploy with two simultaneous problems doesn't hide one behind
+            # the other across two separate debugging round trips.
+            "lof_config_error": lof_config_error,
             "lof_clusters_total": 0,
             "lof_clusters_ran": 0,
             "lof_clusters_skipped_too_small": 0,
@@ -973,6 +996,15 @@ def flag_anomalies(
         }
         meta.update(extra)
         return meta
+
+    lof_enabled = bool(cfg.get("lof_enabled", True))
+    lof_config_error = _validate_lof_config(cfg) if lof_enabled else None
+    if lof_config_error is not None:
+        logger.error(
+            "flag_anomalies: invalid LOF config — %s. LOF stage 2 will be "
+            "disabled for this run wherever it would otherwise run.",
+            lof_config_error,
+        )
 
     if not _HDBSCAN_AVAILABLE:
         logger.warning(
@@ -1003,78 +1035,74 @@ def flag_anomalies(
     # ── Stage 2: LOF fitted separately within each HDBSCAN cluster ─────────
     lof_meta = _lof_meta("not_attempted")
 
-    if not cfg.get("lof_enabled", True):
+    if not lof_enabled:
         lof_meta["lof_status"] = "disabled"
         logger.info("flag_anomalies: LOF stage disabled (clustering.lof_enabled=False).")
+    elif lof_config_error is not None:
+        lof_meta["lof_status"] = f"invalid_config: {lof_config_error}"
     else:
-        config_error = _validate_lof_config(cfg)
-        if config_error is not None:
-            lof_meta["lof_status"] = f"invalid_config: {config_error}"
-            logger.error(
-                "flag_anomalies: invalid LOF config — %s. Disabling LOF "
-                "stage for this run; is_global_anomaly is unaffected.",
-                config_error,
+        cluster_ids = sorted(c for c in np.unique(hdb_labels) if c != HDBSCAN_NOISE_LABEL)
+        min_cluster_population = int(cfg.get("lof_min_cluster_population", 5))
+        n_neighbors_cfg = int(cfg.get("lof_n_neighbors", 20))
+        contamination = cfg.get("lof_contamination", "auto")
+        lof_meta["lof_clusters_total"] = len(cluster_ids)
+
+        if not cluster_ids:
+            lof_meta["lof_status"] = "skipped_no_clusters"
+            logger.info(
+                "flag_anomalies: no non-noise HDBSCAN clusters — "
+                "skipping LOF stage."
             )
         else:
-            cluster_ids = sorted(c for c in np.unique(hdb_labels) if c != HDBSCAN_NOISE_LABEL)
-            min_cluster_population = int(cfg.get("lof_min_cluster_population", 5))
-            n_neighbors_cfg = int(cfg.get("lof_n_neighbors", 20))
-            contamination = cfg.get("lof_contamination", "auto")
-            lof_meta["lof_clusters_total"] = len(cluster_ids)
+            for cid in cluster_ids:
+                cluster_local_mask = hdb_labels == cid
+                n_cluster = int(cluster_local_mask.sum())
 
-            if not cluster_ids:
-                lof_meta["lof_status"] = "skipped_no_clusters"
-                logger.info(
-                    "flag_anomalies: no non-noise HDBSCAN clusters — "
-                    "skipping LOF stage."
-                )
+                if n_cluster < min_cluster_population:
+                    lof_meta["lof_clusters_skipped_too_small"] += 1
+                    lof_meta["lof_skipped_cluster_sizes"][int(cid)] = n_cluster
+                    continue
+
+                n_neighbors = max(1, min(n_neighbors_cfg, n_cluster - 1))
+                cluster_index = active_index[cluster_local_mask]
+                try:
+                    lof = LocalOutlierFactor(
+                        n_neighbors=n_neighbors, contamination=contamination
+                    )
+                    X_cluster = X_pca_active[cluster_local_mask]
+                    lof_pred = lof.fit_predict(X_cluster)  # -1 = outlier, 1 = inlier
+
+                    out.loc[cluster_index, "is_local_anomaly"] = lof_pred == LOF_OUTLIER_LABEL
+                    out.loc[cluster_index, "lof_score"] = lof.negative_outlier_factor_
+                    lof_meta["lof_clusters_ran"] += 1
+
+                    logger.info(
+                        "flag_anomalies: LOF flagged %d/%d agent(s) as local "
+                        "anomalies in HDBSCAN cluster %s (n_neighbors=%d).",
+                        int((lof_pred == LOF_OUTLIER_LABEL).sum()),
+                        n_cluster,
+                        cid,
+                        n_neighbors,
+                    )
+                except Exception as exc:  # noqa: BLE001 — must never block capacity_tier
+                    lof_meta["lof_clusters_failed"] += 1
+                    lof_meta["lof_cluster_errors"][int(cid)] = str(exc)
+                    logger.error(
+                        "flag_anomalies: LOF failed on HDBSCAN cluster %s "
+                        "(n=%d) — %s. is_local_anomaly stays False for "
+                        "this cluster; is_global_anomaly is unaffected.",
+                        cid, n_cluster, exc,
+                    )
+
+            ran, failed = lof_meta["lof_clusters_ran"], lof_meta["lof_clusters_failed"]
+            if ran > 0 and failed > 0:
+                lof_meta["lof_status"] = "ran_with_failures"
+            elif ran > 0:
+                lof_meta["lof_status"] = "ran"
+            elif failed > 0:
+                lof_meta["lof_status"] = "failed"
             else:
-                for cid in cluster_ids:
-                    cluster_local_mask = hdb_labels == cid
-                    n_cluster = int(cluster_local_mask.sum())
-
-                    if n_cluster < min_cluster_population:
-                        lof_meta["lof_clusters_skipped_too_small"] += 1
-                        lof_meta["lof_skipped_cluster_sizes"][int(cid)] = n_cluster
-                        continue
-
-                    n_neighbors = max(1, min(n_neighbors_cfg, n_cluster - 1))
-                    cluster_index = active_index[cluster_local_mask]
-                    try:
-                        lof = LocalOutlierFactor(
-                            n_neighbors=n_neighbors, contamination=contamination
-                        )
-                        X_cluster = X_pca_active[cluster_local_mask]
-                        lof_pred = lof.fit_predict(X_cluster)  # -1 = outlier, 1 = inlier
-
-                        out.loc[cluster_index, "is_local_anomaly"] = lof_pred == LOF_OUTLIER_LABEL
-                        out.loc[cluster_index, "lof_score"] = lof.negative_outlier_factor_
-                        lof_meta["lof_clusters_ran"] += 1
-
-                        logger.info(
-                            "flag_anomalies: LOF flagged %d/%d agent(s) as local "
-                            "anomalies in HDBSCAN cluster %s (n_neighbors=%d).",
-                            int((lof_pred == LOF_OUTLIER_LABEL).sum()),
-                            n_cluster,
-                            cid,
-                            n_neighbors,
-                        )
-                    except Exception as exc:  # noqa: BLE001 — must never block capacity_tier
-                        lof_meta["lof_clusters_failed"] += 1
-                        lof_meta["lof_cluster_errors"][int(cid)] = str(exc)
-                        logger.error(
-                            "flag_anomalies: LOF failed on HDBSCAN cluster %s "
-                            "(n=%d) — %s. is_local_anomaly stays False for "
-                            "this cluster; is_global_anomaly is unaffected.",
-                            cid, n_cluster, exc,
-                        )
-
-                if lof_meta["lof_clusters_ran"] > 0:
-                    lof_meta["lof_status"] = "ran"
-                elif lof_meta["lof_clusters_failed"] > 0:
-                    lof_meta["lof_status"] = "failed"
-                else:
-                    lof_meta["lof_status"] = "skipped_all_clusters_too_small"
+                lof_meta["lof_status"] = "skipped_all_clusters_too_small"
 
     out.attrs["lof_meta"] = lof_meta
     out["is_anomaly"] = out["is_global_anomaly"] | out["is_local_anomaly"]
