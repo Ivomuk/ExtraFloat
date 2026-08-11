@@ -35,8 +35,9 @@ install:
 # ── Phase 0: Calibrate the capacity scorecard ────────────────────────────────
 calibrate:
 	python calibrate_scorecard.py \
-		--input-file    $(TRANSACTION_FILE) \
-		--output-path   $(SCORECARD_PATH)
+		--agents  $(TRANSACTION_FILE) \
+		--out     $(SCORECARD_PATH) \
+		--force
 
 # ── Phase 1: Train the PD model ─────────────────────────────────────────────
 train:
