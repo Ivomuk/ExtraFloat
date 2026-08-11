@@ -23,7 +23,7 @@ FAIL = "✗ FAIL"
 
 
 def check(label: str, mask: pd.Series, df: pd.DataFrame, show_cols: list[str]) -> bool:
-    violations = df[mask]
+    violations = df[mask.values]
     n = len(violations)
     if n == 0:
         print(f"  {PASS}  {label}")
