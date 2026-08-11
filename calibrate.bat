@@ -2,6 +2,7 @@
 python calibrate_scorecard.py ^
     --agents data/agent_profile_snapshot.csv ^
     --out scorecards/capacity_scorecard_v1.json ^
+    --final ^
     --force
 
 if %ERRORLEVEL% neq 0 (
