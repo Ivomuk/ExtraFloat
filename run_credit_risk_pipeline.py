@@ -290,14 +290,27 @@ def run_credit_risk_pipeline(
     try:
         seg_df = run_extrafloat_segmentation(df_agent, config=seg_config)
         seg_cols = ["agent_msisdn"] + [
-            c for c in ("capacity_score", "capacity_tier", "capacity_tier_raw", "capacity_safety_flags")
+            c for c in (
+                "capacity_score",
+                "capacity_tier",
+                "capacity_tier_raw",
+                "capacity_safety_flags",
+                # Anomaly flags: independent of capacity_tier; an agent can be
+                # Gold + is_anomaly=True simultaneously. Never changes tier.
+                "is_anomaly",
+                "is_global_anomaly",
+                "is_local_anomaly",
+                "lof_score",
+            )
             if c in seg_df.columns
         ]
         seg_out = seg_df[seg_cols].copy()
+        n_anomalies = int(seg_out["is_anomaly"].sum()) if "is_anomaly" in seg_out.columns else 0
         logger.info(
-            "Segmentation complete: %d agents | capacity_tier distribution: %s",
+            "Segmentation complete: %d agents | capacity_tier distribution: %s | anomalies: %d",
             len(seg_out),
             seg_out["capacity_tier"].value_counts().to_dict() if "capacity_tier" in seg_out.columns else "n/a",
+            n_anomalies,
         )
     except ValueError as exc:
         logger.warning(
@@ -528,7 +541,7 @@ def main(argv=None):
         logger.info("Output written to %s (%d rows, %d columns)", out_path, len(result), len(result.columns))
 
     # Always print a screen summary regardless of whether --output was given
-    preview_cols = ["msisdn", "assigned_limit", "risk_tier", "cal_pd", "thin_file_flag", "capacity_tier", "final_decision_reason", "score_source"]
+    preview_cols = ["msisdn", "assigned_limit", "risk_tier", "cal_pd", "thin_file_flag", "capacity_tier", "is_anomaly", "final_decision_reason", "score_source"]
     display = result[[c for c in preview_cols if c in result.columns]]
     print("\n=== Credit Risk Pipeline Output ===")
     print(f"Agents scored: {len(display)}")
