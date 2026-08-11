@@ -456,6 +456,38 @@ def _collect_alerts(df: pd.DataFrame) -> list[dict[str, Any]]:
             ),
         })
 
+    lof_status = str(anomaly_report.get("lof_status", ""))
+    if lof_status == "failed_unexpectedly":
+        alerts.append({
+            "severity": "critical",
+            "source": "anomaly_detection",
+            "message": (
+                f"Anomaly detection failed unexpectedly this run: "
+                f"{anomaly_report.get('error')}. capacity_tier is "
+                f"unaffected; no anomaly columns were produced."
+            ),
+        })
+    elif lof_status.startswith("invalid_config"):
+        alerts.append({
+            "severity": "critical",
+            "source": "lof_config",
+            "message": (
+                f"LOF stage-2 anomaly detection disabled due to invalid "
+                f"config: {lof_status}. is_global_anomaly (stage 1) is "
+                f"unaffected; fix clustering.lof_* settings."
+            ),
+        })
+    if anomaly_report.get("lof_clusters_failed", 0) > 0:
+        alerts.append({
+            "severity": "warning",
+            "source": "lof_runtime",
+            "message": (
+                f"LOF failed on {anomaly_report['lof_clusters_failed']} "
+                f"HDBSCAN cluster(s) this run — is_local_anomaly stays "
+                f"False there. See anomaly_report['lof_cluster_errors']."
+            ),
+        })
+
     quality_gate = df.attrs.get("quality_gate") or {}
     if quality_gate and not quality_gate.get("skipped") and not quality_gate.get("passed", True):
         failed = [name for name, c in quality_gate.get("checks", {}).items() if not c["passed"]]
@@ -730,41 +762,71 @@ def run_extrafloat_segmentation(
     # ── Step 2b: Anomaly Detection (default on, lightweight, two-stage) ──────
     # Independent of both capacity scoring succeeding and diagnostics being
     # enabled — stage 1 (HDBSCAN, no GMM/UMAP) flags global anomalies; stage
-    # 2 (LOF, clustering.lof_enabled) refines only the HDBSCAN survivors for
-    # subtler local anomalies. Cheap enough to run on every production run.
-    # Degrades gracefully (is_anomaly=False) rather than raising when
-    # hdbscan isn't installed; see flag_anomalies().
+    # 2 (LOF, clustering.lof_enabled) refines within each HDBSCAN cluster
+    # separately for subtler local anomalies. Cheap enough to run on every
+    # production run. flag_anomalies() itself degrades gracefully when
+    # hdbscan is missing and catches per-cluster LOF failures internally —
+    # the try/except below is the last line of defense: capacity_tier has
+    # already been computed above by this point, and no failure in this
+    # auxiliary signal may ever cost the caller that result.
     if clustering_cfg.get("enable_anomaly_detection", True):
         logger.info("run_extrafloat_segmentation: step 2b — anomaly detection.")
-        anomaly_df = flag_anomalies(
-            features_df=features_df,
-            selected_cols=selected_cols,
-            active_mask=~is_dormant,
-            config=clustering_cfg,
-        )
-        features_df = _concat_preserving_attrs(features_df, anomaly_df)
-
-        n_active = int((~is_dormant).sum())
-        n_anomalies = int(features_df["is_anomaly"].sum())
-        n_global_anomalies = int(features_df["is_global_anomaly"].sum())
-        n_local_anomalies = int(features_df["is_local_anomaly"].sum())
-        features_df.attrs["anomaly_report"] = {
-            # Read via the module (not a bound `from ... import`) so this
-            # reflects monkeypatched/runtime availability, matching how
-            # flag_anomalies() itself checks it.
-            "hdbscan_available": bool(_segmentation_pipeline_module._HDBSCAN_AVAILABLE),
-            "lof_enabled": bool(clustering_cfg.get("lof_enabled", True)),
-            "n_active": n_active,
-            "n_anomalies": n_anomalies,
-            "n_global_anomalies": n_global_anomalies,
-            "n_local_anomalies": n_local_anomalies,
-            "anomaly_rate": (n_anomalies / n_active) if n_active > 0 else float("nan"),
-        }
-        if not features_df.attrs["anomaly_report"]["hdbscan_available"]:
-            logger.warning(
-                "run_extrafloat_segmentation: step 2b — hdbscan not "
-                "installed; is_anomaly defaulted to False for all agents."
+        try:
+            anomaly_df = flag_anomalies(
+                features_df=features_df,
+                selected_cols=selected_cols,
+                active_mask=~is_dormant,
+                config=clustering_cfg,
             )
+            lof_meta = anomaly_df.attrs.get("lof_meta", {})
+            features_df = _concat_preserving_attrs(features_df, anomaly_df)
+
+            n_active = int((~is_dormant).sum())
+            n_anomalies = int(features_df["is_anomaly"].sum())
+            n_global_anomalies = int(features_df["is_global_anomaly"].sum())
+            n_local_anomalies = int(features_df["is_local_anomaly"].sum())
+            features_df.attrs["anomaly_report"] = {
+                # Read via the module (not a bound `from ... import`) so this
+                # reflects monkeypatched/runtime availability, matching how
+                # flag_anomalies() itself checks it.
+                "hdbscan_available": bool(_segmentation_pipeline_module._HDBSCAN_AVAILABLE),
+                "lof_enabled": bool(clustering_cfg.get("lof_enabled", True)),
+                # lof_enabled is just the config toggle. lof_status is what
+                # actually happened this run ("ran" / "disabled" /
+                # "skipped_..." / "invalid_config: ..." / "failed") — a run
+                # can have lof_enabled=True and still never have executed
+                # LOF (e.g. every cluster below lof_min_cluster_population).
+                "lof_status": lof_meta.get("lof_status", "unknown"),
+                "lof_clusters_total": lof_meta.get("lof_clusters_total", 0),
+                "lof_clusters_ran": lof_meta.get("lof_clusters_ran", 0),
+                "lof_clusters_skipped_too_small": lof_meta.get("lof_clusters_skipped_too_small", 0),
+                "lof_clusters_failed": lof_meta.get("lof_clusters_failed", 0),
+                "lof_skipped_cluster_sizes": lof_meta.get("lof_skipped_cluster_sizes", {}),
+                "lof_cluster_errors": lof_meta.get("lof_cluster_errors", {}),
+                "n_active": n_active,
+                "n_anomalies": n_anomalies,
+                "n_global_anomalies": n_global_anomalies,
+                "n_local_anomalies": n_local_anomalies,
+                "anomaly_rate": (n_anomalies / n_active) if n_active > 0 else float("nan"),
+            }
+            if not features_df.attrs["anomaly_report"]["hdbscan_available"]:
+                logger.warning(
+                    "run_extrafloat_segmentation: step 2b — hdbscan not "
+                    "installed; is_anomaly defaulted to False for all agents."
+                )
+        except Exception as exc:  # noqa: BLE001 — must never block capacity_tier
+            logger.error(
+                "run_extrafloat_segmentation: step 2b — anomaly detection "
+                "failed unexpectedly (%s). capacity_tier is unaffected; "
+                "continuing without anomaly columns for this run.",
+                exc,
+            )
+            features_df.attrs["anomaly_report"] = {
+                "hdbscan_available": bool(_segmentation_pipeline_module._HDBSCAN_AVAILABLE),
+                "lof_enabled": bool(clustering_cfg.get("lof_enabled", True)),
+                "lof_status": "failed_unexpectedly",
+                "error": str(exc),
+            }
     else:
         logger.info(
             "run_extrafloat_segmentation: step 2b — anomaly detection "

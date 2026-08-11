@@ -230,21 +230,52 @@ Required input columns are listed in `extrafloat_segmentation_features.REQUIRED_
   raw PCA space. Stage 1 runs HDBSCAN over all active agents and flags
   agents that don't resemble any dense cluster at all
   (`is_global_anomaly`). Stage 2 runs Local Outlier Factor
-  (`sklearn.neighbors.LocalOutlierFactor`), but only over the agents
-  HDBSCAN placed *inside* a cluster — it re-examines each agent against its
-  local neighborhood density to catch subtler anomalies that blend into a
-  cluster globally but stand out locally (`is_local_anomaly`, plus the
-  continuous `lof_score`, more negative = more anomalous, `NaN` for agents
-  LOF didn't run on). `is_anomaly` is the OR of both stages. Reusing
-  HDBSCAN's own output to scope stage 2 means LOF only ever runs on the
-  subset that needs it, not the whole active population. `clustering.lof_enabled`
+  (`sklearn.neighbors.LocalOutlierFactor`) *separately within each* HDBSCAN
+  cluster — never pooled across clusters — re-examining each agent against
+  its own cluster's local neighborhood density to catch subtler anomalies
+  that blend in globally but stand out locally (`is_local_anomaly`, plus
+  the continuous `lof_score`, more negative = more anomalous, `NaN` for
+  agents LOF didn't run on). `is_anomaly` is the OR of both stages. Fitting
+  one LOF model per cluster (rather than one model over every in-cluster
+  agent combined) keeps "local" honest — a small or sparse cluster's
+  members are judged against their own neighbors, never against a larger
+  or differently-dense neighboring cluster. `clustering.lof_enabled`
   (default `True`) turns off stage 2 alone, leaving stage 1 unaffected;
-  `clustering.lof_n_neighbors` (default `20`, clamped down for tiny
-  in-cluster groups) and `clustering.lof_contamination` (default `"auto"`,
-  scikit-learn's fixed-offset heuristic, not data-fit) tune it. If fewer
-  than 2 agents land in a cluster, stage 2 is skipped for that run rather
-  than raising. Unlike the full diagnostics bundle below, a missing
-  `hdbscan` install degrades the whole check gracefully — every one of
+  `clustering.lof_n_neighbors` (default `20`, clamped down for small
+  clusters), `clustering.lof_contamination` (default `"auto"`, scikit-learn's
+  fixed-offset heuristic, not data-fit), and `clustering.lof_min_cluster_population`
+  (default `5`) tune it. Clusters smaller than `lof_min_cluster_population`
+  are skipped for stage 2 — not silently dropped: their sizes are recorded
+  in `result.attrs["anomaly_report"]["lof_skipped_cluster_sizes"]`.
+
+  Three independent layers keep this stage from ever blocking
+  `capacity_tier`, which by the time step 2b runs has already been
+  computed: (1) `lof_n_neighbors`/`lof_contamination`/
+  `lof_min_cluster_population` are validated before they ever reach
+  scikit-learn — an invalid value disables stage 2 for the run (stage 1 is
+  unaffected) and raises a `critical` alert (`source="lof_config"`) instead
+  of an opaque sklearn exception; (2) each cluster's LOF fit is wrapped
+  individually, so a numerical failure on one cluster doesn't stop LOF from
+  running on the others — failures are counted in
+  `anomaly_report["lof_clusters_failed"]` and raise a `warning` alert
+  (`source="lof_runtime"`); (3) the whole step is wrapped one more time in
+  orchestration as a last line of defense — if something still fails
+  unexpectedly, `capacity_tier` is returned regardless, anomaly columns are
+  simply absent for that run, and a `critical` alert
+  (`source="anomaly_detection"`) is raised.
+
+  Because `clustering.lof_enabled=True` only reflects the config toggle,
+  not whether stage 2 actually ran (a cluster can be too small, HDBSCAN can
+  find no clusters at all, or the config can be invalid),
+  `anomaly_report["lof_status"]` records the real outcome —
+  `"ran"` / `"disabled"` / `"skipped_no_clusters"` /
+  `"skipped_all_clusters_too_small"` / `"invalid_config: ..."` / `"failed"`
+  / `"failed_unexpectedly"` — alongside `lof_clusters_total` /
+  `lof_clusters_ran` / `lof_clusters_skipped_too_small` /
+  `lof_clusters_failed`.
+
+  Unlike the full diagnostics bundle below, a missing `hdbscan` install
+  degrades the whole check gracefully — every one of
   `is_anomaly`/`is_global_anomaly`/`is_local_anomaly` defaults to `False`
   and `lof_score` to `NaN` for every agent, with
   `result.attrs["anomaly_report"]["hdbscan_available"]` set to `False` and
@@ -387,5 +418,8 @@ above and the per-KPI normalization described under
   threshold, which doesn't exist yet.
 - LOF's `contamination="auto"` (stage 2 of anomaly detection) uses
   scikit-learn's fixed literature offset rather than a value fit to this
-  population, and `lof_n_neighbors=20` has not been tuned against real
-  cluster sizes — both are reasonable defaults, not calibrated ones.
+  population, and `lof_n_neighbors=20`/`lof_min_cluster_population=5` have
+  not been tuned against real cluster sizes — all three are reasonable
+  defaults, not calibrated ones. (They are, at least, validated —
+  `_validate_lof_config` rejects out-of-range values before they reach
+  scikit-learn rather than tuning them well.)

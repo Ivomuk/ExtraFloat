@@ -98,25 +98,35 @@ DEFAULT_CLUSTERING_CONFIG: dict[str, Any] = {
     # the full GMM/HDBSCAN diagnostics bundle (archetype research, plus a
     # second, UMAP-space anomaly signal: diag_is_anomaly) alongside.
     "enable_diagnostics": False,
-    # When True (default), flag_anomalies runs on every production run —
-    # HDBSCAN only (no GMM, no UMAP) directly on the same PCA space used
-    # elsewhere in this module, cheap enough to run unconditionally. Unlike
-    # enable_diagnostics, a missing hdbscan install degrades gracefully
-    # here (is_anomaly=False) rather than raising. See flag_anomalies().
+    # When True (default), flag_anomalies runs on every production run — a
+    # two-stage filter (HDBSCAN global pass, then LOF local refinement, see
+    # below) directly on the same PCA space used elsewhere in this module,
+    # cheap enough to run unconditionally. Unlike enable_diagnostics, a
+    # missing hdbscan install degrades gracefully here (is_anomaly=False)
+    # rather than raising. See flag_anomalies().
     "enable_anomaly_detection": True,
     # ── LOF stage 2 (two-stage anomaly filter) ──────────────────────────────
     # flag_anomalies runs HDBSCAN first as a coarse global filter
-    # (is_global_anomaly), then — only on the agents HDBSCAN actually
-    # placed in a cluster, not the full active population — runs Local
-    # Outlier Factor to catch subtler local anomalies within an otherwise
-    # dense cluster (is_local_anomaly). Restricting LOF to the HDBSCAN
-    # survivor subset is what keeps this a "filter" rather than doubling
-    # the cost of anomaly detection outright. scikit-learn is already a
-    # hard dependency of this whole package, so this stage needs no
-    # optional-dependency guard the way HDBSCAN/UMAP do.
+    # (is_global_anomaly), then — separately *within each* HDBSCAN cluster,
+    # not pooled across clusters — runs Local Outlier Factor to catch
+    # subtler local anomalies within an otherwise dense cluster
+    # (is_local_anomaly). Fitting one LOF model per cluster (rather than one
+    # model over the union of all clusters) keeps "local" honest: an agent's
+    # neighborhood is always its own cluster, never contaminated by a
+    # larger or denser neighboring cluster. scikit-learn is already a hard
+    # dependency of this whole package, so this stage needs no
+    # optional-dependency guard the way HDBSCAN/UMAP do — but it does need
+    # to never let a bad config or a numerical edge case block
+    # capacity_tier, so both config validation and the per-cluster fit are
+    # wrapped defensively; see _validate_lof_config() and flag_anomalies().
     "lof_enabled": True,
     "lof_n_neighbors": 20,
     "lof_contamination": "auto",
+    # Clusters smaller than this are skipped for stage 2 (recorded, not
+    # silently dropped — see anomaly_report's lof_skipped_cluster_sizes).
+    # A 2-3 point "neighborhood" produces a technically-computable but not
+    # statistically meaningful LOF score.
+    "lof_min_cluster_population": 5,
     # ── Dormant detection (multi-product composite inactivity score) ──────────
     "dormant_inactivity_cols": [
         "cash_out_vol_1m",
@@ -225,6 +235,45 @@ def _check_optional_dependencies(cfg: dict[str, Any]) -> dict[str, bool]:
             "PCA-scaled column slice instead of a UMAP embedding)."
         )
     return status
+
+
+def _validate_lof_config(cfg: dict[str, Any]) -> str | None:
+    """Validate the LOF stage-2 settings before they reach scikit-learn.
+
+    Returns
+    -------
+    None if valid, otherwise a human-readable description of the problem.
+
+    Turns an opaque sklearn `ValueError` deep inside `flag_anomalies` into
+    an actionable message the caller can log/alert on. Deliberately never
+    raises itself — anomaly detection is an auxiliary signal and must never
+    block `capacity_tier`; the caller decides how to react to an invalid
+    config (disable stage 2 for the run, emit a critical alert), it never
+    aborts the pipeline. See flag_anomalies().
+    """
+    n_neighbors = cfg.get("lof_n_neighbors", 20)
+    if isinstance(n_neighbors, bool) or not isinstance(n_neighbors, int) or n_neighbors <= 0:
+        return f"lof_n_neighbors must be a positive int, got {n_neighbors!r}"
+
+    contamination = cfg.get("lof_contamination", "auto")
+    if contamination != "auto":
+        if isinstance(contamination, bool) or not isinstance(contamination, (int, float)):
+            return (
+                "lof_contamination must be 'auto' or a finite float in "
+                f"(0, 0.5], got {contamination!r}"
+            )
+        contamination = float(contamination)
+        if not np.isfinite(contamination) or not (0.0 < contamination <= 0.5):
+            return (
+                "lof_contamination must be 'auto' or a finite float in "
+                f"(0, 0.5], got {contamination!r}"
+            )
+
+    min_pop = cfg.get("lof_min_cluster_population", 5)
+    if isinstance(min_pop, bool) or not isinstance(min_pop, int) or min_pop < 2:
+        return f"lof_min_cluster_population must be an int >= 2, got {min_pop!r}"
+
+    return None
 
 
 def _identify_dormant_mask(
@@ -830,7 +879,7 @@ def flag_anomalies(
     active_mask: pd.Series,
     config: dict | None = None,
 ) -> pd.DataFrame:
-    """Two-stage anomaly filter: HDBSCAN global pass, then LOF local refinement.
+    """Two-stage anomaly filter: HDBSCAN global pass, then per-cluster LOF refinement.
 
     Stage 1 (HDBSCAN, dependency-graceful) runs alone — no GMM, no UMAP —
     directly on the same PCA space (`_get_active_pca`) used elsewhere in
@@ -842,17 +891,24 @@ def flag_anomalies(
     False, which additionally runs GMM + UMAP and computes its own,
     differently-embedded anomaly signal, `diag_is_anomaly`).
 
-    Stage 2 (LOF, `clustering.lof_enabled`, default True) runs Local
-    Outlier Factor — but only on the agents stage 1 actually placed inside
-    an HDBSCAN cluster, not the full active population — to catch subtler
-    *local* anomalies: agents that look unremarkable globally but are
-    still off relative to their immediate cluster neighborhood
-    (`is_local_anomaly`). Restricting LOF to the HDBSCAN-survivor subset
-    is what keeps this a two-stage *filter* rather than doubling the cost
-    of anomaly detection outright. scikit-learn is already a hard
-    dependency of this package (unlike hdbscan/umap-learn), so stage 2
-    needs no optional-dependency guard — it simply doesn't run if stage 1
-    didn't (no hdbscan) or left too few in-cluster agents to be meaningful.
+    Stage 2 (LOF, `clustering.lof_enabled`, default True) runs Local Outlier
+    Factor separately *within each* HDBSCAN cluster — never pooled across
+    clusters — to catch subtler *local* anomalies: agents that look
+    unremarkable globally but are still off relative to their immediate
+    cluster neighborhood (`is_local_anomaly`). Fitting one LOF model per
+    cluster (rather than one model over the union of all in-cluster agents)
+    is what keeps "local" honest: a small, tight cluster's members are never
+    compared against a larger or differently-dense neighboring cluster.
+    Clusters smaller than `clustering.lof_min_cluster_population` (default
+    5) are skipped — recorded, not silently dropped, in the returned
+    `lof_meta` attrs — since a 2-3 point neighborhood isn't statistically
+    meaningful. scikit-learn is already a hard dependency of this package
+    (unlike hdbscan/umap-learn), so stage 2 needs no optional-dependency
+    guard, but both the config and each per-cluster fit are defensively
+    guarded (see `_validate_lof_config` and the try/except below) — a bad
+    `lof_contamination`, a degenerate cluster, or any other sklearn failure
+    must never propagate out of this function and block `capacity_tier`,
+    which by the time this runs has already been computed upstream.
 
     `is_anomaly` (the column production code should read by default) is
     the OR of both stages — flagged if either algorithm flags it.
@@ -884,12 +940,18 @@ def flag_anomalies(
         is_local_anomaly        : bool, True for LOF-flagged outliers
                                    among agents that landed in an HDBSCAN
                                    cluster (stage 2); always False when
-                                   stage 2 didn't run.
+                                   stage 2 didn't run for that agent's
+                                   cluster.
         anomaly_cluster_hdb_raw : Int64, raw HDBSCAN label (pd.NA for
                                    dormant agents / when hdbscan unavailable).
         lof_score               : float, LOF's `negative_outlier_factor_`
                                    (more negative = more anomalous), NaN
                                    wherever stage 2 didn't run for that agent.
+    Also sets `out.attrs["lof_meta"]`, a dict describing what stage 2
+    actually did this run (see the inline comments below for keys) —
+    consumed by `run_extrafloat_segmentation` to populate
+    `anomaly_report`'s `lof_status` and related fields, since
+    `clustering.lof_enabled=True` on its own does not mean LOF ran.
     """
     cfg = _get_clustering_config(config)
 
@@ -898,6 +960,19 @@ def flag_anomalies(
     out["is_local_anomaly"] = False
     out["anomaly_cluster_hdb_raw"] = pd.array([pd.NA] * len(features_df), dtype="Int64")
     out["lof_score"] = np.nan
+
+    def _lof_meta(status: str, **extra: Any) -> dict[str, Any]:
+        meta = {
+            "lof_status": status,
+            "lof_clusters_total": 0,
+            "lof_clusters_ran": 0,
+            "lof_clusters_skipped_too_small": 0,
+            "lof_clusters_failed": 0,
+            "lof_skipped_cluster_sizes": {},
+            "lof_cluster_errors": {},
+        }
+        meta.update(extra)
+        return meta
 
     if not _HDBSCAN_AVAILABLE:
         logger.warning(
@@ -908,11 +983,13 @@ def flag_anomalies(
             "silence this warning."
         )
         out["is_anomaly"] = False
+        out.attrs["lof_meta"] = _lof_meta("skipped_hdbscan_unavailable")
         return out
 
     if active_mask.sum() == 0:
         logger.info("flag_anomalies: no active agents — nothing to flag.")
         out["is_anomaly"] = False
+        out.attrs["lof_meta"] = _lof_meta("skipped_no_active_agents")
         return out
 
     rng = np.random.RandomState(cfg["random_state"])
@@ -923,42 +1000,83 @@ def flag_anomalies(
     out.loc[active_index, "anomaly_cluster_hdb_raw"] = hdb_labels
     out.loc[active_index, "is_global_anomaly"] = hdb_labels == HDBSCAN_NOISE_LABEL
 
-    # ── Stage 2: LOF on HDBSCAN survivors only ────────────────────────────
-    min_required_for_lof = 2
-    if cfg.get("lof_enabled", True):
-        in_cluster_local_mask = hdb_labels != HDBSCAN_NOISE_LABEL
-        n_in_cluster = int(in_cluster_local_mask.sum())
+    # ── Stage 2: LOF fitted separately within each HDBSCAN cluster ─────────
+    lof_meta = _lof_meta("not_attempted")
 
-        if n_in_cluster >= min_required_for_lof:
-            n_neighbors = max(1, min(int(cfg.get("lof_n_neighbors", 20)), n_in_cluster - 1))
-            lof = LocalOutlierFactor(
-                n_neighbors=n_neighbors,
-                contamination=cfg.get("lof_contamination", "auto"),
-            )
-            X_in_cluster = X_pca_active[in_cluster_local_mask]
-            lof_pred = lof.fit_predict(X_in_cluster)  # -1 = outlier, 1 = inlier
-
-            in_cluster_index = active_index[in_cluster_local_mask]
-            out.loc[in_cluster_index, "is_local_anomaly"] = lof_pred == LOF_OUTLIER_LABEL
-            out.loc[in_cluster_index, "lof_score"] = lof.negative_outlier_factor_
-
-            logger.info(
-                "flag_anomalies: LOF stage flagged %d/%d in-cluster agent(s) "
-                "as local anomalies (n_neighbors=%d).",
-                int((lof_pred == LOF_OUTLIER_LABEL).sum()),
-                n_in_cluster,
-                n_neighbors,
+    if not cfg.get("lof_enabled", True):
+        lof_meta["lof_status"] = "disabled"
+        logger.info("flag_anomalies: LOF stage disabled (clustering.lof_enabled=False).")
+    else:
+        config_error = _validate_lof_config(cfg)
+        if config_error is not None:
+            lof_meta["lof_status"] = f"invalid_config: {config_error}"
+            logger.error(
+                "flag_anomalies: invalid LOF config — %s. Disabling LOF "
+                "stage for this run; is_global_anomaly is unaffected.",
+                config_error,
             )
         else:
-            logger.info(
-                "flag_anomalies: only %d in-cluster agent(s) after HDBSCAN — "
-                "skipping LOF stage (needs >= %d).",
-                n_in_cluster,
-                min_required_for_lof,
-            )
-    else:
-        logger.info("flag_anomalies: LOF stage disabled (clustering.lof_enabled=False).")
+            cluster_ids = sorted(c for c in np.unique(hdb_labels) if c != HDBSCAN_NOISE_LABEL)
+            min_cluster_population = int(cfg.get("lof_min_cluster_population", 5))
+            n_neighbors_cfg = int(cfg.get("lof_n_neighbors", 20))
+            contamination = cfg.get("lof_contamination", "auto")
+            lof_meta["lof_clusters_total"] = len(cluster_ids)
 
+            if not cluster_ids:
+                lof_meta["lof_status"] = "skipped_no_clusters"
+                logger.info(
+                    "flag_anomalies: no non-noise HDBSCAN clusters — "
+                    "skipping LOF stage."
+                )
+            else:
+                for cid in cluster_ids:
+                    cluster_local_mask = hdb_labels == cid
+                    n_cluster = int(cluster_local_mask.sum())
+
+                    if n_cluster < min_cluster_population:
+                        lof_meta["lof_clusters_skipped_too_small"] += 1
+                        lof_meta["lof_skipped_cluster_sizes"][int(cid)] = n_cluster
+                        continue
+
+                    n_neighbors = max(1, min(n_neighbors_cfg, n_cluster - 1))
+                    cluster_index = active_index[cluster_local_mask]
+                    try:
+                        lof = LocalOutlierFactor(
+                            n_neighbors=n_neighbors, contamination=contamination
+                        )
+                        X_cluster = X_pca_active[cluster_local_mask]
+                        lof_pred = lof.fit_predict(X_cluster)  # -1 = outlier, 1 = inlier
+
+                        out.loc[cluster_index, "is_local_anomaly"] = lof_pred == LOF_OUTLIER_LABEL
+                        out.loc[cluster_index, "lof_score"] = lof.negative_outlier_factor_
+                        lof_meta["lof_clusters_ran"] += 1
+
+                        logger.info(
+                            "flag_anomalies: LOF flagged %d/%d agent(s) as local "
+                            "anomalies in HDBSCAN cluster %s (n_neighbors=%d).",
+                            int((lof_pred == LOF_OUTLIER_LABEL).sum()),
+                            n_cluster,
+                            cid,
+                            n_neighbors,
+                        )
+                    except Exception as exc:  # noqa: BLE001 — must never block capacity_tier
+                        lof_meta["lof_clusters_failed"] += 1
+                        lof_meta["lof_cluster_errors"][int(cid)] = str(exc)
+                        logger.error(
+                            "flag_anomalies: LOF failed on HDBSCAN cluster %s "
+                            "(n=%d) — %s. is_local_anomaly stays False for "
+                            "this cluster; is_global_anomaly is unaffected.",
+                            cid, n_cluster, exc,
+                        )
+
+                if lof_meta["lof_clusters_ran"] > 0:
+                    lof_meta["lof_status"] = "ran"
+                elif lof_meta["lof_clusters_failed"] > 0:
+                    lof_meta["lof_status"] = "failed"
+                else:
+                    lof_meta["lof_status"] = "skipped_all_clusters_too_small"
+
+    out.attrs["lof_meta"] = lof_meta
     out["is_anomaly"] = out["is_global_anomaly"] | out["is_local_anomaly"]
 
     n_anomalies = int(out["is_anomaly"].sum())
@@ -966,11 +1084,12 @@ def flag_anomalies(
     n_local = int(out["is_local_anomaly"].sum())
     logger.info(
         "flag_anomalies: %d/%d active agents flagged as anomalies "
-        "(%d global via HDBSCAN, %d local via LOF).",
+        "(%d global via HDBSCAN, %d local via LOF, lof_status=%s).",
         n_anomalies,
         int(active_mask.sum()),
         n_global,
         n_local,
+        lof_meta["lof_status"],
     )
     return out
 

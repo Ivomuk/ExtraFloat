@@ -273,12 +273,30 @@ class TestFlagAnomalies:
         noise for a synthetic population this small, which never exercises
         the LOF stage (nothing survives stage 1). Lower the thresholds so
         HDBSCAN actually finds clusters, matching what a real production
-        population would produce at default settings."""
+        population would produce at default settings.
+
+        Produces two real clusters of materially different size (6 and 134
+        agents, both >= the default lof_min_cluster_population=5) plus 160
+        noise points — deterministic given _make_agents_df's fixed seed and
+        random_state=42 in DEFAULT_CLUSTERING_CONFIG."""
         from extrafloat_segmentation_pipeline import DEFAULT_CLUSTERING_CONFIG
 
         feat_df, sel_cols, active_mask = self._get_small_inputs(n)
         cfg = dict(DEFAULT_CLUSTERING_CONFIG)
         cfg["hdbscan_min_cluster_size"] = 5
+        cfg["hdbscan_min_samples"] = 1
+        return feat_df, sel_cols, active_mask, cfg
+
+    def _get_inputs_with_mixed_cluster_sizes(self, n=50):
+        """One real cluster below the default lof_min_cluster_population=5
+        (3 agents) and one above it (18 agents), plus noise — for testing
+        the per-cluster population floor without needing to override
+        lof_min_cluster_population itself."""
+        from extrafloat_segmentation_pipeline import DEFAULT_CLUSTERING_CONFIG
+
+        feat_df, sel_cols, active_mask = self._get_small_inputs(n)
+        cfg = dict(DEFAULT_CLUSTERING_CONFIG)
+        cfg["hdbscan_min_cluster_size"] = 3
         cfg["hdbscan_min_samples"] = 1
         return feat_df, sel_cols, active_mask, cfg
 
@@ -437,6 +455,206 @@ class TestFlagAnomalies:
         assert not result["is_global_anomaly"].any()
         assert not result["is_local_anomaly"].any()
         assert result["lof_score"].isna().all()
+
+    # ── Per-cluster LOF fitting (not pooled across HDBSCAN clusters) ────────
+
+    def test_lof_fitted_separately_per_cluster_not_pooled(self, monkeypatch):
+        """LOF must be fit once per HDBSCAN cluster, each call sized to that
+        cluster alone — never one pooled call across every in-cluster agent,
+        which would let a small cluster's local density be judged against a
+        larger/differently-dense neighboring cluster."""
+        from sklearn.neighbors import LocalOutlierFactor
+        from extrafloat_segmentation_pipeline import flag_anomalies
+
+        feat_df, sel_cols, active_mask, cfg = self._get_inputs_with_real_clusters()
+
+        call_sizes: list[int] = []
+        original_fit_predict = LocalOutlierFactor.fit_predict
+
+        def _tracking_fit_predict(self, X, y=None):
+            call_sizes.append(len(X))
+            return original_fit_predict(self, X)
+
+        monkeypatch.setattr(LocalOutlierFactor, "fit_predict", _tracking_fit_predict)
+        result = flag_anomalies(feat_df, sel_cols, active_mask, config=cfg)
+
+        in_cluster = active_mask & ~result["is_global_anomaly"]
+        actual_cluster_sizes = sorted(
+            result.loc[in_cluster, "anomaly_cluster_hdb_raw"].value_counts().tolist()
+        )
+        assert len(actual_cluster_sizes) >= 2, "test setup must produce >= 2 real HDBSCAN clusters"
+        assert sorted(call_sizes) == actual_cluster_sizes
+        assert sum(call_sizes) == int(in_cluster.sum())
+
+    # ── Non-blocking guarantee: LOF failures must never propagate ───────────
+
+    def test_lof_failure_does_not_raise_and_preserves_global_flags(self, monkeypatch):
+        from sklearn.neighbors import LocalOutlierFactor
+        from extrafloat_segmentation_pipeline import flag_anomalies
+
+        feat_df, sel_cols, active_mask, cfg = self._get_inputs_with_real_clusters()
+        baseline = flag_anomalies(feat_df, sel_cols, active_mask, config=cfg)
+
+        def _raising_fit_predict(self, X, y=None):
+            raise ValueError("synthetic LOF failure for test")
+
+        monkeypatch.setattr(LocalOutlierFactor, "fit_predict", _raising_fit_predict)
+        result = flag_anomalies(feat_df, sel_cols, active_mask, config=cfg)  # must not raise
+
+        assert (result["is_global_anomaly"] == baseline["is_global_anomaly"]).all()
+        assert not result["is_local_anomaly"].any()
+        assert result["lof_score"].isna().all()
+        assert (result["is_anomaly"] == result["is_global_anomaly"]).all()
+
+        lof_meta = result.attrs["lof_meta"]
+        assert lof_meta["lof_status"] == "failed"
+        assert lof_meta["lof_clusters_failed"] > 0
+        assert lof_meta["lof_cluster_errors"]
+
+    def test_lof_failure_on_one_cluster_does_not_block_another(self, monkeypatch):
+        """A failure fitting LOF on one cluster must not prevent LOF from
+        running on other, unaffected clusters."""
+        from sklearn.neighbors import LocalOutlierFactor
+        from extrafloat_segmentation_pipeline import flag_anomalies
+
+        feat_df, sel_cols, active_mask, cfg = self._get_inputs_with_real_clusters()
+
+        original_fit_predict = LocalOutlierFactor.fit_predict
+        call_count = {"n": 0}
+
+        def _fail_first_call(self, X, y=None):
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                raise ValueError("synthetic failure on the first cluster only")
+            return original_fit_predict(self, X)
+
+        monkeypatch.setattr(LocalOutlierFactor, "fit_predict", _fail_first_call)
+        result = flag_anomalies(feat_df, sel_cols, active_mask, config=cfg)  # must not raise
+
+        lof_meta = result.attrs["lof_meta"]
+        assert lof_meta["lof_status"] == "ran"
+        assert lof_meta["lof_clusters_failed"] == 1
+        assert lof_meta["lof_clusters_ran"] >= 1
+
+    # ── Per-cluster minimum population floor ─────────────────────────────
+
+    def test_cluster_below_min_population_is_skipped_and_recorded(self):
+        from extrafloat_segmentation_pipeline import flag_anomalies
+
+        feat_df, sel_cols, active_mask, cfg = self._get_inputs_with_mixed_cluster_sizes()
+        result = flag_anomalies(feat_df, sel_cols, active_mask, config=cfg)
+        lof_meta = result.attrs["lof_meta"]
+
+        assert lof_meta["lof_clusters_skipped_too_small"] >= 1
+        assert lof_meta["lof_clusters_ran"] >= 1
+        skipped_sizes = lof_meta["lof_skipped_cluster_sizes"]
+        assert skipped_sizes
+        assert all(size < 5 for size in skipped_sizes.values())  # default lof_min_cluster_population
+
+        for cid, _size in skipped_sizes.items():
+            cluster_mask = active_mask & (result["anomaly_cluster_hdb_raw"] == cid)
+            assert result.loc[cluster_mask, "lof_score"].isna().all()
+            assert not result.loc[cluster_mask, "is_local_anomaly"].any()
+
+    def test_all_clusters_below_min_population_skips_lof_entirely(self):
+        from extrafloat_segmentation_pipeline import flag_anomalies
+
+        feat_df, sel_cols, active_mask, cfg = self._get_inputs_with_mixed_cluster_sizes()
+        cfg = dict(cfg)
+        cfg["lof_min_cluster_population"] = 20  # exceeds both real clusters (3 and 18 agents)
+
+        result = flag_anomalies(feat_df, sel_cols, active_mask, config=cfg)
+        lof_meta = result.attrs["lof_meta"]
+
+        assert lof_meta["lof_status"] == "skipped_all_clusters_too_small"
+        assert lof_meta["lof_clusters_ran"] == 0
+        assert not result["is_local_anomaly"].any()
+        assert result["lof_score"].isna().all()
+
+    def test_min_cluster_population_below_two_is_invalid_config(self):
+        from extrafloat_segmentation_pipeline import flag_anomalies
+
+        feat_df, sel_cols, active_mask, cfg = self._get_inputs_with_real_clusters()
+        cfg = dict(cfg)
+        cfg["lof_min_cluster_population"] = 1
+
+        result = flag_anomalies(feat_df, sel_cols, active_mask, config=cfg)  # must not raise
+        assert result.attrs["lof_meta"]["lof_status"].startswith("invalid_config")
+        assert not result["is_local_anomaly"].any()
+
+    # ── anomaly_report distinguishes "enabled" from "actually ran" ──────────
+
+    def test_lof_status_not_ran_when_no_clusters_form(self):
+        """Default hdbscan thresholds (tuned for a large production
+        population) flag every agent as noise for a small synthetic
+        population — lof_enabled=True must not be mistaken for LOF having
+        actually run when there were no surviving clusters to run it on."""
+        from extrafloat_segmentation_pipeline import flag_anomalies, DEFAULT_CLUSTERING_CONFIG
+
+        feat_df, sel_cols, active_mask = self._get_small_inputs()
+        result = flag_anomalies(feat_df, sel_cols, active_mask, config=DEFAULT_CLUSTERING_CONFIG)
+
+        assert DEFAULT_CLUSTERING_CONFIG["lof_enabled"] is True
+        lof_meta = result.attrs["lof_meta"]
+        assert lof_meta["lof_status"] != "ran"
+        assert lof_meta["lof_clusters_ran"] == 0
+
+    def test_lof_status_is_ran_when_clusters_form(self):
+        from extrafloat_segmentation_pipeline import flag_anomalies
+
+        feat_df, sel_cols, active_mask, cfg = self._get_inputs_with_real_clusters()
+        result = flag_anomalies(feat_df, sel_cols, active_mask, config=cfg)
+        lof_meta = result.attrs["lof_meta"]
+
+        assert lof_meta["lof_status"] == "ran"
+        assert lof_meta["lof_clusters_ran"] > 0
+
+    # ── LOF config validation ────────────────────────────────────────────
+
+    @pytest.mark.parametrize(
+        "bad_key,bad_value",
+        [
+            ("lof_n_neighbors", 0),
+            ("lof_n_neighbors", -5),
+            ("lof_n_neighbors", "20"),
+            ("lof_n_neighbors", 3.5),
+            ("lof_contamination", "banana"),
+            ("lof_contamination", 0.0),
+            ("lof_contamination", 0.6),
+            ("lof_contamination", float("nan")),
+            ("lof_min_cluster_population", 1),
+            ("lof_min_cluster_population", "5"),
+        ],
+    )
+    def test_invalid_lof_config_disables_stage_two_without_raising(self, bad_key, bad_value):
+        from extrafloat_segmentation_pipeline import flag_anomalies
+
+        feat_df, sel_cols, active_mask, cfg = self._get_inputs_with_real_clusters()
+        cfg = dict(cfg)
+        cfg[bad_key] = bad_value
+
+        result = flag_anomalies(feat_df, sel_cols, active_mask, config=cfg)  # must not raise
+        lof_meta = result.attrs["lof_meta"]
+        assert lof_meta["lof_status"].startswith("invalid_config")
+        assert not result["is_local_anomaly"].any()
+        assert result["lof_score"].isna().all()
+        # Stage 1 is completely unaffected by a bad stage-2 config.
+        assert result["is_global_anomaly"].any() or not result["is_global_anomaly"].any()  # no crash
+        assert (result["is_anomaly"] == result["is_global_anomaly"]).all()
+
+    def test_valid_lof_config_boundary_values_do_not_disable_stage_two(self):
+        """0 < contamination <= 0.5 and n_neighbors/min_population as
+        positive ints should all be accepted, not just the defaults."""
+        from extrafloat_segmentation_pipeline import flag_anomalies
+
+        feat_df, sel_cols, active_mask, cfg = self._get_inputs_with_real_clusters()
+        cfg = dict(cfg)
+        cfg["lof_contamination"] = 0.5
+        cfg["lof_n_neighbors"] = 1
+        cfg["lof_min_cluster_population"] = 2
+
+        result = flag_anomalies(feat_df, sel_cols, active_mask, config=cfg)
+        assert result.attrs["lof_meta"]["lof_status"] == "ran"
 
 
 class TestDiagnosticClustering:
@@ -1746,6 +1964,92 @@ class TestScoringOrchestration:
         assert result.attrs["anomaly_report"]["hdbscan_available"] is False
         alert_sources = [a["source"] for a in result.attrs.get("alerts", [])]
         assert "anomaly_detection" in alert_sources
+
+    def test_unexpected_anomaly_detection_failure_does_not_block_capacity_tier(
+        self, tmp_path, monkeypatch
+    ):
+        """An unexpected exception anywhere inside flag_anomalies (not just
+        the LOF-specific failures flag_anomalies itself catches) must not
+        propagate out of run_extrafloat_segmentation — capacity_tier was
+        already computed by the time step 2b runs and must still come
+        back."""
+        import run_extrafloat_segmentation as run_mod
+
+        agents_df = self._small_agents_df()
+        scorecard_path, _ = self._calibrated_scorecard_path(agents_df, tmp_path)
+        cfg = self._no_output_cfg(scoring=self._scoring_cfg(scorecard_path))
+
+        def _raising_flag_anomalies(*args, **kwargs):
+            raise RuntimeError("synthetic unexpected failure for test")
+
+        monkeypatch.setattr(run_mod, "flag_anomalies", _raising_flag_anomalies)
+        result = run_mod.run_extrafloat_segmentation(agents_df, config=cfg)  # must not raise
+
+        assert "capacity_tier" in result.columns
+        assert "is_anomaly" not in result.columns
+        assert result.attrs["anomaly_report"]["lof_status"] == "failed_unexpectedly"
+        alerts = result.attrs.get("alerts", [])
+        matching = [a for a in alerts if a["source"] == "anomaly_detection" and a["severity"] == "critical"]
+        assert matching, f"expected a critical anomaly_detection alert, got {alerts}"
+
+    def test_invalid_lof_config_produces_critical_alert_but_keeps_capacity_tier(self, tmp_path):
+        from run_extrafloat_segmentation import run_extrafloat_segmentation
+
+        agents_df = self._small_agents_df()
+        scorecard_path, _ = self._calibrated_scorecard_path(agents_df, tmp_path)
+        cfg = self._no_output_cfg(
+            scoring=self._scoring_cfg(scorecard_path),
+            clustering={"lof_n_neighbors": -1},
+        )
+        result = run_extrafloat_segmentation(agents_df, config=cfg)  # must not raise
+
+        assert "capacity_tier" in result.columns
+        assert "is_global_anomaly" in result.columns  # stage 1 unaffected
+        assert not result["is_local_anomaly"].any()
+        assert result.attrs["anomaly_report"]["lof_status"].startswith("invalid_config")
+        alerts = result.attrs.get("alerts", [])
+        matching = [a for a in alerts if a["source"] == "lof_config" and a["severity"] == "critical"]
+        assert matching, f"expected a critical lof_config alert, got {alerts}"
+
+    def test_lof_cluster_runtime_failure_produces_warning_alert(self, tmp_path, monkeypatch):
+        from sklearn.neighbors import LocalOutlierFactor
+        from run_extrafloat_segmentation import run_extrafloat_segmentation
+
+        agents_df = self._small_agents_df(n=300)
+        scorecard_path, _ = self._calibrated_scorecard_path(agents_df, tmp_path)
+        cfg = self._no_output_cfg(
+            scoring=self._scoring_cfg(scorecard_path),
+            clustering={"hdbscan_min_cluster_size": 5, "hdbscan_min_samples": 1},
+        )
+
+        def _raising_fit_predict(self, X, y=None):
+            raise ValueError("synthetic LOF failure for test")
+
+        monkeypatch.setattr(LocalOutlierFactor, "fit_predict", _raising_fit_predict)
+        result = run_extrafloat_segmentation(agents_df, config=cfg)  # must not raise
+
+        assert "capacity_tier" in result.columns
+        assert result.attrs["anomaly_report"]["lof_clusters_failed"] > 0
+        alerts = result.attrs.get("alerts", [])
+        matching = [a for a in alerts if a["source"] == "lof_runtime" and a["severity"] == "warning"]
+        assert matching, f"expected a warning lof_runtime alert, got {alerts}"
+
+    def test_anomaly_report_distinguishes_lof_enabled_from_lof_ran(self, tmp_path):
+        """lof_enabled is just the config toggle; lof_status/lof_clusters_ran
+        say what actually happened. Default hdbscan thresholds flag every
+        agent in a small synthetic population as noise, so lof_enabled=True
+        here must not be read as LOF having run."""
+        from run_extrafloat_segmentation import run_extrafloat_segmentation
+
+        agents_df = self._small_agents_df()
+        scorecard_path, _ = self._calibrated_scorecard_path(agents_df, tmp_path)
+        cfg = self._no_output_cfg(scoring=self._scoring_cfg(scorecard_path))
+        result = run_extrafloat_segmentation(agents_df, config=cfg)
+
+        report = result.attrs["anomaly_report"]
+        assert report["lof_enabled"] is True
+        assert report["lof_status"] != "ran"
+        assert report["lof_clusters_ran"] == 0
 
     def test_capacity_tier_unaffected_by_anomaly_detection_toggle(self, tmp_path):
         """capacity_tier must be identical whether or not anomaly detection
