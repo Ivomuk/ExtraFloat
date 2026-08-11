@@ -9,7 +9,10 @@
 -- data/borrower_lifecycle_features.sql (UNCHANGED — kept as the base query) as the
 -- loan_level CTE, then aggregates it up to the borrower level.
 -- ============================================================================
-WITH loan_level AS (
+WITH snapshots AS (
+SELECT cast(20260531 AS bigint) AS snapshot_dt
+),
+loan_level AS (
 -- ── Begin: loan-level query from borrower_lifecycle_features.sql (unchanged) ──
 WITH base AS (
 SELECT
@@ -23,6 +26,7 @@ FROM devdata.xtrafloat_daily_trans
 WHERE try_cast(original_timestamp_enrich AS timestamp) IS NOT NULL
 AND requestid IS NOT NULL
 AND phonenumber IS NOT NULL
+AND date(try_cast(original_timestamp_enrich AS timestamp)) <= date_parse(cast((SELECT snapshot_dt FROM snapshots) AS varchar), '%Y%m%d')
 ),
 dedup AS (
 SELECT *
