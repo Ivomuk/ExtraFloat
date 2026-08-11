@@ -1,8 +1,8 @@
 SELECT *
 from (with snapshots as (
-select cast(20250930 as bigint) as snapshot_dt, 'train' as split
+select cast(20260531 as bigint) as snapshot_dt, 'train' as split
 union all
-select cast(20251115 as bigint) as snapshot_dt, 'validation' as split
+select cast(20260731 as bigint) as snapshot_dt, 'validation' as split
 ),
 base as (
 select
@@ -12,7 +12,7 @@ s.split
 from (
 select distinct msisdn
 from devdata.account_holder_dump
-where tbl_dt = 20251116
+where tbl_dt = 20260731
 and account_type = 'MOBILE MONEY'
 and lower(profile) like '%agent%'
 ) b0
@@ -88,43 +88,43 @@ sum(case
 when t.tbl_dt between try_cast(date_format(date_add('month', -1, date_parse(cast(b.snapshot_dt as varchar), '%Y%m%d')), '%Y%m%d') as bigint)
 and b.snapshot_dt
 and t.tranname = 'XtraFloat Dispatch'
-then try_cast(t.amount as bigint)
+then try_cast(t.amount as double)
 end) as disbursement_val_1M__l1,
 sum(case
 when t.tbl_dt between try_cast(date_format(date_add('day', -29, date_parse(cast(b.snapshot_dt as varchar), '%Y%m%d')), '%Y%m%d') as bigint)
 and b.snapshot_dt
 and t.tranname = 'XtraFloat Dispatch'
-then try_cast(t.amount as bigint)
+then try_cast(t.amount as double)
 end) as disbursement_val_M1__l1,
 sum(case
 when t.tbl_dt between try_cast(date_format(date_add('day', -59, date_parse(cast(b.snapshot_dt as varchar), '%Y%m%d')), '%Y%m%d') as bigint)
 and try_cast(date_format(date_add('day', -30, date_parse(cast(b.snapshot_dt as varchar), '%Y%m%d')), '%Y%m%d') as bigint)
 and t.tranname = 'XtraFloat Dispatch'
-then try_cast(t.amount as bigint)
+then try_cast(t.amount as double)
 end) as disbursement_val_M2__l1,
 sum(case
 when t.tbl_dt between try_cast(date_format(date_add('day', -89, date_parse(cast(b.snapshot_dt as varchar), '%Y%m%d')), '%Y%m%d') as bigint)
 and try_cast(date_format(date_add('day', -60, date_parse(cast(b.snapshot_dt as varchar), '%Y%m%d')), '%Y%m%d') as bigint)
 and t.tranname = 'XtraFloat Dispatch'
-then try_cast(t.amount as bigint)
+then try_cast(t.amount as double)
 end) as disbursement_val_M3__l1,
 sum(case
 when t.tbl_dt between try_cast(date_format(date_add('day', -119, date_parse(cast(b.snapshot_dt as varchar), '%Y%m%d')), '%Y%m%d') as bigint)
 and try_cast(date_format(date_add('day', -90, date_parse(cast(b.snapshot_dt as varchar), '%Y%m%d')), '%Y%m%d') as bigint)
 and t.tranname = 'XtraFloat Dispatch'
-then try_cast(t.amount as bigint)
+then try_cast(t.amount as double)
 end) as disbursement_val_M4__l1,
 sum(case
 when t.tbl_dt between try_cast(date_format(date_add('day', -149, date_parse(cast(b.snapshot_dt as varchar), '%Y%m%d')), '%Y%m%d') as bigint)
 and try_cast(date_format(date_add('day', -120, date_parse(cast(b.snapshot_dt as varchar), '%Y%m%d')), '%Y%m%d') as bigint)
 and t.tranname = 'XtraFloat Dispatch'
-then try_cast(t.amount as bigint)
+then try_cast(t.amount as double)
 end) as disbursement_val_M5__l1,
 sum(case
 when t.tbl_dt between try_cast(date_format(date_add('day', -179, date_parse(cast(b.snapshot_dt as varchar), '%Y%m%d')), '%Y%m%d') as bigint)
 and try_cast(date_format(date_add('day', -150, date_parse(cast(b.snapshot_dt as varchar), '%Y%m%d')), '%Y%m%d') as bigint)
 and t.tranname = 'XtraFloat Dispatch'
-then try_cast(t.amount as bigint)
+then try_cast(t.amount as double)
 end) as disbursement_val_M6__l1,
 max(case
 when t.tbl_dt between try_cast(date_format(date_add('month', -1, date_parse(cast(b.snapshot_dt as varchar), '%Y%m%d')), '%Y%m%d') as bigint)
@@ -226,7 +226,7 @@ sum(case
 when t.tbl_dt between try_cast(date_format(date_add('month', -3, date_parse(cast(b.snapshot_dt as varchar), '%Y%m%d')), '%Y%m%d') as bigint)
 and b.snapshot_dt
 and t.tranname = 'XtraFloat Dispatch'
-then try_cast(t.amount as bigint)
+then try_cast(t.amount as double)
 end) as disbursement_val_3M__l1,
 max(case
 when t.tbl_dt between try_cast(date_format(date_add('month', -3, date_parse(cast(b.snapshot_dt as varchar), '%Y%m%d')), '%Y%m%d') as bigint)
@@ -256,7 +256,7 @@ sum(case
 when t.tbl_dt between try_cast(date_format(date_add('month', -6, date_parse(cast(b.snapshot_dt as varchar), '%Y%m%d')), '%Y%m%d') as bigint)
 and b.snapshot_dt
 and t.tranname = 'XtraFloat Dispatch'
-then try_cast(t.amount as bigint)
+then try_cast(t.amount as double)
 end) as disbursement_val_6M__l1,
 max(case
 when t.tbl_dt between try_cast(date_format(date_add('month', -6, date_parse(cast(b.snapshot_dt as varchar), '%Y%m%d')), '%Y%m%d') as bigint)
