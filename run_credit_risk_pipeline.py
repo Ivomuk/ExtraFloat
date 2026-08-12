@@ -31,6 +31,18 @@ Input files
     prior loan sizes, lifetime_loan_count.  Fed to the engine's prior
     exposure cap and risk signal fallback.
 
+``--loan-history-file`` (optional)
+    Loan history snapshot -- data/loan_history_snapshot_query.txt output.
+    Does NOT replace --loan-file: it cannot supply the trailing
+    repayment/penalty cash-flow figures --loan-file provides, since its
+    source table only exposes cumulative per-loan snapshots, not an event
+    log.  What it adds instead is a live "is this agent currently
+    delinquent or mid-rollover" signal that feeds a haircut on the
+    7-signal risk fallback path only (compute_risk_cap() in
+    extrafloat_limit_engine_caps.py) -- never on the cal_pd path, where
+    the PD model's own training features already cover this.  Omit this
+    flag entirely to run exactly as before; absence is a clean no-op.
+
 Usage
 -----
 ::
@@ -66,6 +78,7 @@ from extrafloat.engine.extrafloat_limit_engine_features import (
 from extrafloat.engine.run_extrafloat_limit_engine import run_extrafloat_limit_engine
 from extrafloat.io.extrafloat_data_loaders import (
     load_borrower_limit_features,
+    load_loan_history_snapshot_features,
     load_loan_summary_recent_features,
     load_transaction_capacity_features,
 )
@@ -199,6 +212,7 @@ def run_credit_risk_pipeline(
     borrower_file: str | Path,
     artifacts_dir: str | Path,
     repayment_file: str | Path | None = None,
+    loan_history_file: str | Path | None = None,
     snapshot_date: str | int | None = None,
     champion: str = "xgb",
     keep_intermediate: bool = False,
@@ -226,6 +240,11 @@ def run_credit_risk_pipeline(
                                  (xgb_model.joblib, lgbm_model.joblib, pd_calibration_map.csv, …)
     repayment_file             : optional repayment history CSV for Phase 2.2 PD features.
                                  Agents without repayment rows are treated as thin-file.
+    loan_history_file          : optional loan history snapshot CSV
+                                 (data/loan_history_snapshot_query.txt output). Does NOT
+                                 replace loan_file -- see the module docstring. Feeds the
+                                 engine risk cap's unresolved-loan haircut on the 7-signal
+                                 fallback path only. Omit for unchanged behaviour.
     champion                   : "xgb" or "lgb" -- which model's cal_pd feeds into the engine
     keep_intermediate          : if True, all engine intermediate columns are retained
     engine_config              : optional dict to override DEFAULT_CAP_CONFIG values
@@ -277,6 +296,12 @@ def run_credit_risk_pipeline(
         if snapshot_date is not None:
             if "snapshot_dt" not in repayment_df.columns and "tbl_dt" not in repayment_df.columns:
                 repayment_df["snapshot_dt"] = snap_ts
+
+    # Optional, additive -- does not replace df_loan. See module docstring.
+    df_loan_history = None
+    if loan_history_file is not None:
+        df_loan_history = load_loan_history_snapshot_features(loan_history_file)
+        logger.info("Loan history snapshot file loaded: %d rows", len(df_loan_history))
 
     # -- Stage 2: Agent segmentation -----------------------------------------
     logger.info("Stage 2: running agent segmentation")
@@ -343,6 +368,7 @@ def run_credit_risk_pipeline(
         borrower_limit_df=df_borrower,
         transaction_capacity_df=df_txn,
         loan_summary_df=df_loan,
+        loan_history_snapshot_df=df_loan_history,
     )
     logger.info("Engine features: %d agents", len(features_df))
 
@@ -524,6 +550,15 @@ def _parse_args(argv=None):
         help="Optional repayment history CSV for PD model Phase 2.2 features",
     )
     p.add_argument(
+        "--loan-history-file",
+        default=None,
+        help=(
+            "Optional loan history snapshot CSV (data/loan_history_snapshot_query.txt "
+            "output). Does NOT replace --loan-file -- see the module docstring. Feeds "
+            "the risk cap's unresolved-loan haircut on the 7-signal fallback path only."
+        ),
+    )
+    p.add_argument(
         "--snapshot-date",
         default=None,
         help="Snapshot date for the transaction file (YYYYMMDD). Required when using --repayment-file "
@@ -561,6 +596,7 @@ def main(argv=None):
         borrower_file=args.borrower_file,
         artifacts_dir=args.artifacts_dir,
         repayment_file=args.repayment_file,
+        loan_history_file=args.loan_history_file,
         snapshot_date=args.snapshot_date,
         champion=args.champion,
         keep_intermediate=args.keep_intermediate,

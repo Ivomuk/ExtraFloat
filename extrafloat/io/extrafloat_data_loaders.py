@@ -1,7 +1,9 @@
 """
 extrafloat_data_loaders.py
 ===========================
-Production CSV loaders for the three ExtraFloat input DataFrames.
+Production CSV loaders for the ExtraFloat input DataFrames: the three
+required engine inputs (transaction capacity, loan summary, borrower
+limit) plus one optional additive input (loan history snapshot).
 
 Responsibility boundary
 -----------------------
@@ -213,6 +215,61 @@ def load_borrower_limit_features(path: str | Path) -> pd.DataFrame:
     df = _parse_dates(
         df,
         ["first_loan_ts", "latest_loan_ts", "latest_disbursement_ts"],
+    )
+
+    df = _drop_extra_pii(df)
+    return df
+
+
+# -----------------------------------------------------------------------------
+# 4. LOAN HISTORY SNAPSHOT FEATURES (optional, additive)
+# -----------------------------------------------------------------------------
+
+
+def load_loan_history_snapshot_features(path: str | Path) -> pd.DataFrame:
+    """
+    Load the loan history snapshot CSV (``data/loan_history_snapshot_query.txt``
+    output).
+
+    This is an optional, additive input -- it does not replace the loan
+    summary file (``load_loan_summary_recent_features``) or the borrower
+    history file (``load_borrower_limit_features``). See the header of
+    ``data/loan_history_snapshot_query.txt`` for why: it cannot produce the
+    trailing repayment/penalty cash-flow figures the loan summary provides,
+    nor the hour-level cure-time fields the borrower file provides. What it
+    adds instead is a point-in-time-correct "is this agent currently
+    delinquent or mid-rollover" signal that feeds the risk cap's
+    unresolved-loan haircut.
+
+    Column renames applied
+    -----------------------
+    - ``agent_msisdn`` -> ``msisdn`` (if ``msisdn`` absent) -- the query's
+      own output already uses ``msisdn`` directly; this guards against
+      export variations.
+
+    Date columns parsed
+    --------------------
+    ``snapshot_dt``, ``latest_state_date``, ``last_closed_loan_closure_date``
+
+    No zero-fill fallback (unlike loan summary's 3m columns): this query
+    computes every output column itself, so an absent column means schema
+    drift, not intentional partial availability -- it is left to
+    ``prepare_loan_history_snapshot_features()`` to raise a clear error.
+
+    The returned DataFrame contains every column from the source file.
+    Pass it directly to ``prepare_loan_history_snapshot_features()``.
+    """
+    df = _read_csv(path)
+
+    # -- Column renames ------------------------------------------------------
+    if "agent_msisdn" in df.columns and "msisdn" not in df.columns:
+        df = df.rename(columns={"agent_msisdn": "msisdn"})
+        logger.info("Renamed agent_msisdn -> msisdn")
+
+    # -- Date parsing --------------------------------------------------------
+    df = _parse_dates(
+        df,
+        ["snapshot_dt", "latest_state_date", "last_closed_loan_closure_date"],
     )
 
     df = _drop_extra_pii(df)

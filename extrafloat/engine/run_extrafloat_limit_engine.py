@@ -46,6 +46,10 @@ OPTIONAL_BUT_EXPECTED_COLUMNS = [
     "lifetime_loan_count",
     "on_time_repayment_rate",
     "lifetime_default_rate",
+    # Optional, additive -- data/loan_history_snapshot_query.txt
+    "has_unresolved_loan_at_snapshot",
+    "active_loan_days_aging_at_snapshot",
+    "anomaly_open_at_snapshot",
 ]
 
 FINAL_OUTPUT_COLUMNS = [
@@ -59,6 +63,15 @@ FINAL_OUTPUT_COLUMNS = [
     "risk_tier",
     "cal_pd",
     "pd_decile",
+    # Unresolved-loan-at-snapshot audit trail (see compute_risk_cap()).
+    # The raw signal columns are surfaced even on the cal_pd path, where the
+    # haircut itself is a no-op (risk_unresolved_loan_multiplier == 1.0) but
+    # the signal is still informative for a human reviewing the row.
+    "risk_unresolved_loan_multiplier",
+    "risk_unresolved_loan_haircut_reason",
+    "has_unresolved_loan_at_snapshot",
+    "active_loan_days_aging_at_snapshot",
+    "anomaly_open_at_snapshot",
 ]
 
 

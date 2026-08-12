@@ -103,6 +103,15 @@ DEFAULT_CAP_CONFIG = {
         "max_lifetime_default_rate": 1.0,
         "min_score": 0.0,
         "max_score": 1.0,
+        # -- Unresolved-loan-at-snapshot haircut (7-signal fallback path
+        # only -- see the comment at its application site for why it must
+        # not apply on the cal_pd path). Sourced from
+        # has_unresolved_loan_at_snapshot / active_loan_days_aging_at_snapshot /
+        # anomaly_open_at_snapshot in data/loan_history_snapshot_query.txt.
+        "unresolved_loan_base_haircut": 0.15,
+        "unresolved_loan_aging_haircut_per_day": 0.01,
+        "unresolved_loan_aging_haircut_cap": 0.35,
+        "anomaly_open_haircut": 0.40,
     },
     # -- Prior exposure cap ----------------------------------------------------
     "prior_exposure": {
@@ -326,12 +335,19 @@ def compute_risk_cap(features_df, config=None):
         # cal_pd is probability of default (high = risky); invert so high risk_score = safe.
         # The experience ramp is NOT applied here -- thin-file handling is already
         # embedded in cal_pd via the scorecard's never_loan_pd_like path.
+        # The unresolved-loan-at-snapshot haircut is likewise NOT applied here --
+        # the PD model's own training query computes near-identical features
+        # (has_unresolved_loan_at_scoring / anomaly_open_at_scoring in
+        # data/loan_state_query_updated.txt), so a second haircut here would
+        # double-count. See the fallback branch below for where it does apply.
         risk_score = _clip_series(
             1.0 - _safe_series(df, "cal_pd", 0.5),
             risk_cfg["min_score"],
             risk_cfg["max_score"],
         )
         risk_cap = risk_score * risk_cfg["base_limit"]
+        unresolved_loan_multiplier = pd.Series(1.0, index=df.index, dtype="float64")
+        unresolved_loan_haircut_reason = pd.Series("cal_pd_path_not_applicable", index=df.index, dtype="object")
         logger.info(
             "compute_risk_cap: cal_pd path -- mean_cal_pd=%.4f, mean_risk_score=%.4f",
             float(_safe_series(df, "cal_pd", 0.5).mean()),
@@ -385,10 +401,52 @@ def compute_risk_cap(features_df, config=None):
         )
         risk_cap = risk_cap * experience_factor
 
+        # Unresolved-loan-at-snapshot haircut: penalizes agents who currently
+        # have an open/aging loan or are mid-rollover, per
+        # data/loan_history_snapshot_query.txt. Applied in the fallback path
+        # only -- see the comment in the cal_pd branch above for why.
+        # _safe_series defaults to 0.0 when the columns are absent (this
+        # input is optional), so this whole block is a clean no-op --
+        # unresolved_loan_multiplier = 1.0 -- whenever the loan history
+        # snapshot file wasn't supplied.
+        has_unresolved = _clip_series(_safe_series(df, "has_unresolved_loan_at_snapshot", 0.0), 0.0, 1.0)
+        aging_days = _clip_series(_safe_series(df, "active_loan_days_aging_at_snapshot", 0.0), 0.0, 1e9)
+        anomaly_open = _clip_series(_safe_series(df, "anomaly_open_at_snapshot", 0.0), 0.0, 1.0)
+
+        aging_haircut = _clip_series(
+            aging_days * risk_cfg["unresolved_loan_aging_haircut_per_day"],
+            0.0,
+            risk_cfg["unresolved_loan_aging_haircut_cap"],
+        )
+        # anomaly_open=1 overrides (does not stack with) the base+aging
+        # haircut -- a rollover is a strict superset of "unresolved," and
+        # stacking would let a long-aged anomaly loan compound past a 90%+
+        # haircut, which is a tuning trap rather than a deliberate severity
+        # curve.
+        unresolved_haircut = has_unresolved * (risk_cfg["unresolved_loan_base_haircut"] + aging_haircut)
+        total_haircut = pd.Series(
+            np.where(anomaly_open > 0.0, risk_cfg["anomaly_open_haircut"], unresolved_haircut),
+            index=df.index,
+            dtype="float64",
+        )
+        unresolved_loan_multiplier = _clip_series(1.0 - total_haircut, 0.0, 1.0)
+        unresolved_loan_haircut_reason = pd.Series(
+            np.select(
+                [anomaly_open > 0.0, has_unresolved > 0.0],
+                ["anomaly_open_haircut", "unresolved_loan_haircut"],
+                default="none",
+            ),
+            index=df.index,
+            dtype="object",
+        )
+        risk_cap = risk_cap * unresolved_loan_multiplier
+
     risk_cap = _clip_series(risk_cap, cfg["global_floor_limit"], cfg["global_ceiling_limit"])
 
     df["risk_score"] = risk_score
     df["risk_cap"] = risk_cap
+    df["risk_unresolved_loan_multiplier"] = unresolved_loan_multiplier
+    df["risk_unresolved_loan_haircut_reason"] = unresolved_loan_haircut_reason
     logger.info(
         "compute_risk_cap: done -- mean_risk_score=%.3f, mean_risk_cap=%.1f",
         float(risk_score.mean()),

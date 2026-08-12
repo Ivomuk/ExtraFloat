@@ -17,6 +17,7 @@ are required. They verify:
 
 from __future__ import annotations
 
+from copy import deepcopy
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -379,6 +380,126 @@ def test_experience_factor_not_applied_on_cal_pd_path():
             "on the cal_pd path"
         ),
     )
+
+
+# -----------------------------------------------------------------------------
+# 7b. Unresolved-loan-at-snapshot haircut (data/loan_history_snapshot_query.txt)
+# -----------------------------------------------------------------------------
+
+
+def test_unresolved_loan_haircut_reduces_risk_cap_on_fallback_path():
+    df_baseline = _minimal_features_df(n=1, seed=7)
+    df_unresolved = _minimal_features_df(n=1, seed=7)
+    df_unresolved["has_unresolved_loan_at_snapshot"] = 1
+    df_unresolved["active_loan_days_aging_at_snapshot"] = 10
+
+    result_baseline = compute_risk_cap(df_baseline)
+    result_unresolved = compute_risk_cap(df_unresolved)
+
+    assert (result_unresolved["risk_cap"].values < result_baseline["risk_cap"].values).all()
+    assert result_unresolved["risk_unresolved_loan_haircut_reason"].iloc[0] == "unresolved_loan_haircut"
+    assert result_unresolved["risk_unresolved_loan_multiplier"].iloc[0] < 1.0
+
+
+def test_unresolved_loan_columns_do_not_affect_cal_pd_path():
+    """
+    Mirrors test_experience_factor_not_applied_on_cal_pd_path: an agent
+    flagged has_unresolved_loan_at_snapshot=1 and an otherwise-identical
+    agent with no unresolved loan must get the same risk_cap when both
+    have the same cal_pd -- the PD model's own training query already
+    computes has_unresolved_loan_at_scoring / anomaly_open_at_scoring as
+    predictors, so a second haircut here would double-count.
+    """
+    cal_pd = 0.20
+
+    df_clean = _minimal_features_df(n=1)
+    df_clean["cal_pd"] = cal_pd
+
+    df_unresolved = _minimal_features_df(n=1)
+    df_unresolved["cal_pd"] = cal_pd
+    df_unresolved["has_unresolved_loan_at_snapshot"] = 1
+    df_unresolved["active_loan_days_aging_at_snapshot"] = 40
+    df_unresolved["anomaly_open_at_snapshot"] = 1
+
+    result_clean = compute_risk_cap(df_clean)
+    result_unresolved = compute_risk_cap(df_unresolved)
+
+    np.testing.assert_allclose(
+        result_clean["risk_cap"].values,
+        result_unresolved["risk_cap"].values,
+        atol=1e-6,
+        err_msg="risk_cap must be identical on the cal_pd path regardless of unresolved-loan columns",
+    )
+    assert result_unresolved["risk_unresolved_loan_multiplier"].iloc[0] == 1.0
+    assert result_unresolved["risk_unresolved_loan_haircut_reason"].iloc[0] == "cal_pd_path_not_applicable"
+
+
+def test_unresolved_loan_columns_absent_is_no_op():
+    """When the loan history snapshot input was never supplied, the
+    haircut columns are absent from features_df -- _safe_series defaults
+    them to 0.0, so risk_cap must be byte-identical to a run before this
+    feature existed."""
+    df = _minimal_features_df(n=5, seed=3)
+    assert "has_unresolved_loan_at_snapshot" not in df.columns
+
+    result = compute_risk_cap(df)
+
+    assert (result["risk_unresolved_loan_multiplier"] == 1.0).all()
+    assert (result["risk_unresolved_loan_haircut_reason"] == "none").all()
+
+
+def test_anomaly_open_haircut_harsher_than_unresolved_alone():
+    df_baseline = _minimal_features_df(n=1, seed=11)
+
+    df_unresolved_only = _minimal_features_df(n=1, seed=11)
+    df_unresolved_only["has_unresolved_loan_at_snapshot"] = 1
+    df_unresolved_only["active_loan_days_aging_at_snapshot"] = 0
+
+    df_anomaly = _minimal_features_df(n=1, seed=11)
+    df_anomaly["has_unresolved_loan_at_snapshot"] = 1
+    df_anomaly["anomaly_open_at_snapshot"] = 1
+
+    cap_baseline = compute_risk_cap(df_baseline)["risk_cap"].iloc[0]
+    cap_unresolved = compute_risk_cap(df_unresolved_only)["risk_cap"].iloc[0]
+    cap_anomaly = compute_risk_cap(df_anomaly)["risk_cap"].iloc[0]
+
+    assert cap_anomaly < cap_unresolved < cap_baseline
+
+
+def test_unresolved_loan_aging_haircut_monotonic_and_capped():
+    cfg = _get_config(None)
+    caps = []
+    for aging_days in (0, 10, 50, 500):
+        df = _minimal_features_df(n=1, seed=5)
+        df["has_unresolved_loan_at_snapshot"] = 1
+        df["active_loan_days_aging_at_snapshot"] = aging_days
+        result = compute_risk_cap(df)
+        caps.append(result["risk_cap"].iloc[0])
+        assert result["risk_cap"].iloc[0] >= cfg["global_floor_limit"]
+
+    # Monotonically non-increasing as aging grows.
+    for earlier, later in zip(caps, caps[1:]):
+        assert later <= earlier
+    # The per-day haircut is capped, so 50 and 500 days must produce the
+    # same risk_cap (both saturate unresolved_loan_aging_haircut_cap).
+    assert caps[2] == pytest.approx(caps[3], abs=1e-6)
+
+
+def test_unresolved_loan_haircut_never_pushes_risk_cap_negative():
+    cfg = deepcopy(_get_config(None))
+    cfg["risk"]["unresolved_loan_base_haircut"] = 5.0
+    cfg["risk"]["anomaly_open_haircut"] = 5.0
+    cfg["risk"]["unresolved_loan_aging_haircut_per_day"] = 5.0
+    cfg["risk"]["unresolved_loan_aging_haircut_cap"] = 5.0
+
+    df = _minimal_features_df(n=3, seed=9)
+    df["has_unresolved_loan_at_snapshot"] = 1
+    df["active_loan_days_aging_at_snapshot"] = 100
+    df["anomaly_open_at_snapshot"] = 1
+
+    result = compute_risk_cap(df, config=cfg)
+    assert (result["risk_cap"] >= cfg["global_floor_limit"]).all()
+    assert (result["risk_unresolved_loan_multiplier"] >= 0.0).all()
 
 
 # -----------------------------------------------------------------------------

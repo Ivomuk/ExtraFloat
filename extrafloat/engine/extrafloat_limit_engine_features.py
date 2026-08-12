@@ -158,6 +158,23 @@ LOAN_SUMMARY_REQUIRED_COLUMNS: list[str] = [
     "penalties_3m",
 ]
 
+# Optional, additive input (data/loan_history_snapshot_query.txt output).
+# Kept narrow -- only the columns compute_risk_cap()'s unresolved-loan
+# haircut actually consumes -- rather than mirroring every column the
+# query produces, since this input is explicitly additive and should not
+# become a brittle dependency on a query that's still evolving.
+LOAN_HISTORY_SNAPSHOT_REQUIRED_COLUMNS: list[str] = [
+    "msisdn",
+    "snapshot_dt",
+    "has_unresolved_loan_at_snapshot",
+    "active_loan_days_aging_at_snapshot",
+    "active_loan_outstanding_ugx_at_snapshot",
+    "anomaly_open_at_snapshot",
+    "historical_anomaly_open_loan_rate",
+    "observed_loan_count",
+    "closed_loan_count",
+]
+
 
 # -----------------------------------------------------------------------------
 # INTERNAL HELPERS
@@ -669,6 +686,89 @@ def prepare_loan_summary_recent_features(
 
 
 # -----------------------------------------------------------------------------
+# 3b. LOAN HISTORY SNAPSHOT FEATURES (optional, additive)
+# -----------------------------------------------------------------------------
+
+
+def prepare_loan_history_snapshot_features(
+    loan_history_snapshot_df: pd.DataFrame,
+) -> pd.DataFrame:
+    """
+    Clean and validate the loan history snapshot input
+    (``data/loan_history_snapshot_query.txt`` output).
+
+    This does not replace ``prepare_loan_summary_recent_features()`` or
+    ``prepare_borrower_limit_features()`` -- see the header of
+    ``data/loan_history_snapshot_query.txt`` for why. It feeds the risk
+    cap's unresolved-loan haircut in ``compute_risk_cap()``.
+    """
+    logger.info(
+        "prepare_loan_history_snapshot_features: input rows = %d",
+        len(loan_history_snapshot_df),
+    )
+
+    _check_required_columns(
+        loan_history_snapshot_df, LOAN_HISTORY_SNAPSHOT_REQUIRED_COLUMNS, "loan_history_snapshot_features"
+    )
+
+    df = loan_history_snapshot_df.copy()
+    df["msisdn"] = _standardize_msisdn(df["msisdn"])
+    df["snapshot_dt"] = pd.to_datetime(df["snapshot_dt"], errors="coerce")
+
+    # -- Binary-flag coercion (same pattern as kyc_verified_flag) --
+    for flag_col in ("has_unresolved_loan_at_snapshot", "anomaly_open_at_snapshot"):
+        df[flag_col] = pd.to_numeric(df[flag_col], errors="coerce").fillna(0).clip(0, 1).astype(int)
+
+    # -- Numeric coercion --
+    numeric_cols = [
+        "active_loan_days_aging_at_snapshot",
+        "active_loan_outstanding_ugx_at_snapshot",
+        "historical_anomaly_open_loan_rate",
+        "observed_loan_count",
+        "closed_loan_count",
+        # Optional pass-through aggregates -- not required, coerced if present.
+        "avg_tenure_days_closed_loans",
+        "max_tenure_days_last_5_closed_loans",
+        "consecutive_on_time_loans",
+        "all_loans_principal_repayment_ratio",
+        "closed_loans_principal_repayment_ratio",
+        "disbursement_count",
+        "disbursement_count_30d",
+        "disbursement_count_90d",
+        "disbursement_count_180d",
+        "avg_loan_amount_30d",
+        "avg_loan_amount_90d",
+        "avg_loan_amount_180d",
+    ]
+    df = _coerce_numeric(df, numeric_cols)
+    df = _clip_lower_zero(
+        df,
+        [
+            "active_loan_days_aging_at_snapshot",
+            "active_loan_outstanding_ugx_at_snapshot",
+            "observed_loan_count",
+            "closed_loan_count",
+        ],
+    )
+    if "historical_anomaly_open_loan_rate" in df.columns:
+        df["historical_anomaly_open_loan_rate"] = df["historical_anomaly_open_loan_rate"].clip(
+            lower=0, upper=1
+        )
+
+    # -- Defensive dedup: the query guarantees one row per (msisdn, snapshot_dt),
+    # but guard against re-runs / concatenated exports the same way every other
+    # prepare_* function guards against its own upstream uniqueness assumption.
+    n_before = len(df)
+    df = df.sort_values(["msisdn", "snapshot_dt"], ascending=[True, False], na_position="last").drop_duplicates(
+        subset=["msisdn"], keep="first"
+    )
+    logger.info("prepare_loan_history_snapshot_features: deduped %d -> %d rows", n_before, len(df))
+
+    logger.info("prepare_loan_history_snapshot_features: output rows = %d", len(df))
+    return df
+
+
+# -----------------------------------------------------------------------------
 # TEMPORAL CONSISTENCY VALIDATION
 # -----------------------------------------------------------------------------
 
@@ -714,6 +814,7 @@ def build_extrafloat_limit_engine_features(
     borrower_limit_df: pd.DataFrame,
     transaction_capacity_df: pd.DataFrame,
     loan_summary_df: pd.DataFrame,
+    loan_history_snapshot_df: pd.DataFrame | None = None,
     as_of_date: pd.Timestamp | None = None,
 ) -> pd.DataFrame:
     """
@@ -723,6 +824,13 @@ def build_extrafloat_limit_engine_features(
     Returns one row per unique msisdn with all computed features.
 
     Pass ``as_of_date`` for reproducible backfills; defaults to today.
+
+    ``loan_history_snapshot_df`` is optional and additive (see
+    ``data/loan_history_snapshot_query.txt``). When omitted, the columns it
+    would have supplied (``has_unresolved_loan_at_snapshot``, etc.) are
+    simply absent from the output -- every downstream consumer reads them
+    via ``_safe_series(..., 0.0)``, so absence is a clean no-op, not an
+    error.
     """
     logger.info("build_extrafloat_limit_engine_features: starting")
 
@@ -730,6 +838,11 @@ def build_extrafloat_limit_engine_features(
     borrower_df = prepare_borrower_limit_features(borrower_limit_df, as_of_date=as_of_date)
     transaction_df = prepare_transaction_capacity_features(transaction_capacity_df)
     loan_df = prepare_loan_summary_recent_features(loan_summary_df)
+    loan_history_df = (
+        prepare_loan_history_snapshot_features(loan_history_snapshot_df)
+        if loan_history_snapshot_df is not None
+        else None
+    )
 
     # -- Temporal consistency check (non-blocking) --
     _validate_temporal_alignment(transaction_df, loan_df)
@@ -759,6 +872,33 @@ def build_extrafloat_limit_engine_features(
                 _unmatched,
                 len(merged),
             )
+
+    # -- Merge: result x loan history snapshot (optional, additive) --
+    # Joined on msisdn only, NOT [msisdn, snapshot_dt] like the loan summary
+    # merge above. This input is an independently-cadenced, optional feed
+    # (see data/loan_history_snapshot_query.txt) -- it is not guaranteed to
+    # be run against the same snapshot_dt as the transaction/loan summary
+    # exports, and an exact-date join would silently zero-match this entire
+    # feature set whenever the two aren't run on the same day. Its own
+    # snapshot_dt is preserved as loan_history_snapshot_dt for provenance/
+    # audit rather than used as a join key.
+    if loan_history_df is not None:
+        loan_history_df = loan_history_df.rename(columns={"snapshot_dt": "loan_history_snapshot_dt"})
+        merged = merged.merge(loan_history_df, on="msisdn", how="left")
+        logger.info("After loan history snapshot merge: %d rows", len(merged))
+
+        _loan_history_cols = [c for c in loan_history_df.columns if c not in ("msisdn", "loan_history_snapshot_dt")]
+        if _loan_history_cols:
+            _unmatched_lh = int(merged[_loan_history_cols].isna().all(axis=1).sum())
+            if _unmatched_lh > 0:
+                logger.info(
+                    "build_extrafloat_limit_engine_features: %d/%d rows have no loan "
+                    "history snapshot match -- has_unresolved_loan_at_snapshot and "
+                    "related columns will be absent (safe_series default = 0) for "
+                    "these rows, not a hard error since this input is optional.",
+                    _unmatched_lh,
+                    len(merged),
+                )
 
     # -- Post-merge deduplication (keeps most recent snapshot per borrower) --
     n_before = len(merged)

@@ -1,7 +1,8 @@
 """
 tests/io/test_extrafloat_data_loaders.py
 =========================================
-10 tests for the three production CSV loaders.
+Tests for the production CSV loaders: the three required engine inputs
+plus the optional, additive loan history snapshot loader.
 """
 
 import pandas as pd
@@ -9,6 +10,7 @@ import pytest
 
 from extrafloat.io.extrafloat_data_loaders import (
     load_borrower_limit_features,
+    load_loan_history_snapshot_features,
     load_loan_summary_recent_features,
     load_transaction_capacity_features,
 )
@@ -102,6 +104,24 @@ def _borrower_df(**extra_cols):
         "first_loan_ts": ["2023-01-15 08:00:00"],
         "latest_loan_ts": ["2025-11-01 09:00:00"],
         "latest_disbursement_ts": ["2025-11-01 09:00:00"],
+    }
+    base.update(extra_cols)
+    return pd.DataFrame(base)
+
+
+def _loan_history_snapshot_df(**extra_cols):
+    base = {
+        "msisdn": ["256785"],
+        "snapshot_dt": [20251115],  # YYYYMMDD integer, matching the query's convention
+        "has_unresolved_loan_at_snapshot": [1],
+        "active_loan_days_aging_at_snapshot": [5],
+        "active_loan_outstanding_ugx_at_snapshot": [20000.0],
+        "anomaly_open_at_snapshot": [0],
+        "historical_anomaly_open_loan_rate": [0.1],
+        "observed_loan_count": [8],
+        "closed_loan_count": [7],
+        "latest_state_date": ["2025-11-14"],
+        "last_closed_loan_closure_date": ["2025-10-20"],
     }
     base.update(extra_cols)
     return pd.DataFrame(base)
@@ -223,3 +243,45 @@ def test_load_borrower_limit_timestamps_parsed(tmp_path):
     df = load_borrower_limit_features(p)
     for col in ["first_loan_ts", "latest_loan_ts", "latest_disbursement_ts"]:
         assert pd.api.types.is_datetime64_any_dtype(df[col]), f"{col} not datetime"
+
+
+# -----------------------------------------------------------------------------
+# LOAN HISTORY SNAPSHOT (optional, additive)
+# -----------------------------------------------------------------------------
+
+
+def test_load_loan_history_snapshot_missing_file():
+    with pytest.raises(FileNotFoundError, match="file not found"):
+        load_loan_history_snapshot_features("/no/such/file.csv")
+
+
+def test_load_loan_history_snapshot_agent_msisdn_renamed(tmp_path):
+    raw = _loan_history_snapshot_df()
+    raw = raw.rename(columns={"msisdn": "agent_msisdn"})
+    p = _write_csv(tmp_path, "loan_history.csv", raw)
+    df = load_loan_history_snapshot_features(p)
+    assert "msisdn" in df.columns
+    assert "agent_msisdn" not in df.columns
+
+
+def test_load_loan_history_snapshot_msisdn_kept_when_present(tmp_path):
+    p = _write_csv(tmp_path, "loan_history.csv", _loan_history_snapshot_df())
+    df = load_loan_history_snapshot_features(p)
+    assert "msisdn" in df.columns
+
+
+def test_load_loan_history_snapshot_dates_parsed(tmp_path):
+    # snapshot_dt is a YYYYMMDD-shaped integer in the query's own output --
+    # confirm pandas' default inference handles it without an explicit format.
+    p = _write_csv(tmp_path, "loan_history.csv", _loan_history_snapshot_df())
+    df = load_loan_history_snapshot_features(p)
+    for col in ["snapshot_dt", "latest_state_date", "last_closed_loan_closure_date"]:
+        assert pd.api.types.is_datetime64_any_dtype(df[col]), f"{col} not datetime"
+    assert df["snapshot_dt"].iloc[0] == pd.Timestamp("2025-11-15")
+
+
+def test_load_loan_history_snapshot_all_columns_preserved(tmp_path):
+    raw = _loan_history_snapshot_df()
+    p = _write_csv(tmp_path, "loan_history.csv", raw)
+    df = load_loan_history_snapshot_features(p)
+    assert set(raw.columns).issubset(set(df.columns))

@@ -35,6 +35,7 @@ from extrafloat.engine.extrafloat_limit_engine_caps import (
 from extrafloat.engine.extrafloat_limit_engine_features import (
     build_extrafloat_limit_engine_features,
     prepare_borrower_limit_features,
+    prepare_loan_history_snapshot_features,
     prepare_transaction_capacity_features,
 )
 from extrafloat.engine.run_extrafloat_limit_engine import run_extrafloat_limit_engine
@@ -172,6 +173,23 @@ def _loan_row(**overrides) -> dict:
         "disbursement_val_3m": 10000.0,
         "repayment_val_3m": 10200.0,
         "penalties_3m": 0,
+    }
+    base.update(overrides)
+    return base
+
+
+def _loan_history_row(**overrides) -> dict:
+    """Minimal valid loan-history-snapshot row (optional, additive input)."""
+    base = {
+        "msisdn": "256785",
+        "snapshot_dt": "2025-11-15",
+        "has_unresolved_loan_at_snapshot": 0,
+        "active_loan_days_aging_at_snapshot": 0,
+        "active_loan_outstanding_ugx_at_snapshot": 0.0,
+        "anomaly_open_at_snapshot": 0,
+        "historical_anomaly_open_loan_rate": 0.0,
+        "observed_loan_count": 5,
+        "closed_loan_count": 5,
     }
     base.update(overrides)
     return base
@@ -422,6 +440,77 @@ def test_build_extrafloat_limit_engine_features_alias_columns():
     assert "repayment_stability_score" in result.columns
     assert "is_thin_file" in result.columns
     assert r["is_thin_file"] == 0  # total_loans=5 >= 3
+
+
+# -----------------------------------------------------------------------------
+# TEST 3b: prepare_loan_history_snapshot_features (optional, additive input)
+# -----------------------------------------------------------------------------
+
+
+def test_prepare_loan_history_snapshot_features_missing_required_column_raises():
+    row = _loan_history_row()
+    del row["has_unresolved_loan_at_snapshot"]
+    with pytest.raises(ValueError, match="missing required columns"):
+        prepare_loan_history_snapshot_features(pd.DataFrame([row]))
+
+
+def test_prepare_loan_history_snapshot_features_binary_flag_coercion():
+    row = _loan_history_row(has_unresolved_loan_at_snapshot="1", anomaly_open_at_snapshot=None)
+    result = prepare_loan_history_snapshot_features(pd.DataFrame([row]))
+    r = result.iloc[0]
+    assert r["has_unresolved_loan_at_snapshot"] == 1
+    # None -> coerced to 0, not left as NaN or raising
+    assert r["anomaly_open_at_snapshot"] == 0
+
+
+def test_prepare_loan_history_snapshot_features_rate_clipped():
+    row = _loan_history_row(historical_anomaly_open_loan_rate=1.5)  # out of [0,1] range
+    result = prepare_loan_history_snapshot_features(pd.DataFrame([row]))
+    assert result.iloc[0]["historical_anomaly_open_loan_rate"] == 1.0
+
+
+def test_prepare_loan_history_snapshot_features_dedup_keeps_latest():
+    older = _loan_history_row(snapshot_dt="2025-10-01", observed_loan_count=3)
+    newer = _loan_history_row(snapshot_dt="2025-11-15", observed_loan_count=5)
+    result = prepare_loan_history_snapshot_features(pd.DataFrame([older, newer]))
+    assert len(result) == 1
+    assert result.iloc[0]["observed_loan_count"] == 5
+
+
+# -----------------------------------------------------------------------------
+# TEST 3c: build_extrafloat_limit_engine_features -- optional 4th input
+# -----------------------------------------------------------------------------
+
+
+def test_build_extrafloat_limit_engine_features_with_loan_history_snapshot():
+    """When supplied, the loan history snapshot columns are left-joined onto
+    the output by msisdn -- confirms the optional 4th parameter works and
+    does not require snapshot_dt to match the other three sources."""
+    result = build_extrafloat_limit_engine_features(
+        pd.DataFrame([_borrower_row()]),
+        pd.DataFrame([_txn_row()]),
+        pd.DataFrame([_loan_row()]),
+        pd.DataFrame([_loan_history_row(has_unresolved_loan_at_snapshot=1, active_loan_days_aging_at_snapshot=7)]),
+    )
+    assert len(result) == 1
+    r = result.iloc[0]
+    assert r["has_unresolved_loan_at_snapshot"] == 1
+    assert r["active_loan_days_aging_at_snapshot"] == 7
+    # The loan-history feed's own snapshot_dt is preserved separately, not
+    # merged into (or required to match) the primary snapshot_dt column.
+    assert "loan_history_snapshot_dt" in result.columns
+
+
+def test_build_extrafloat_limit_engine_features_without_loan_history_snapshot_is_absent():
+    """When omitted (the default), the loan-history columns are simply
+    absent -- not zero-filled -- so downstream _safe_series(..., 0.0)
+    calls are the single place that defines the no-op default."""
+    result = build_extrafloat_limit_engine_features(
+        pd.DataFrame([_borrower_row()]),
+        pd.DataFrame([_txn_row()]),
+        pd.DataFrame([_loan_row()]),
+    )
+    assert "has_unresolved_loan_at_snapshot" not in result.columns
 
 
 # -----------------------------------------------------------------------------
