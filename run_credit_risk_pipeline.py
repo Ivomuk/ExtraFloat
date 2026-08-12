@@ -72,7 +72,7 @@ from extrafloat.io.extrafloat_data_loaders import (
 from pd_model.exceptions import ArtifactVerificationError, DataAlignmentError, MissingArtifactError
 from pd_model.logging_config import install_pii_filter
 from pd_model.modeling.inference import run_inference_pipeline
-from run_extrafloat_segmentation import run_extrafloat_segmentation
+from segmentation.run_extrafloat_segmentation import run_extrafloat_segmentation
 
 logging.basicConfig(
     level=logging.INFO,

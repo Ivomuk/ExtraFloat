@@ -48,32 +48,32 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from extrafloat_segmentation_features import prepare_features, REQUIRED_COLUMNS
-import extrafloat_segmentation_pipeline as _segmentation_pipeline_module
-from extrafloat_segmentation_pipeline import (
+from segmentation.extrafloat_segmentation_features import prepare_features, REQUIRED_COLUMNS
+import segmentation.extrafloat_segmentation_pipeline as _segmentation_pipeline_module
+from segmentation.extrafloat_segmentation_pipeline import (
     flag_anomalies,
     run_diagnostic_clustering,
     compute_diagnostic_ensemble_stability,
     _identify_dormant_mask,
     DEFAULT_CLUSTERING_CONFIG,
 )
-from extrafloat_segmentation_profiling import (
+from segmentation.extrafloat_segmentation_profiling import (
     build_cluster_pack_profiles,
     merge_reference_lists,
     PROFILING_PACKS,
 )
-from extrafloat_segmentation_drift import (
+from segmentation.extrafloat_segmentation_drift import (
     build_drift_report,
     build_tier_drift_report,
     load_drift_baseline,
     save_drift_baseline,
     DEFAULT_DRIFT_CONFIG,
 )
-from extrafloat_segmentation_validation import (
+from segmentation.extrafloat_segmentation_validation import (
     run_quality_gate,
     DEFAULT_QUALITY_GATE_CONFIG,
 )
-from extrafloat_segmentation_scoring import (
+from segmentation.extrafloat_segmentation_scoring import (
     compute_agent_capacity,
     load_scorecard,
     BUSINESS_SEGMENTS,

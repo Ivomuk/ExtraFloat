@@ -38,8 +38,8 @@ import sys
 
 import pandas as pd
 
-from extrafloat_segmentation_features import prepare_features
-from extrafloat_segmentation_scoring import calibrate_capacity_scorecard, save_scorecard
+from segmentation.extrafloat_segmentation_features import prepare_features
+from segmentation.extrafloat_segmentation_scoring import calibrate_capacity_scorecard, save_scorecard
 
 
 def _build_parser() -> argparse.ArgumentParser:
