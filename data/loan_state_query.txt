@@ -1,174 +1,216 @@
 -- ============================================================
--- ExtraFloat — Loan-Level Training Data Query
+-- ExtraFloat — Loan-Level Training Data Query  (v2)
 -- Sources:
 --   analytics.momo_loan_book_tracker_disbursements_daily
 --   analytics.momo_loan_book_tracker_loan_state_daily
 --
--- Unit of analysis: one row per disbursement (disbursement_fid)
+-- Grain: one row per (disbursement_fid, split).
+--   Each loan belongs to exactly one split; the split date ranges are
+--   disjoint, so the same disbursement_fid cannot appear in both train
+--   and validation.
 --
--- loan_status values:
+-- loan_status values in momo_loan_book_tracker_loan_state_daily:
 --   OPEN_PRE_WINDOW  — loan was active before the Jan 2026 data window
---   OPEN             — loan currently active and within normal 24h window
---   SETTLED          — loan fully repaid → good outcome
---   CLOSED           — loan closed by system
---   OVERPAID         — agent paid more than the outstanding amount → good
---   ANOMALY_OPEN     — agent took a NEW loan before the current one was settled;
---                      the outstanding balance from the old loan was transferred
---                      to the new loan.  is_anomaly_open = 1 when this occurs.
---                      This is a rollover / debt-accumulation signal.
---   NEVER_BORROWED   — agent has no loan history (won't appear in disbursements)
+--   OPEN             — normal active loan within 24h window
+--   SETTLED          — fully repaid
+--   CLOSED           — closed by system
+--   OVERPAID         — agent paid more than outstanding
+--   ANOMALY_OPEN     — agent took a NEW loan before settling the current one;
+--                      the outstanding balance was transferred to the new loan.
+--                      is_anomaly_open = 1.  Signals rollover / debt accumulation.
+--   NEVER_BORROWED   — agent has no loan history (excluded from history ranking)
 --
 -- Label:
---   bad_state = 1  if MAX(days_aging) >= 1 in the 7 days after disbursement
---              = 0  if the loan was repaid within the 24-hour window
+--   bad_state = 1 if in the 7 days AFTER disbursement (days 1–7, exclusive of
+--   day 0 which is the disbursement day):
+--     (a) MAX(days_aging) >= 1        — loan overdue after the 24h window, OR
+--     (b) loan_status = 'ANOMALY_OPEN' — agent re-borrowed before settling;
+--                                       balance was transferred, not repaid.
+--   bad_state = 0 if neither condition was observed in the window.
 --
---   days_aging is "days since the due date (24 hours after loan received)".
---   bad_state >= 1 means the agent did not repay on time for the 24h product.
---   ANOMALY_OPEN loans are correctly counted as bad_state = 1: the agent took
---   a new loan before settling the old one, meaning the 24h window was missed.
---   This replaces future_penalties_30D > 0 (transaction-level, inflated ~59%)
---   with a loan-level overdue flag (expected bad_rate ~20-35%).
+--   NOTE: bad_state = 0 means "no overdue or rollover observed," not a confirmed
+--   24h repayment.  That equivalence holds only if loan_state_daily has no gaps
+--   for open loans and SETTLED/CLOSED means fully repaid.  Validate before use.
 --
 -- Features:
---   Historical loan behaviour as of the day before each disbursement.
---   All lifetime_* columns in loan_state_daily are cumulative running totals,
---   so the most-recent state row before this loan captures all prior history.
+--   Loan behaviour strictly before each disbursement date (point-in-time).
+--   Uses MAX(date_key) + join (not global ROW_NUMBER) so that every disbursement
+--   — not just the agent's most recent — receives the correct historical snapshot.
 --
--- Snapshot dates:
---   Adjust the snapshots CTE to match the calibration / inference date needed.
---   Train on an earlier month; validate on a later month.
+-- Date arithmetic:
+--   All window comparisons use horizon_date_key, derived from the DATE column
+--   via YEAR() * 10000 + MONTH() * 100 + DAY(), to avoid month-end arithmetic
+--   errors (e.g. 20260528 + 7 = 20260535, which is not a valid date).
 --
--- Trino / Athena compatible (uses TRY_CAST, DATE_DIFF, ROW_NUMBER).
+-- Trino / Athena compatible.
 -- ============================================================
 
-WITH snapshots AS (
-    -- Add or remove rows here to produce train / validation splits
-    SELECT CAST(20260531 AS BIGINT) AS snapshot_dt, 'train'      AS split
+WITH
+
+-- ── Split definitions: disjoint date ranges, no overlap ──────────────────────
+-- Adding more rows here adds more splits; never let date ranges overlap.
+splits AS (
+    SELECT DATE '2026-01-01' AS split_start, DATE '2026-04-30' AS split_end, 'train'      AS split
     UNION ALL
-    SELECT CAST(20260731 AS BIGINT) AS snapshot_dt, 'validation' AS split
+    SELECT DATE '2026-05-01' AS split_start, DATE '2026-07-31' AS split_end, 'validation' AS split
 ),
 
--- ── Step 1: All XtraFloat disbursements up to snapshot ────────────────────────
+-- ── Step 1: One row per disbursement_fid ─────────────────────────────────────
+-- momo_loan_book_tracker_disbursements_daily may contain one row per loan per
+-- day (a daily snapshot), not a single immutable row per loan.  Deduplicate to
+-- the earliest date_key to recover the original disbursement event.
+disbursements_dedup AS (
+    SELECT
+        customer_msisdn                                             AS msisdn,
+        disbursement_fid,
+        CAST(disbursement_ts AS DATE)                              AS loan_date,
+        disbursement_amount_ugx,
+        sales_region,
+        sales_territory,
+        district,
+        ROW_NUMBER() OVER (
+            PARTITION BY disbursement_fid
+            ORDER BY date_key ASC                    -- earliest row = original event
+        )                                                          AS rn
+    FROM analytics.momo_loan_book_tracker_disbursements_daily
+    WHERE ova      = 'XTRAFLOAT-AGENT'
+      AND date_key >= 20260101
+),
+
+-- Assign split membership and pre-compute YYYYMMDD integer keys for all
+-- date-range comparisons against date_key in loan_state_daily.
+-- Using YEAR()*10000 + MONTH()*100 + DAY() avoids the month-end integer
+-- arithmetic error that occurs when adding a plain integer to 20260528, etc.
 disbursements AS (
     SELECT
-        d.customer_msisdn                            AS msisdn,
+        d.msisdn,
         d.disbursement_fid,
-        CAST(d.disbursement_ts AS DATE)              AS loan_date,
-        d.date_key                                   AS disburse_key,
+        d.loan_date,
+        s.split,
         d.disbursement_amount_ugx,
         d.sales_region,
         d.sales_territory,
         d.district,
-        s.snapshot_dt,
-        s.split
-    FROM analytics.momo_loan_book_tracker_disbursements_daily d
-    CROSS JOIN snapshots s
-    WHERE d.ova        = 'XTRAFLOAT-AGENT'
-      AND d.date_key  <= s.snapshot_dt         -- disbursed on or before snapshot
-      AND d.date_key  >= 20260101              -- data available from Jan 2026
+        -- YYYYMMDD key for the disbursement day (day 0 — not yet due)
+        YEAR(d.loan_date)  * 10000
+            + MONTH(d.loan_date)  * 100
+            + DAY(d.loan_date)                                     AS loan_date_key,
+        -- YYYYMMDD key for day 7 after disbursement (end of outcome window)
+        YEAR(DATE_ADD('day', 7, d.loan_date))  * 10000
+            + MONTH(DATE_ADD('day', 7, d.loan_date)) * 100
+            + DAY(DATE_ADD('day', 7, d.loan_date))                 AS horizon_date_key
+    FROM disbursements_dedup d
+    JOIN splits s ON d.loan_date BETWEEN s.split_start AND s.split_end
+    WHERE d.rn = 1                                                 -- one row per loan
 ),
 
--- ── Step 2: Label — max days_aging in 7-day outcome window ───────────────────
+-- ── Step 2: Label — outcome in days 1–7 after disbursement ───────────────────
+-- Outcome window: date_key strictly AFTER disbursement day (> loan_date_key)
+-- through day 7 inclusive (<= horizon_date_key).
+-- Day 0 is excluded: the 24h due date occurs at 24h after disbursement_ts,
+-- which falls within day 1 of the state table.
 --
---  Join key: customer_msisdn + current_loan_start_date = loan_date
---  XtraFloat allows at most one active loan at a time, so (msisdn, loan_date)
---  is unique → the join produces exactly one loan match per disbursement.
+-- bad_state = 1 if either:
+--   (a) any state row shows days_aging >= 1 (loan overdue past the 24h window)
+--   (b) any state row shows ANOMALY_OPEN (agent re-borrowed, balance transferred)
 --
---  outcome_observed = 1 if the loan appears in loan_state_daily during the
---  window; loans disbursed near the end of the available data may lack the
---  full 7-day window and should be excluded from training (WHERE clause below).
---
+-- Uniqueness assumption: (customer_msisdn, current_loan_start_date) identifies
+-- a unique loan because XtraFloat permits at most one active loan at a time.
+-- Edge case: two separate loans disbursed to the same agent on the same calendar
+-- date would both match here (over-count).  Detectable post-hoc by checking
+-- disbursement_event_count > 1 in loan_state_daily for the affected date.
 loan_labels AS (
     SELECT
         d.msisdn,
         d.disbursement_fid,
-        d.snapshot_dt,
-        MAX(ls.days_aging)                                               AS max_days_aging_7d,
-        CASE WHEN MAX(ls.days_aging) >= 1 THEN 1 ELSE 0 END             AS bad_state,
-        COUNT(ls.date_key)                                               AS outcome_window_days
+        d.split,
+        MAX(ls.days_aging)                                                        AS max_days_aging_7d,
+        CASE
+            WHEN MAX(ls.days_aging) >= 1
+              OR MAX(CASE WHEN ls.loan_status = 'ANOMALY_OPEN' THEN 1 ELSE 0 END) = 1
+            THEN 1 ELSE 0
+        END                                                                       AS bad_state,
+        COUNT(DISTINCT ls.date_key)                                               AS observed_days,
+        MIN(ls.date_key)                                                          AS first_obs_key,
+        MAX(ls.date_key)                                                          AS last_obs_key
     FROM disbursements d
     JOIN analytics.momo_loan_book_tracker_loan_state_daily ls
-        ON  ls.customer_msisdn        = d.msisdn
-        AND ls.current_loan_start_date = d.loan_date                     -- same loan
-        AND ls.date_key BETWEEN d.disburse_key AND d.disburse_key + 7   -- 7-day window
-    GROUP BY d.msisdn, d.disbursement_fid, d.snapshot_dt
+        ON  ls.customer_msisdn          = d.msisdn
+        AND ls.current_loan_start_date  = d.loan_date         -- same loan
+        AND ls.date_key                 > d.loan_date_key     -- day 1 onward (past 24h window)
+        AND ls.date_key                <= d.horizon_date_key  -- through day 7
+    GROUP BY d.msisdn, d.disbursement_fid, d.split
 ),
 
--- ── Step 3: Historical features — most-recent state row before disbursement ──
+-- ── Step 3a: Point-in-time date lookup ───────────────────────────────────────
+-- For each disbursement, find the most-recent date_key in loan_state_daily
+-- that is strictly before the disbursement date.
 --
---  ROW_NUMBER ranks state rows for each agent newest-first.
---  Filtering rn = 1 AND date_key < disburse_key gives the point-in-time
---  snapshot immediately before the new loan, capturing all prior cumulative
---  behaviour without any label leakage.
---
-loan_history_ranked AS (
+-- Why MAX(date_key) + join instead of ROW_NUMBER:
+--   ROW_NUMBER() OVER (PARTITION BY msisdn ORDER BY date_key DESC) assigns rn=1
+--   to the agent's globally most-recent row across all history.  Joining on
+--   rn = 1 AND date_key < loan_date_key returns NULL for every disbursement that
+--   is not the agent's last, because the rn=1 row (later in time) fails the
+--   date_key < loan_date_key filter.  This leaves all but the final disbursement
+--   without historical features — silently and incorrectly.
+--   The MAX + join pattern resolves this correctly per disbursement.
+pit_lookup AS (
     SELECT
-        ls.customer_msisdn                                               AS msisdn,
-        ls.date_key,
+        d.msisdn,
+        d.disbursement_fid,
+        d.split,
+        d.loan_date,                                           -- carried for days_since_last_repayment
+        MAX(ls.date_key)                                       AS pit_date_key
+    FROM disbursements d
+    JOIN analytics.momo_loan_book_tracker_loan_state_daily ls
+        ON  ls.customer_msisdn = d.msisdn
+        AND ls.date_key        < d.loan_date_key               -- strictly before this disbursement
+        AND ls.loan_status    != 'NEVER_BORROWED'              -- no loan history — skip
+    GROUP BY d.msisdn, d.disbursement_fid, d.split, d.loan_date
+),
+
+-- ── Step 3b: Fetch the feature row at the point-in-time date ─────────────────
+-- Join back to loan_state_daily on the exact pit_date_key found above.
+-- All lifetime_* columns are cumulative running totals, so this single row
+-- captures all historical behaviour up to (but not including) this loan.
+point_in_time AS (
+    SELECT
+        p.msisdn,
+        p.disbursement_fid,
+        p.split,
         ls.loan_seq,
-        ls.has_pre_window_history,
+        -- has_pre_window_history is boolean in source; CASE WHEN avoids cast ambiguity
+        CASE WHEN ls.has_pre_window_history THEN 1 ELSE 0 END           AS has_pre_window_history,
+        -- Non-zero means the prior loan was not fully settled when this one was taken
         ls.outstanding_ugx,
-        ls.days_aging                                                    AS last_days_aging,
+        -- Repayment duration of the most-recent closed loan
         ls.tenure_days                                                   AS last_tenure_days,
-        ls.last_repayment_date,
-        ls.is_anomaly_open,
-        ls.loan_status,
-        -- ANOMALY_OPEN = agent took a new loan before settling this one;
-        -- outstanding balance transferred.  Signals rollover / debt accumulation.
-        CASE WHEN ls.loan_status = 'ANOMALY_OPEN' THEN 1 ELSE 0 END    AS is_rollover,
+        -- Cumulative repayment ratio across all prior loans
         CASE
             WHEN ls.lifetime_disbursed_ugx > 0
             THEN TRY_CAST(ls.lifetime_repaid_ugx AS DOUBLE)
                  / TRY_CAST(ls.lifetime_disbursed_ugx AS DOUBLE)
             ELSE NULL
         END                                                              AS lifetime_repayment_ratio,
-        ROW_NUMBER() OVER (
-            PARTITION BY ls.customer_msisdn
-            ORDER BY ls.date_key DESC
-        )                                                                AS rn
-    FROM analytics.momo_loan_book_tracker_loan_state_daily ls
-    -- Exclude NEVER_BORROWED rows — agents with no loans carry no predictive history.
-    -- These would not appear in disbursements anyway, but excluding here keeps
-    -- the ROW_NUMBER ranking clean.
-    WHERE ls.loan_status != 'NEVER_BORROWED'
-),
-
--- Join historical features to each disbursement (point-in-time)
-point_in_time_features AS (
-    SELECT
-        d.msisdn,
-        d.disbursement_fid,
-        d.snapshot_dt,
-        d.loan_date,
-        -- Number of loans taken BEFORE this disbursement
-        COALESCE(h.loan_seq, 0)                                          AS loans_prior,
-        -- Had any loan before the Jan 2026 system launch
-        COALESCE(TRY_CAST(h.has_pre_window_history AS INTEGER), 0)      AS has_pre_window_history,
-        -- Outstanding balance at the moment of this new disbursement
-        -- Non-zero means a prior loan may still be open (unusual for 24h product)
-        COALESCE(h.outstanding_ugx, 0)                                  AS outstanding_at_disburse,
-        -- Most recent closed loan's repayment duration (days)
-        h.last_tenure_days,
-        -- Cumulative repayment completeness across all prior loans
-        h.lifetime_repayment_ratio,
-        -- Whether the most-recent prior loan was rolled over (ANOMALY_OPEN):
-        -- agent took a new loan before settling, and the balance was transferred.
-        -- This signals rollover dependency / accumulated debt, not simply "anomaly".
-        CASE WHEN h.is_rollover = 1 THEN 1 ELSE 0 END                  AS had_prior_rollover,
-        -- Days from last repayment to this disbursement (recency of good behaviour)
-        DATE_DIFF('day', h.last_repayment_date, d.loan_date)            AS days_since_last_repayment
-    FROM disbursements d
-    LEFT JOIN loan_history_ranked h
-        ON  h.msisdn    = d.msisdn
-        AND h.date_key  < d.disburse_key   -- strictly historical — no leakage
-        AND h.rn        = 1                 -- most-recent pre-disbursement row
+        -- 1 = the prior loan rolled over into a new one (ANOMALY_OPEN) without settlement
+        CASE WHEN ls.loan_status = 'ANOMALY_OPEN' THEN 1 ELSE 0 END    AS had_prior_rollover,
+        -- Days between the last repayment and this disbursement (recency of good behaviour)
+        DATE_DIFF('day', ls.last_repayment_date, p.loan_date)           AS days_since_last_repayment
+    FROM pit_lookup p
+    JOIN analytics.momo_loan_book_tracker_loan_state_daily ls
+        ON  ls.customer_msisdn = p.msisdn
+        AND ls.date_key        = p.pit_date_key
 )
 
 -- ── Final output ─────────────────────────────────────────────────────────────
+-- Observability filter: require at least 5 of 7 outcome days to be present.
+-- This is a pragmatic threshold for loans near the end of available data.
+-- A stronger alternative (once max_data_date is known):
+--   AND d.loan_date <= [max_data_date in loan_state_daily] - INTERVAL '7' DAY
+-- which guarantees the full 7-day window exists in the warehouse.
 SELECT
     d.msisdn,
     d.disbursement_fid,
-    d.snapshot_dt,
     d.split,
     d.loan_date,
     d.disbursement_amount_ugx,
@@ -177,31 +219,32 @@ SELECT
     d.district,
 
     -- ── Historical features (point-in-time, no leakage) ──────────────────
-    COALESCE(p.loans_prior,                0)   AS loan_seq,
-    COALESCE(p.has_pre_window_history,     0)   AS has_pre_window_history,
-    COALESCE(p.outstanding_at_disburse,    0)   AS outstanding_at_disburse,
-    p.last_tenure_days,
-    p.lifetime_repayment_ratio,
-    -- 1 = prior loan was rolled over into this one (ANOMALY_OPEN / debt transfer)
-    COALESCE(p.had_prior_rollover,         0)   AS had_prior_rollover,
-    p.days_since_last_repayment,
+    -- NULL means the agent had no prior loan history in the data window.
+    -- First-loan agents (loan_seq = 0) will have all feature columns NULL or 0.
+    COALESCE(p.loan_seq,                 0)     AS loan_seq,
+    COALESCE(p.has_pre_window_history,   0)     AS has_pre_window_history,
+    COALESCE(p.outstanding_ugx,          0)     AS outstanding_at_disburse,
+    p.last_tenure_days,                          -- NULL for first-loan agents
+    p.lifetime_repayment_ratio,                  -- NULL for first-loan agents
+    COALESCE(p.had_prior_rollover,       0)     AS had_prior_rollover,
+    p.days_since_last_repayment,                 -- NULL for first-loan agents
 
     -- ── Label ─────────────────────────────────────────────────────────────
     l.max_days_aging_7d,
     l.bad_state,
-    l.outcome_window_days
+    l.observed_days,
+    l.first_obs_key,
+    l.last_obs_key
 
 FROM disbursements d
-LEFT JOIN point_in_time_features p
+LEFT JOIN point_in_time p
     ON  p.msisdn           = d.msisdn
     AND p.disbursement_fid = d.disbursement_fid
-    AND p.snapshot_dt      = d.snapshot_dt
+    AND p.split            = d.split
 LEFT JOIN loan_labels l
     ON  l.msisdn           = d.msisdn
     AND l.disbursement_fid = d.disbursement_fid
-    AND l.snapshot_dt      = d.snapshot_dt
+    AND l.split            = d.split
 
--- Only keep rows where the outcome window is fully observed
--- (loans disbursed < 7 days before snapshot_dt will have incomplete labels)
-WHERE l.outcome_window_days >= 3               -- at least 3 days of state observed
-  AND l.bad_state IS NOT NULL                  -- label must exist
+WHERE l.bad_state    IS NOT NULL           -- loan must appear in state table (label exists)
+  AND l.observed_days >= 5                 -- at least 5 of 7 outcome days observed
