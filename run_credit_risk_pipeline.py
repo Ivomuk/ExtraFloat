@@ -454,7 +454,27 @@ def run_credit_risk_pipeline(
         result_df["risk_tier"].value_counts().to_string() if "risk_tier" in result_df.columns else "n/a",
     )
 
-    # -- Stage 7: Audit columns ---------------------------------------------
+    # -- Stage 7: Re-attach segmentation columns to engine output -------------
+    # The engine does not pass through extra columns, so join capacity_tier,
+    # is_anomaly, is_global_anomaly, is_local_anomaly back from seg_out.
+    seg_passthrough_cols = [
+        c for c in (
+            "capacity_tier", "capacity_score", "capacity_tier_raw",
+            "is_anomaly", "is_global_anomaly", "is_local_anomaly",
+        )
+        if c in seg_out.columns
+    ]
+    if seg_passthrough_cols and "agent_msisdn" in seg_out.columns:
+        seg_reattach = seg_out[["agent_msisdn"] + seg_passthrough_cols].copy()
+        seg_reattach = seg_reattach.rename(columns={"agent_msisdn": "msisdn"})
+        seg_reattach["msisdn"] = _norm_msisdn(seg_reattach["msisdn"].astype(str).str.strip())
+        result_df = result_df.merge(seg_reattach, on="msisdn", how="left")
+        logger.info(
+            "Stage 7: re-attached segmentation columns %s to output",
+            seg_passthrough_cols,
+        )
+
+    # -- Stage 8: Audit columns ---------------------------------------------
     # score_source distinguishes legitimate population misses (agents not in
     # PD output -> "7_signal_fallback") from calibration failures that now
     # propagate as exceptions rather than silent NaN.
