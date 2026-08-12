@@ -38,18 +38,47 @@
 --   end of snapshot_dt" -- so it uses `<=` (inclusive) throughout,
 --   matching the convention in loan_summary_query.txt.
 --
--- NOT A DROP-IN REPLACEMENT FOR THE EXISTING BORROWER FILE
---   data/borrower_credit_limit_aggregated.txt (feeding
---   load_borrower_limit_features() / BORROWER_LIMIT_REQUIRED_COLUMNS)
---   expects hour-level cure-time fields (lifetime_on_time_24h_rate,
---   hours_to_principal_cure, recovery_24h, ...) reconstructed from raw
---   devdata.xtrafloat_daily_trans transactions. momo_loan_book_tracker_
---   loan_state_daily only has day-level granularity (days_aging,
---   tenure_days) -- there is no hour-level cure data to compute those
---   fields from here, so this file does not attempt to match that
---   column contract. Wiring this output into the engine (as a new
---   loader, or as additions to an existing one) is a separate decision;
---   this file only produces the data.
+-- NOT A DROP-IN REPLACEMENT FOR ANY EXISTING ENGINE INPUT FILE
+--   The credit limit engine currently takes three files: transaction
+--   capacity (data/transaction_capacity_features_sample.txt), borrower
+--   history (data/borrower_history.txt), and loan summary
+--   (data/loan_summary_query.txt). This file replaces neither.
+--
+--   - data/loan_summary_query.txt feeds compute_recent_usage_cap(),
+--     which requires disbursement_vol/val_1m, repayment_vol/val_1m,
+--     penalties_1m, and their 3m variants -- trailing CASH-FLOW volume,
+--     sourced from event-level devdata.xtrafloat_daily_trans rows. This
+--     file cannot produce those: momo_loan_book_tracker_loan_state_daily
+--     only exposes cumulative per-loan running totals as of each daily
+--     snapshot, not a repayment/penalty event log, so there is no way to
+--     derive a trailing-30-day repayment or penalty FLOW from it without
+--     either differencing two point-in-time snapshots or pulling in
+--     xtrafloat_daily_trans as well (which would make this file a mixed-
+--     source query, not a clean sibling to loan_state_query_updated.txt).
+--
+--   - data/borrower_history.txt (== borrower_credit_limit_aggregated.txt,
+--     feeding load_borrower_limit_features() / prepare_borrower_limit_
+--     features()) expects hour-level cure-time fields
+--     (lifetime_on_time_24h_rate, hours_to_principal_cure, recovery_24h,
+--     ...) reconstructed from the same raw devdata.xtrafloat_daily_trans
+--     transactions. momo_loan_book_tracker_loan_state_daily only has
+--     day-level granularity (days_aging, tenure_days), so there is no
+--     hour-level cure data to compute those fields from here either.
+--
+--   What this file DOES add that is not already produced anywhere else
+--   in the pipeline: a validated, point-in-time-correct view of an
+--   agent's CURRENT loan state as of an arbitrary snapshot date --
+--   has_unresolved_loan_at_snapshot, active_loan_days_aging_at_snapshot,
+--   active_loan_outstanding_ugx_at_snapshot, anomaly_open_at_snapshot --
+--   plus historical_anomaly_open_loan_rate using the corrected per-loan
+--   lifetime_* semantics documented in loan_state_query_updated.txt. None
+--   of the three existing engine input files carry a live "is this agent
+--   currently delinquent or mid-rollover, and by how much" signal.
+--
+--   This file is complementary: a fourth, additive input, not a
+--   replacement for any of the three above. Whether and how to wire it
+--   into the engine (a new loader, a new cap, or folding specific
+--   columns into an existing cap's inputs) is a separate decision.
 -- =====================================================================
 
 WITH
