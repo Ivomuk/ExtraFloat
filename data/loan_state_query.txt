@@ -6,12 +6,26 @@
 --
 -- Unit of analysis: one row per disbursement (disbursement_fid)
 --
+-- loan_status values:
+--   OPEN_PRE_WINDOW  — loan was active before the Jan 2026 data window
+--   OPEN             — loan currently active and within normal 24h window
+--   SETTLED          — loan fully repaid → good outcome
+--   CLOSED           — loan closed by system
+--   OVERPAID         — agent paid more than the outstanding amount → good
+--   ANOMALY_OPEN     — agent took a NEW loan before the current one was settled;
+--                      the outstanding balance from the old loan was transferred
+--                      to the new loan.  is_anomaly_open = 1 when this occurs.
+--                      This is a rollover / debt-accumulation signal.
+--   NEVER_BORROWED   — agent has no loan history (won't appear in disbursements)
+--
 -- Label:
 --   bad_state = 1  if MAX(days_aging) >= 1 in the 7 days after disbursement
 --              = 0  if the loan was repaid within the 24-hour window
 --
 --   days_aging is "days since the due date (24 hours after loan received)".
 --   bad_state >= 1 means the agent did not repay on time for the 24h product.
+--   ANOMALY_OPEN loans are correctly counted as bad_state = 1: the agent took
+--   a new loan before settling the old one, meaning the 24h window was missed.
 --   This replaces future_penalties_30D > 0 (transaction-level, inflated ~59%)
 --   with a loan-level overdue flag (expected bad_rate ~20-35%).
 --
@@ -99,6 +113,9 @@ loan_history_ranked AS (
         ls.last_repayment_date,
         ls.is_anomaly_open,
         ls.loan_status,
+        -- ANOMALY_OPEN = agent took a new loan before settling this one;
+        -- outstanding balance transferred.  Signals rollover / debt accumulation.
+        CASE WHEN ls.loan_status = 'ANOMALY_OPEN' THEN 1 ELSE 0 END    AS is_rollover,
         CASE
             WHEN ls.lifetime_disbursed_ugx > 0
             THEN TRY_CAST(ls.lifetime_repaid_ugx AS DOUBLE)
@@ -110,6 +127,10 @@ loan_history_ranked AS (
             ORDER BY ls.date_key DESC
         )                                                                AS rn
     FROM analytics.momo_loan_book_tracker_loan_state_daily ls
+    -- Exclude NEVER_BORROWED rows — agents with no loans carry no predictive history.
+    -- These would not appear in disbursements anyway, but excluding here keeps
+    -- the ROW_NUMBER ranking clean.
+    WHERE ls.loan_status != 'NEVER_BORROWED'
 ),
 
 -- Join historical features to each disbursement (point-in-time)
@@ -130,8 +151,10 @@ point_in_time_features AS (
         h.last_tenure_days,
         -- Cumulative repayment completeness across all prior loans
         h.lifetime_repayment_ratio,
-        -- Whether the most recent prior state was an anomaly open loan
-        CASE WHEN h.is_anomaly_open = true THEN 1 ELSE 0 END            AS was_anomaly_open,
+        -- Whether the most-recent prior loan was rolled over (ANOMALY_OPEN):
+        -- agent took a new loan before settling, and the balance was transferred.
+        -- This signals rollover dependency / accumulated debt, not simply "anomaly".
+        CASE WHEN h.is_rollover = 1 THEN 1 ELSE 0 END                  AS had_prior_rollover,
         -- Days from last repayment to this disbursement (recency of good behaviour)
         DATE_DIFF('day', h.last_repayment_date, d.loan_date)            AS days_since_last_repayment
     FROM disbursements d
@@ -159,7 +182,8 @@ SELECT
     COALESCE(p.outstanding_at_disburse,    0)   AS outstanding_at_disburse,
     p.last_tenure_days,
     p.lifetime_repayment_ratio,
-    COALESCE(p.was_anomaly_open,           0)   AS was_anomaly_open,
+    -- 1 = prior loan was rolled over into this one (ANOMALY_OPEN / debt transfer)
+    COALESCE(p.had_prior_rollover,         0)   AS had_prior_rollover,
     p.days_since_last_repayment,
 
     -- ── Label ─────────────────────────────────────────────────────────────
