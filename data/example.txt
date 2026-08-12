@@ -1,0 +1,79 @@
+analytics.momo_loan_book_tracker_disbursements_daily
+
+customer_msisdn customer_partner_account_id customer_partner_account_no optin_transaction_id optin_ts preapproval_customer_fri preapproval_partner_fri preapproval_id preapproval_ts disbursement_fid disbursement_uid disbursement_amount_ugx disbursement_ts disbursement_external_id partner_msisdn disbursement_from_fee_ugx disbursement_to_fee_ugx ova partner_name service_name siteid sales_region sales_territory district inserted_ts date_key
+25676 [NULL] [NULL] [NULL] [NULL] [NULL] [NULL] [NULL] [NULL] 37609212888 1604124241446 100,000 2026-01-01 10:11:46.000 [NULL] [NULL] 0 0 XTRAFLOAT-AGENT Xtrafloat Disbursement 2887 EAST MBALE TERRITORY MBALE 2026-06-17 07:48:27.546 20,260,101
+25676 [NULL] [NULL] [NULL] [NULL] [NULL] [NULL] [NULL] [NULL] 37632202568 1604190735156 100,000 2026-01-02 11:48:39.000 [NULL] [NULL] 0 0 XTRAFLOAT-AGENT Xtrafloat Disbursement 2887 EAST MBALE TERRITORY MBALE 2026-06-17 07:59:28.086 20,260,102
+customer_msisdn - customer msisdn
+disbursement_fid - unique loan id
+disbursement_amount_ugx - Amount disbursed
+disbursement_ts - time disbursed
+ova - type of agent
+partner_name - extrafloat
+service_name - Type of service disbursement
+sales_region - region info
+sales_territory - region info
+district - region info
+date_key - snapshot_dt
+
+
+
+analytics.momo_loan_book_tracker_loan_state_daily
+
+
+customer_msisdn customer_key ova partner_name loan_uid loan_uid_num loan_seq first_disbursement_date current_loan_start_date last_disbursement_date last_repayment_date last_optin_date last_optout_date last_optin_with_preapproval_date last_optout_with_loan_settlement_date lifetime_disbursed_ugx lifetime_repaid_ugx lifetime_gross_repaid_ugx lifetime_fees_paid_ugx lifetime_interest_paid_ugx outstanding_ugx disbursement_event_count repayment_event_count fee_event_count interest_event_count days_aging aging_bucket loan_status has_pre_window_history is_anomaly_open is_active_loan closure_date preapproval_id interest_and_penalty_ugx tenure_days interest_and_penalty_rate_pct interest_and_penalty_daily_rate_pct partner_loan_product_inferred expected_total_charge_rate_pct expected_total_charge_ugx charge_variance_ugx charge_variance_pct is_charge_anomaly inserted_ts date_key
+2567759 2567759 XTRAFLOAT-AGENT Xtrafloat LN_6a7f6f5288a8f21a45ed18be7353bc44 479,623,418,145,836,833 17 2026-04-03 2026-04-03 2026-04-03 [NULL] 2026-04-20 [NULL] 2026-04-20 [NULL] 5 0 0 0 0 5 1 0 0 0 77 61-90 ANOMALY_OPEN false true false 2026-04-30 [NULL] [NULL] [NULL] [NULL] [NULL] [NULL] [NULL] [NULL] [NULL] [NULL] [NULL] 2026-06-20 13:25:53.665 20,260,619
+2567710 2567710 XTRAFLOAT-AGENT Xtrafloat LN_60c58543a5ed4f7a0d63fb6638466e92 435,820,382,727,886,071 32 2026-04-04 2026-04-04 2026-04-04 [NULL] [NULL] [NULL] [NULL] [NULL] 10,000 0 0 0 0 10,000 1 0 0 0 76 61-90 ANOMALY_OPEN false true false 2026-04-30 [NULL] [NULL] [NULL] [NULL] [NULL] [NULL] [NULL] [NULL] [NULL] [NULL] [NULL] 2026-06-20 13:25:53.665 20,260,619
+
+customer_msisdn - customer msisdn
+ova - type of agent
+partner_name - extrafloat
+loan_uid - unique id that is regenarated
+loan_seq Number of loans taken,
+first_disbursement_date ,current_loan_start_datelast_disbursement_date - same for extrafloat
+last_repayment_date - last repayment
+last_optin_date - A subscriber has to confirm everytime they take a loan
+last_optout_date - proof of loan settlement from the system
+last_optin_with_preapproval_date - system captured optin code
+last_optout_with_loan_settlement_date - system captured loan has been settled
+lifetime_disbursed_ugx - disbursed amount
+lifetime_repaid_ugx - Amount repaid
+lifetime_gross_repaid_ugx - Amount repaid plus interest
+lifetime_fees_paid_ugx - fees for the loan
+lifetime_interest_paid_ugx - interest paid
+outstanding_ugx - outstanding amount
+disbursement_event_count - how many disbursements
+repayment_event_count - repayment count
+fee_event_count - fee events
+interest_event_count - interest counts
+days_aging - How long it has taken since day due (24 hours after loan received)
+aging_bucket - buckets
+loan_status - loan status (open/closed and other statuses)
+has_pre_window_history - any history of loans before system launch
+is_anomaly_open - flag
+is_active_loan - flag
+closure_date - date loan was paid off
+preapproval_id - code generated after a subscriber opts in a loan request
+interest_and_penalty_ugx
+tenure_days - disbursement date to closure date
+interest_and_penalty_rate_pct
+interest_and_penalty_daily_rate_pct
+partner_loan_product_inferred
+expected_total_charge_rate_pct
+expected_total_charge_ugx
+charge_variance_ugx
+charge_variance_pct is_charge_anomaly
+inserted_ts
+date_key snapshot_dt
+
+
+Note loan_status has the following values:  
+OPEN_PRE_WINDOW
+OPEN
+SETTLED
+CLOSED
+OVERPAID
+ANOMALY_OPEN
+NEVER_BORROWED  .  ANOMALY_OPEN means that the agent had a loan and they got another loan before the current loan was fully settled. The amount on the on the loan that has ANOMALY_OPEN was transferred to the new loan.   This therefore means that the flag is_anomaly_open=1
+
+
+has_pre_window_history indicates if an agents had any loans pre-Jan-2026 history because the tables were loaded starting 20260101
