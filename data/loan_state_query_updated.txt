@@ -649,14 +649,23 @@ scoring_state_features AS (
 -- ---------------------------------------------------------------------
 -- 12. One canonical state per prior loan
 --
--- Because the target loan is identified by mapped loan_uid, exclude it
--- explicitly. This matters for the second same-day disbursement: the
--- first same-day loan may be valid history if it was already closed,
--- while the second/target loan itself must never become a feature.
+-- Earlier-date prior loans:
+--   Use only state snapshots strictly before the target loan date.
 --
--- Daily state data cannot prove an intraday closure timestamp. Therefore,
--- same-day prior loans are included only when their sequence is lower
--- than the mapped target loan's sequence and they have closure evidence.
+-- Earlier same-day prior loans:
+--   A customer may repay loan 1 and receive loan 2 later that day.
+--   For loan 2, loan 1 may be included as prior history when:
+--
+--     - it has a lower loan_seq than the mapped target loan;
+--     - it has closure evidence on that date; and
+--     - its state row is dated no later than the target loan date.
+--
+-- Because loan_state_daily has dates rather than event timestamps, this
+-- proves same-day closure but does not independently prove that closure
+-- occurred before loan 2's exact disbursement timestamp. The positional
+-- mapping and product rule supply that ordering assumption.
+--
+-- The target loan_uid itself is always excluded.
 -- ---------------------------------------------------------------------
 prior_loan_state_candidates AS (
     SELECT
@@ -693,13 +702,22 @@ prior_loan_state_candidates AS (
     JOIN loan_state ls
       ON ls.customer_msisdn = d.msisdn
      AND ls.loan_uid <> d.target_loan_uid
-     AND ls.state_date < d.loan_date
      AND ls.loan_status <> 'NEVER_BORROWED'
      AND (
-            ls.current_loan_start_date < d.loan_date
+            -- Loans originating before the target date use only state
+            -- known strictly before that date.
+            (
+                ls.current_loan_start_date < d.loan_date
+                AND ls.state_date < d.loan_date
+            )
 
-            OR (
+            OR
+
+            -- For target loan 2 on a customer-day, permit the closed
+            -- state of loan 1 from that same day.
+            (
                 ls.current_loan_start_date = d.loan_date
+                AND ls.state_date <= d.loan_date
                 AND ls.loan_seq < d.target_loan_seq
                 AND ls.closure_date IS NOT NULL
                 AND ls.closure_date <= d.loan_date
