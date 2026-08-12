@@ -569,6 +569,8 @@ def prepare_transaction_capacity_features(
     _tier_cfg = DEFAULT_CAP_CONFIG.get("agent_tier", {})
     _tier_map = _tier_cfg.get("tiers", {})
     _commission_thresholds = _tier_cfg.get("commission_thresholds", {})
+    # commission = COALESCE(SUM(cash_out_comm_6m + cash_in_comm_6m + voucher_cust_6m
+    #              + payment_cust_6m), 0) — 6-month rolling window from mfs_daily_agent_mart.
     commission = pd.to_numeric(df.get("commission", 0), errors="coerce").fillna(0)
 
     def _commission_to_multiplier(c):

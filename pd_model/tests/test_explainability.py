@@ -1,13 +1,19 @@
 """Tests for pd_model.modeling.explainability."""
 
+import importlib.util
+import sys
+
 import numpy as np
 import pandas as pd
+import pytest
 
 from pd_model.modeling.explainability import (
     build_adverse_action_df,
     compute_shap_values,
     shap_feature_importance,
 )
+
+_SHAP_AVAILABLE = importlib.util.find_spec("shap") is not None
 
 
 def _make_xgb_model(n_features: int = 5):
@@ -24,6 +30,19 @@ def _make_xgb_model(n_features: int = 5):
     return model, feat_names, X.iloc[300:].reset_index(drop=True)
 
 
+def test_compute_shap_values_raises_when_shap_missing(monkeypatch):
+    """Always runs — verifies clear error message when shap is absent."""
+    monkeypatch.setitem(sys.modules, "shap", None)  # simulate missing package
+    import importlib
+
+    import pd_model.modeling.explainability as mod
+
+    importlib.reload(mod)
+    with pytest.raises(ImportError, match=r"credit-risk\[shap\]"):
+        mod.compute_shap_values(None, pd.DataFrame(), "xgb")
+
+
+@pytest.mark.skipif(not _SHAP_AVAILABLE, reason="pip install 'credit-risk[shap]' required")
 class TestComputeShapValues:
     def test_shape_matches_input(self):
         model, feat_names, X_val = _make_xgb_model(n_features=5)

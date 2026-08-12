@@ -485,7 +485,7 @@ def test_composition_cramer_v_small_effect_is_stable():
 
     if _SCIPY_AVAILABLE:
         # chi-sq should be significant at large n
-        assert tier_r.chi2_significant is True, "Expected chi-sq significant for this dataset"
+        assert tier_r.chi2_significant, "Expected chi-sq significant for this dataset"
         assert tier_r.cramers_v is not None, "cramers_v should be populated when scipy available"
         assert tier_r.cramers_v < 0.10, (
             f"Expected tiny Cramér's V (< cramers_v_monitor_threshold=0.10), got {tier_r.cramers_v:.4f}"

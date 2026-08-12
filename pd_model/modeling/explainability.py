@@ -52,7 +52,9 @@ def compute_shap_values(model, X: pd.DataFrame, model_key: str) -> np.ndarray:
     try:
         import shap
     except ImportError as exc:
-        raise ImportError("shap is required for explainability. Install with: pip install shap") from exc
+        raise ImportError(
+            "shap is not installed. Run: pip install 'credit-risk[shap]'"
+        ) from exc
 
     explainer = shap.TreeExplainer(model)
     raw = explainer.shap_values(X)

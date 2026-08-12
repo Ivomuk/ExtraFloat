@@ -150,10 +150,12 @@ DEFAULT_CAP_CONFIG = {
     # agent_tier_ceiling_multiplier column; then applied by compute_capacity_cap()
     # and apply_policy_adjustments() via that column.
     #
-    # Key ordering matters -- tiers dict is matched with substring logic
-    # (k in agent_profile.lower()), so longer/more-specific keys must
-    # precede shorter ones: "silver class" before "silver",
-    # "new bronze" before "bronze".
+    # commission_thresholds must be ordered highest → lowest so the first-match
+    # loop in _commission_to_multiplier() returns the correct tier.
+    # "new bronze" must precede "bronze": a 50,000–99,999 commission must not
+    # match the 100,000 bronze threshold before "new bronze" is checked.
+    # Python dicts preserve insertion order (3.7+), so ordering is stable as
+    # long as this config literal is not reordered.
     "agent_tier": {
         "enabled": True,
         "default_multiplier": 0.05,  # fallback for unrecognised profiles

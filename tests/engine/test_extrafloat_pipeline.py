@@ -245,9 +245,9 @@ def _features(**overrides) -> pd.DataFrame:
 def test_prepare_transaction_capacity_features_sample_data():
     """
     agent_msisdn is renamed to msisdn; PRIMARY 30d/90d signals are derived;
-    operational_activity_flag is binary; Silver Class -> multiplier 0.85.
+    operational_activity_flag is binary; commission=250,000 -> Silver -> multiplier 0.25.
     """
-    df = pd.DataFrame([_txn_row()])
+    df = pd.DataFrame([_txn_row(commission=250_000)])
     result = prepare_transaction_capacity_features(df)
 
     # Rename: msisdn present, agent_msisdn gone
@@ -287,8 +287,9 @@ def test_prepare_transaction_capacity_features_sample_data():
     assert result["operational_activity_flag"].isin([0, 1]).all()
     assert row["operational_activity_flag"] == 1  # vol_1m=14 > 0
 
-    # Silver Class -> 0.25  (250,000 / 1,000,000)
+    # commission=250,000 -> silver tier -> 0.25  (250,000 / 1,000,000)
     assert row["agent_tier_ceiling_multiplier"] == pytest.approx(0.25)
+    assert row["agent_category"] == "silver"
 
 
 # -----------------------------------------------------------------------------
