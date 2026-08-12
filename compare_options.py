@@ -7,10 +7,18 @@ Option A (Current):
     commission → agent_category → hard ceiling
     segmentation → capacity_tier is informational only
 
-Option B (Behavioural adjustment):
-    commission → agent_category → base ceiling
-    segmentation → capacity_tier adjusts ceiling up or down within bounds
-    anomaly flag → caps at one tier below agent_category ceiling
+Option B (Bounded behavioural adjustment):
+    commission → agent_category → base ceiling  (eligibility gate — cannot be bypassed)
+    segmentation → capacity_tier adjusts ceiling ±1 tier from commission base
+    anomaly flag → caps at one tier below agent_category ceiling, floor at New Bronze
+
+Key design constraints in Option B:
+  1. Commission is the eligibility gate. Below Threshold agents (commission < 50,000)
+     receive 0 regardless of capacity_tier — behaviour cannot grant eligibility.
+  2. capacity_tier can move the ceiling at most ±1 tier from the commission base.
+     A Bronze agent with Diamond behaviour reaches Silver (not Diamond).
+  3. Anomaly penalty floors at New Bronze (50,000) for commissioned agents.
+     Unusual behaviour reduces limits but does not eliminate eligibility.
 
 Usage:
     python compare_options.py
@@ -48,36 +56,66 @@ def tier_one_below(tier_name: str) -> str:
     return TIER_ORDER[min(idx + 1, len(TIER_ORDER) - 1)]
 
 
+def _clamp_to_one_step(base_tier: str, cap_tier: str) -> str:
+    """
+    Limit capacity_tier adjustment to ±1 step from the commission base tier.
+
+    TIER_ORDER runs Diamond(0) … Below Threshold(7); lower index = higher ceiling.
+    A Bronze base with Diamond capacity → Silver (one step up, not full Diamond).
+    A Silver base with New Bronze capacity → Bronze (one step down, not New Bronze).
+    """
+    if base_tier not in TIER_ORDER or cap_tier not in TIER_ORDER:
+        return base_tier
+    base_idx = TIER_ORDER.index(base_tier)
+    cap_idx  = TIER_ORDER.index(cap_tier)
+    if cap_idx < base_idx:        # capacity_tier is more generous → one step up
+        adj_idx = base_idx - 1
+    elif cap_idx > base_idx:      # capacity_tier is more conservative → one step down
+        adj_idx = base_idx + 1
+    else:
+        adj_idx = base_idx        # same tier — no change
+    return TIER_ORDER[max(0, min(adj_idx, len(TIER_ORDER) - 1))]
+
+
 def compute_option_b_ceiling(row) -> float:
     """
-    Option B ceiling logic:
-      1. Start with agent_category (commission) ceiling as base.
-      2. If capacity_tier is available, use it as the adjusted ceiling.
-         capacity_tier captures multi-factor behaviour (commission + volumes
-         + customers + trajectory) so it can be higher or lower than the
-         commission tier alone.
-      3. If is_anomaly=True, cap at one tier below the agent_category ceiling
-         regardless of what capacity_tier says — unusual behaviour warrants
-         a conservative limit until investigated.
+    Option B ceiling logic (bounded adjustment):
+
+      1. Commission eligibility gate — if commission < 50,000 (Below Threshold),
+         return 0 immediately. capacity_tier cannot override eligibility.
+      2. capacity_tier adjusts the ceiling ±1 tier from the commission base.
+         A Bronze commission agent with Diamond behaviour reaches Silver, not Diamond.
+      3. Anomaly penalty — cap at one tier below commission base, floor at New Bronze.
+         Unusual behaviour reduces limits but never eliminates eligibility.
+      4. Thin-file cap still applies (same as Option A).
     """
-    base_tier    = row.get("agent_category", "Below Threshold")
-    cap_tier     = row.get("capacity_tier",  None)
-    is_anomaly   = bool(row.get("is_anomaly", 0))
-    thin_file    = bool(row.get("thin_file_flag", 0))
+    base_tier  = row.get("agent_category", "Below Threshold")
+    cap_tier   = row.get("capacity_tier",  None)
+    is_anomaly = bool(row.get("is_anomaly", 0))
+    thin_file  = bool(row.get("thin_file_flag", 0))
 
     # Step 1: base ceiling from commission tier
     base_ceiling = tier_ceiling(base_tier)
 
-    # Step 2: adjust with capacity_tier if available
+    # Eligibility gate: commission must clear the minimum threshold.
+    # capacity_tier is an adjustment signal, not an eligibility override.
+    if base_ceiling == 0:
+        return 0.0
+
+    # Step 2: adjust ±1 tier from commission base using capacity_tier
     if pd.notna(cap_tier) and cap_tier in COMMISSION_TIERS:
-        adjusted_ceiling = tier_ceiling(cap_tier)
+        adjusted_tier    = _clamp_to_one_step(base_tier, cap_tier)
+        adjusted_ceiling = tier_ceiling(adjusted_tier)
     else:
         adjusted_ceiling = base_ceiling
 
-    # Step 3: anomaly penalty — cap at one tier below commission base
+    # Step 3: anomaly penalty — one tier below commission base, floor at New Bronze
     if is_anomaly:
-        penalty_tier    = tier_one_below(base_tier)
-        penalty_ceiling = tier_ceiling(penalty_tier)
+        penalty_tier = tier_one_below(base_tier)
+        # Anomaly reduces limits but never eliminates eligibility for commissioned agents
+        if penalty_tier == "Below Threshold":
+            penalty_tier = "New Bronze"
+        penalty_ceiling  = tier_ceiling(penalty_tier)
         adjusted_ceiling = min(adjusted_ceiling, penalty_ceiling)
 
     # Thin-file cap still applies (same as Option A)
@@ -167,6 +205,28 @@ def main(argv=None):
         anomaly_df = df[df["is_anomaly"] == 1]
         print(f"\nAnomaly agents — Option A mean: {anomaly_df['option_a_limit'].mean():,.0f} "
               f"| Option B mean: {anomaly_df['option_b_limit'].mean():,.0f}")
+
+    if "agent_category" in df.columns:
+        tier_summary = (
+            df.groupby("agent_category")
+            .agg(
+                n=("msisdn", "count"),
+                opt_a_mean=("option_a_limit", "mean"),
+                opt_b_mean=("option_b_limit", "mean"),
+            )
+            .assign(
+                change_pct=lambda t: (
+                    (t["opt_b_mean"] - t["opt_a_mean"])
+                    / t["opt_a_mean"].clip(lower=1) * 100
+                ).round(1)
+            )
+        )
+        tier_summary["opt_a_mean"] = tier_summary["opt_a_mean"].round(0).astype(int)
+        tier_summary["opt_b_mean"] = tier_summary["opt_b_mean"].round(0).astype(int)
+        print("\n" + "=" * 65)
+        print(" BY COMMISSION TIER  (agent_category)")
+        print("=" * 65)
+        print(tier_summary.to_string())
 
     # ── Output columns ────────────────────────────────────────────────────────
     keep_cols = [
