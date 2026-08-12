@@ -158,7 +158,7 @@ DEFAULT_CAP_CONFIG = {
     # long as this config literal is not reordered.
     "agent_tier": {
         "enabled": True,
-        "default_multiplier": 0.05,  # fallback for unrecognised profiles
+        "default_multiplier": 0.05,  # NaN fill after cross-source joins when agent_tier_ceiling_multiplier is absent
         # commission_thresholds: ordered highest → lowest so first match wins.
         # XtraFloat tier = first tier whose threshold ≤ agent's 6m commission.
         # Agents below 50,000 are "Below Threshold" and receive no XtraFloat.
@@ -196,6 +196,26 @@ DEFAULT_CAP_CONFIG = {
         "regulator": "Bank of Uganda",
     },
 }
+
+# -----------------------------------------------------------------------------
+# CONFIG VALIDATION
+# -----------------------------------------------------------------------------
+
+
+def _validate_agent_tier_config(cfg: dict) -> None:
+    """Raise ValueError if commission_thresholds are not strictly ordered highest → lowest."""
+    thresholds = list(cfg.get("agent_tier", {}).get("commission_thresholds", {}).values())
+    for i in range(len(thresholds) - 1):
+        if thresholds[i] <= thresholds[i + 1]:
+            raise ValueError(
+                f"agent_tier commission_thresholds must be ordered highest → lowest; "
+                f"found {thresholds[i]} ≤ {thresholds[i + 1]} at positions {i}, {i + 1}. "
+                f"Re-order the commission_thresholds dict in extrafloat_limit_engine_caps.py."
+            )
+
+
+_validate_agent_tier_config(DEFAULT_CAP_CONFIG)
+
 
 # -----------------------------------------------------------------------------
 # INTERNAL HELPERS
