@@ -402,24 +402,38 @@ def run_credit_risk_pipeline(
         pre_join - covered,
     )
 
-    # -- Thin-file reconciliation: PD model is authoritative ----------------
+    # -- Thin-file reconciliation: PD model is authoritative, but only for
+    #    agents it actually scored -----------------------------------------
     # The PD model's thin_file_flag determines which scoring path was used
     # (LR vs XGBoost). The engine's is_thin_file is computed independently
     # from total_loans < 3 (borrower credit history). Align them so the
-    # engine's cap weighting matches the scoring path actually applied.
+    # engine's cap weighting matches the scoring path actually applied --
+    # but ONLY for agents the PD model actually scored. Agents absent from
+    # the PD output (e.g. present in the borrower file but not in the
+    # transaction snapshot) have thin_file_flag == NaN after the left join;
+    # fillna(0) on the whole column would force is_thin_file=0 for them,
+    # silently stripping the thin-file protective cap and weight profile
+    # from exactly the population least observed by the PD model.
     if "thin_file_flag" in features_df.columns:
-        if "is_thin_file" in features_df.columns:
-            disagree = (
-                features_df["thin_file_flag"].fillna(0).astype(int)
-                != features_df["is_thin_file"].fillna(0).astype(int)
-            ).sum()
-            logger.info(
-                "thin-file reconciliation: %d/%d agents differ between PD model "
-                "and engine definitions; overriding is_thin_file with PD model thin_file_flag",
-                int(disagree),
-                len(features_df),
-            )
-        features_df["is_thin_file"] = features_df["thin_file_flag"].fillna(0).astype(int)
+        has_pd_flag = features_df["thin_file_flag"].notna()
+        if "is_thin_file" not in features_df.columns:
+            features_df["is_thin_file"] = 0
+        disagree = (
+            features_df.loc[has_pd_flag, "thin_file_flag"].astype(int)
+            != features_df.loc[has_pd_flag, "is_thin_file"].fillna(0).astype(int)
+        ).sum()
+        logger.info(
+            "thin-file reconciliation: %d/%d PD-scored agents differ between PD model "
+            "and engine definitions; overriding is_thin_file with PD model thin_file_flag "
+            "for those agents. %d agents have no PD thin_file_flag (absent from PD output) "
+            "and keep the engine's own is_thin_file.",
+            int(disagree),
+            int(has_pd_flag.sum()),
+            int((~has_pd_flag).sum()),
+        )
+        features_df.loc[has_pd_flag, "is_thin_file"] = (
+            features_df.loc[has_pd_flag, "thin_file_flag"].astype(int)
+        )
 
     # Join segmentation output (capacity_tier, capacity_score) onto features_df.
     # Left join so engine agents with no segmentation row are unaffected.

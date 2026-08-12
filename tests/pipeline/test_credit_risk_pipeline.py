@@ -725,6 +725,64 @@ def test_msisdn_dot_zero_normalized(tmp_path):
     )
 
 
+def test_is_thin_file_preserved_for_agents_absent_from_pd_output(tmp_path):
+    """Regression test: an agent present in the engine features (borrower-file
+    population) but absent from the PD model output (transaction-file population)
+    must keep the engine's own is_thin_file -- it must not be silently forced to 0
+    by the thin-file reconciliation step.
+
+    build_extrafloat_limit_engine_features roots its population in the borrower
+    file, while the PD model only scores agents present in the transaction file
+    (df_agent). A borrower-only agent therefore has thin_file_flag == NaN after
+    the left join in Stage 5; fillna(0) on the whole column would previously wipe
+    out a genuinely thin-file agent's protective status.
+    """
+    from run_credit_risk_pipeline import run_credit_risk_pipeline
+
+    scored = [f"256700{i:06d}" for i in range(4)]  # agents the PD model scored
+    unscored = "256799999999"  # borrower-only agent, absent from PD output
+
+    pd_scored = _make_pd_scored(scored)  # thin_file_flag = 0 for all scored agents
+
+    df_features = _minimal_features_df(n=5)
+    df_features["msisdn"] = scored + [unscored]
+    # Engine's own computation (e.g. total_loans < 3): the unscored agent is
+    # genuinely thin-file; the scored agents are not.
+    df_features["is_thin_file"] = [0, 0, 0, 0, 1]
+
+    with (
+        patch("run_credit_risk_pipeline._check_artifacts"),
+        patch(
+            "run_credit_risk_pipeline.pd.read_csv",
+            return_value=pd.DataFrame({"agent_msisdn": scored}),
+        ),
+        patch("run_credit_risk_pipeline.load_transaction_capacity_features", return_value=MagicMock()),
+        patch("run_credit_risk_pipeline.load_loan_summary_recent_features", return_value=MagicMock()),
+        patch("run_credit_risk_pipeline.load_borrower_limit_features", return_value=MagicMock()),
+        patch("run_credit_risk_pipeline.run_inference_pipeline", return_value=pd_scored),
+        patch("run_credit_risk_pipeline.build_extrafloat_limit_engine_features", return_value=df_features),
+    ):
+        result = run_credit_risk_pipeline(
+            transaction_file="dummy.csv",
+            loan_file="dummy.csv",
+            borrower_file="dummy.csv",
+            artifacts_dir=str(tmp_path),
+            keep_intermediate=True,
+        )
+
+    unscored_row = result.loc[result["msisdn"] == unscored].iloc[0]
+    assert pd.isna(unscored_row["cal_pd"]), "unscored agent should have no cal_pd"
+    assert unscored_row["is_thin_file"] == 1, (
+        "engine-computed is_thin_file must survive for agents absent from PD output -- "
+        "it must not be forced to 0 by the thin-file reconciliation step"
+    )
+
+    scored_rows = result.loc[result["msisdn"] != unscored]
+    assert (scored_rows["is_thin_file"] == 0).all(), (
+        "PD-scored agents should still be reconciled to the PD model's thin_file_flag"
+    )
+
+
 # -----------------------------------------------------------------------------
 # Checksum integrity tests (NF2)
 # -----------------------------------------------------------------------------
