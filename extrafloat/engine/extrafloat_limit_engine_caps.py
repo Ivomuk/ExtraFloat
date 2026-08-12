@@ -157,16 +157,26 @@ DEFAULT_CAP_CONFIG = {
     "agent_tier": {
         "enabled": True,
         "default_multiplier": 0.05,  # fallback for unrecognised profiles
+        # commission_thresholds: ordered highest → lowest so first match wins.
+        # XtraFloat tier = first tier whose threshold ≤ agent's 6m commission.
+        # Agents below 50,000 are "Below Threshold" and receive no XtraFloat.
+        "commission_thresholds": {
+            "diamond":    1_000_000,   # commission ≥ 1,000,000 → max 1,000,000
+            "titanium":     750_000,   # commission ≥   750,000 → max   750,000
+            "platinum":     500_000,   # commission ≥   500,000 → max   500,000
+            "gold":         350_000,   # commission ≥   350,000 → max   350,000
+            "silver":       250_000,   # commission ≥   250,000 → max   250,000
+            "bronze":       100_000,   # commission ≥   100,000 → max   100,000
+            "new bronze":    50_000,   # commission ≥    50,000 → max    50,000
+        },
         "tiers": {
-            "diamond": 1.00,  # 1,000,000 / 1,000,000
-            "titanium": 0.75,  #   750,000 / 1,000,000
-            "platinum": 0.50,  #   500,000 / 1,000,000
-            "gold": 0.35,  #   350,000 / 1,000,000
-            "silver class": 0.25,  #   250,000 / 1,000,000  ← before "silver"
-            "silver": 0.25,  #   250,000 / 1,000,000
-            "new bronze": 0.05,  #    50,000 / 1,000,000  ← before "bronze"
-            "bronze": 0.10,  #   100,000 / 1,000,000
-            "unknown": 0.05,  #    50,000 / 1,000,000  -- conservative fallback
+            "diamond":    1.00,  # 1,000,000 / 1,000,000
+            "titanium":   0.75,  #   750,000 / 1,000,000
+            "platinum":   0.50,  #   500,000 / 1,000,000
+            "gold":       0.35,  #   350,000 / 1,000,000
+            "silver":     0.25,  #   250,000 / 1,000,000
+            "bronze":     0.10,  #   100,000 / 1,000,000
+            "new bronze": 0.05,  #    50,000 / 1,000,000
         },
     },
     # -- Seasonality attenuation -----------------------------------------------

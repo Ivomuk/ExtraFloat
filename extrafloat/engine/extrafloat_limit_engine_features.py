@@ -563,16 +563,30 @@ def prepare_transaction_capacity_features(
     ).astype(int)
 
     # -- Agent tier ceiling multiplier --
-    # Tier map and fallback come from DEFAULT_CAP_CONFIG (single source of truth).
+    # Derived from 6-month commission earned (authoritative XtraFloat second-level
+    # classification). agent_profile is MTN's top-level classification and is NOT
+    # used here. Thresholds and multipliers from DEFAULT_CAP_CONFIG.
     _tier_cfg = DEFAULT_CAP_CONFIG.get("agent_tier", {})
     _tier_map = _tier_cfg.get("tiers", {})
-    _tier_default = _tier_cfg.get("default_multiplier", 0.05)
-    agent_lower = df["agent_profile"].str.lower().fillna("unknown")
-    df["agent_tier_ceiling_multiplier"] = agent_lower.apply(
-        lambda p: next(
-            (v for k, v in _tier_map.items() if k in p),
-            _tier_default,
+    _commission_thresholds = _tier_cfg.get("commission_thresholds", {})
+    commission = pd.to_numeric(df.get("commission", 0), errors="coerce").fillna(0)
+
+    def _commission_to_multiplier(c):
+        for tier_name, threshold in _commission_thresholds.items():
+            if c >= threshold:
+                return _tier_map.get(tier_name, 0.0)
+        return 0.0  # Below Threshold — no XtraFloat
+
+    df["agent_tier_ceiling_multiplier"] = commission.apply(_commission_to_multiplier)
+    df["agent_category"] = commission.apply(
+        lambda c: next(
+            (t for t, v in _commission_thresholds.items() if c >= v),
+            "Below Threshold",
         )
+    )
+    logger.info(
+        "prepare_transaction_capacity_features: agent_category distribution — %s",
+        df["agent_category"].value_counts().to_dict(),
     )
 
     logger.info("prepare_transaction_capacity_features: output rows = %d", len(df))

@@ -60,7 +60,6 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from extrafloat.engine.extrafloat_limit_engine_caps import DEFAULT_CAP_CONFIG
 from extrafloat.engine.extrafloat_limit_engine_features import (
     build_extrafloat_limit_engine_features,
 )
@@ -440,28 +439,6 @@ def run_credit_risk_pipeline(
         "Segmentation join: %d/%d engine agents matched a capacity_tier",
         int(matched), len(features_df),
     )
-
-    # Override agent_tier_ceiling_multiplier with segmentation capacity_tier.
-    # agent_profile is MTN's top-level classification ("Agent Silver Class" etc.)
-    # capacity_tier is the XtraFloat second-level classification based on
-    # commission and business volume — it is the authoritative source for the
-    # float limit ceiling. When segmentation ran, capacity_tier wins.
-    if "capacity_tier" in features_df.columns and matched > 0:
-        _tier_map = DEFAULT_CAP_CONFIG.get("agent_tier", {}).get("tiers", {})
-        _tier_default = DEFAULT_CAP_CONFIG.get("agent_tier", {}).get("default_multiplier", 0.05)
-        cap_tier_lower = features_df["capacity_tier"].str.lower().fillna("unknown")
-        new_multiplier = cap_tier_lower.map(
-            lambda t: next((v for k, v in _tier_map.items() if k == t), _tier_default)
-        )
-        old_mean = features_df["agent_tier_ceiling_multiplier"].mean()
-        features_df["agent_tier_ceiling_multiplier"] = new_multiplier
-        logger.info(
-            "Stage 5: agent_tier_ceiling_multiplier overridden from capacity_tier "
-            "(mean multiplier: %.3f -> %.3f; capacity_tier distribution: %s)",
-            old_mean,
-            float(new_multiplier.mean()),
-            features_df["capacity_tier"].value_counts().to_dict(),
-        )
 
     # -- Stage 6: Run credit limit engine -----------------------------------
     logger.info("Stage 6: running credit limit engine")
