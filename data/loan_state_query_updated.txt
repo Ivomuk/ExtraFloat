@@ -1,0 +1,1203 @@
+-- =====================================================================
+-- ExtraFloat loan-level PD training dataset
+-- SQL dialect: Trino / Athena
+--
+-- GRAIN
+--   One row per target disbursement_fid.
+--
+-- SCORING TIME
+--   The target loan's disbursement date/time.
+--
+-- FEATURES
+--   Only information available before the target loan's disbursement.
+--
+-- PRIMARY LABEL
+--   bad_state_3dpd_30d = 1 when the target loan, at any point during
+--   days 1-30 after disbursement:
+--       - reaches days_aging > 3; or
+--       - becomes ANOMALY_OPEN / is_anomaly_open.
+--
+-- SECONDARY LABEL
+--   bad_state_1dpd_7d = 1 when the target loan, at any point during
+--   days 1-7 after disbursement:
+--       - reaches days_aging >= 1; or
+--       - becomes ANOMALY_OPEN / is_anomaly_open.
+--
+-- SOURCE-NAME CLARIFICATION
+--   Despite the "lifetime_" prefix, these fields apply only to the loan
+--   represented by the loan_state_daily row:
+--
+--       lifetime_disbursed_ugx
+--       lifetime_repaid_ugx
+--       lifetime_gross_repaid_ugx
+--       lifetime_fees_paid_ugx
+--       lifetime_interest_paid_ugx
+--
+--   They are aliased to loan_* names in normalized_loan_state.
+--
+-- OBSERVABILITY
+--   A target loan is eligible only if its full 30-day label horizon is
+--   no later than the latest globally available loan-state date.
+--
+-- LOAN MATCHING LIMITATION
+--   The documented loan-state table does not expose disbursement_fid.
+--   Labels are matched using:
+--
+--       customer_msisdn + current_loan_start_date
+--
+--   Agents with multiple disbursements on the same date are excluded
+--   because those loans cannot be matched unambiguously.
+-- =====================================================================
+
+WITH
+
+-- ---------------------------------------------------------------------
+-- 1. Non-overlapping loan cohorts
+-- ---------------------------------------------------------------------
+cohorts AS (
+    SELECT
+        DATE '2026-01-01' AS cohort_start,
+        DATE '2026-05-31' AS cohort_end,
+        'train' AS split
+
+    UNION ALL
+
+    SELECT
+        DATE '2026-06-01' AS cohort_start,
+        DATE '2026-07-31' AS cohort_end,
+        'validation' AS split
+),
+
+-- ---------------------------------------------------------------------
+-- 2. Normalize and deduplicate disbursements
+-- ---------------------------------------------------------------------
+disbursements_ranked AS (
+    SELECT
+        d.customer_msisdn AS msisdn,
+        d.disbursement_fid,
+        d.disbursement_uid,
+        TRY_CAST(d.disbursement_amount_ugx AS DOUBLE)
+            AS disbursement_amount_ugx,
+        d.disbursement_ts,
+        CAST(d.disbursement_ts AS DATE) AS loan_date,
+        d.sales_region,
+        d.sales_territory,
+        d.district,
+
+        ROW_NUMBER() OVER (
+            PARTITION BY d.disbursement_fid
+            ORDER BY
+                d.disbursement_ts,
+                d.inserted_ts DESC,
+                d.date_key DESC
+        ) AS source_rn
+
+    FROM analytics.momo_loan_book_tracker_disbursements_daily d
+    WHERE d.ova = 'XTRAFLOAT-AGENT'
+      AND CAST(d.disbursement_ts AS DATE) >= DATE '2026-01-01'
+),
+
+disbursements AS (
+    SELECT
+        msisdn,
+        disbursement_fid,
+        disbursement_uid,
+        disbursement_amount_ugx,
+        disbursement_ts,
+        loan_date,
+        sales_region,
+        sales_territory,
+        district
+    FROM disbursements_ranked
+    WHERE source_rn = 1
+),
+
+same_day_disbursement_counts AS (
+    SELECT
+        msisdn,
+        loan_date,
+        COUNT(DISTINCT disbursement_fid) AS same_day_loan_count
+    FROM disbursements
+    GROUP BY
+        msisdn,
+        loan_date
+),
+
+-- ---------------------------------------------------------------------
+-- 3. Normalize the daily loan-state source
+--
+-- Rename the misleading lifetime_* fields immediately. Each field is
+-- the running amount for the particular loan represented by the row.
+-- ---------------------------------------------------------------------
+normalized_loan_state AS (
+    SELECT
+        ls.customer_msisdn,
+        ls.loan_uid,
+        ls.loan_uid_num,
+        ls.loan_seq,
+
+        ls.first_disbursement_date,
+        ls.current_loan_start_date,
+        ls.last_disbursement_date,
+        ls.last_repayment_date,
+        ls.closure_date,
+
+        TRY_CAST(ls.lifetime_disbursed_ugx AS DOUBLE)
+            AS loan_disbursed_ugx,
+
+        TRY_CAST(ls.lifetime_repaid_ugx AS DOUBLE)
+            AS loan_repaid_ugx,
+
+        TRY_CAST(ls.lifetime_gross_repaid_ugx AS DOUBLE)
+            AS loan_gross_repaid_ugx,
+
+        TRY_CAST(ls.lifetime_fees_paid_ugx AS DOUBLE)
+            AS loan_fees_paid_ugx,
+
+        TRY_CAST(ls.lifetime_interest_paid_ugx AS DOUBLE)
+            AS loan_interest_paid_ugx,
+
+        TRY_CAST(ls.outstanding_ugx AS DOUBLE)
+            AS outstanding_ugx,
+
+        ls.disbursement_event_count,
+        ls.repayment_event_count,
+        ls.fee_event_count,
+        ls.interest_event_count,
+
+        ls.days_aging,
+        ls.aging_bucket,
+        ls.loan_status,
+        ls.has_pre_window_history,
+        ls.is_anomaly_open,
+        ls.is_active_loan,
+        ls.tenure_days,
+
+        ls.inserted_ts,
+
+        CAST(
+            DATE_PARSE(CAST(ls.date_key AS VARCHAR), '%Y%m%d')
+            AS DATE
+        ) AS state_date
+
+    FROM analytics.momo_loan_book_tracker_loan_state_daily ls
+    WHERE ls.ova = 'XTRAFLOAT-AGENT'
+      AND ls.date_key >= 20260101
+),
+
+-- Retain one physical record per customer, loan, and state date.
+loan_state_ranked AS (
+    SELECT
+        ls.*,
+
+        ROW_NUMBER() OVER (
+            PARTITION BY
+                ls.customer_msisdn,
+                ls.loan_uid,
+                ls.state_date
+            ORDER BY
+                ls.inserted_ts DESC,
+                ls.loan_seq DESC
+        ) AS state_day_rn
+
+    FROM normalized_loan_state ls
+),
+
+loan_state AS (
+    SELECT *
+    FROM loan_state_ranked
+    WHERE state_day_rn = 1
+),
+
+state_data_availability AS (
+    SELECT
+        MAX(state_date) AS max_state_date
+    FROM loan_state
+),
+
+-- ---------------------------------------------------------------------
+-- 4. Select eligible target loans
+-- ---------------------------------------------------------------------
+target_loans AS (
+    SELECT
+        d.msisdn,
+        d.disbursement_fid,
+        d.disbursement_uid,
+        c.split,
+
+        d.disbursement_ts,
+        d.loan_date,
+        DATE_ADD('day', 7, d.loan_date) AS label_horizon_7d_end,
+        DATE_ADD('day', 30, d.loan_date) AS label_horizon_30d_end,
+
+        d.disbursement_amount_ugx,
+        d.sales_region,
+        d.sales_territory,
+        d.district
+
+    FROM disbursements d
+
+    JOIN cohorts c
+      ON d.loan_date BETWEEN c.cohort_start AND c.cohort_end
+
+    JOIN same_day_disbursement_counts x
+      ON x.msisdn = d.msisdn
+     AND x.loan_date = d.loan_date
+
+    CROSS JOIN state_data_availability a
+
+    WHERE x.same_day_loan_count = 1
+      AND DATE_ADD('day', 30, d.loan_date) <= a.max_state_date
+),
+
+-- ---------------------------------------------------------------------
+-- 5. Find the latest state known before each target disbursement
+--
+-- The strict date condition is conservative. It prevents using a
+-- same-day daily snapshot that may have been generated after the target
+-- disbursement.
+-- ---------------------------------------------------------------------
+scoring_state_candidates AS (
+    SELECT
+        d.disbursement_fid,
+
+        ls.state_date,
+        ls.loan_uid,
+        ls.loan_seq,
+        ls.current_loan_start_date,
+
+        ls.loan_status,
+        ls.is_active_loan,
+        ls.is_anomaly_open,
+        ls.has_pre_window_history,
+
+        ls.days_aging,
+        ls.aging_bucket,
+        ls.outstanding_ugx,
+
+        ls.last_repayment_date,
+        ls.closure_date,
+        ls.tenure_days,
+
+        ls.loan_disbursed_ugx,
+        ls.loan_repaid_ugx,
+        ls.loan_gross_repaid_ugx,
+        ls.loan_fees_paid_ugx,
+        ls.loan_interest_paid_ugx,
+
+        ls.disbursement_event_count,
+        ls.repayment_event_count,
+        ls.fee_event_count,
+        ls.interest_event_count,
+
+        ROW_NUMBER() OVER (
+            PARTITION BY d.disbursement_fid
+            ORDER BY
+                ls.state_date DESC,
+                ls.inserted_ts DESC,
+                ls.loan_seq DESC,
+                ls.loan_uid DESC
+        ) AS scoring_state_rn
+
+    FROM target_loans d
+
+    JOIN loan_state ls
+      ON ls.customer_msisdn = d.msisdn
+     AND ls.state_date < d.loan_date
+     AND ls.loan_status <> 'NEVER_BORROWED'
+),
+
+scoring_state AS (
+    SELECT *
+    FROM scoring_state_candidates
+    WHERE scoring_state_rn = 1
+),
+
+-- ---------------------------------------------------------------------
+-- 6. Scoring-time state features
+--
+-- These values describe the most recent loan state known before the
+-- target disbursement. They are not customer-lifetime amounts.
+-- ---------------------------------------------------------------------
+scoring_state_features AS (
+    SELECT
+        d.disbursement_fid,
+
+        CASE
+            WHEN s.disbursement_fid IS NULL THEN 0
+            ELSE 1
+        END AS has_observed_prior_state,
+
+        COALESCE(
+            CASE
+                WHEN s.has_pre_window_history THEN 1
+                ELSE 0
+            END,
+            0
+        ) AS has_pre_window_history,
+
+        CASE
+            WHEN COALESCE(s.is_active_loan, FALSE)
+              OR s.loan_status IN (
+                    'OPEN',
+                    'OPEN_PRE_WINDOW',
+                    'ANOMALY_OPEN'
+                 )
+            THEN 1
+            ELSE 0
+        END AS has_unresolved_loan_at_scoring,
+
+        CASE
+            WHEN COALESCE(s.is_active_loan, FALSE)
+              OR s.loan_status IN (
+                    'OPEN',
+                    'OPEN_PRE_WINDOW',
+                    'ANOMALY_OPEN'
+                 )
+            THEN COALESCE(s.days_aging, 0)
+            ELSE 0
+        END AS active_loan_days_aging_at_scoring,
+
+        CASE
+            WHEN COALESCE(s.is_active_loan, FALSE)
+              OR s.loan_status IN (
+                    'OPEN',
+                    'OPEN_PRE_WINDOW',
+                    'ANOMALY_OPEN'
+                 )
+            THEN COALESCE(s.outstanding_ugx, 0)
+            ELSE 0
+        END AS active_loan_outstanding_ugx_at_scoring,
+
+        CASE
+            WHEN COALESCE(s.is_active_loan, FALSE)
+              OR s.loan_status IN (
+                    'OPEN',
+                    'OPEN_PRE_WINDOW',
+                    'ANOMALY_OPEN'
+                 )
+            THEN s.aging_bucket
+        END AS active_loan_aging_bucket_at_scoring,
+
+        CASE
+            WHEN s.loan_status = 'ANOMALY_OPEN'
+              OR COALESCE(s.is_anomaly_open, FALSE)
+            THEN 1
+            ELSE 0
+        END AS anomaly_open_at_scoring,
+
+        s.state_date AS scoring_state_date,
+        s.loan_uid AS scoring_state_loan_uid,
+        s.loan_seq AS scoring_state_loan_seq,
+        s.loan_status AS scoring_state_loan_status,
+
+        CASE
+            WHEN s.last_repayment_date IS NOT NULL
+            THEN DATE_DIFF(
+                'day',
+                s.last_repayment_date,
+                d.loan_date
+            )
+        END AS days_since_last_repayment,
+
+        -- These fields describe the loan represented by scoring_state.
+        s.loan_disbursed_ugx
+            AS scoring_state_loan_disbursed_ugx,
+
+        s.loan_repaid_ugx
+            AS scoring_state_loan_repaid_ugx,
+
+        s.loan_gross_repaid_ugx
+            AS scoring_state_loan_gross_repaid_ugx,
+
+        s.loan_fees_paid_ugx
+            AS scoring_state_loan_fees_paid_ugx,
+
+        s.loan_interest_paid_ugx
+            AS scoring_state_loan_interest_paid_ugx,
+
+        CASE
+            WHEN s.loan_disbursed_ugx > 0
+            THEN s.loan_repaid_ugx / s.loan_disbursed_ugx
+        END AS scoring_state_loan_principal_repayment_ratio,
+
+        CASE
+            WHEN s.loan_disbursed_ugx > 0
+            THEN s.loan_gross_repaid_ugx / s.loan_disbursed_ugx
+        END AS scoring_state_loan_gross_repayment_ratio,
+
+        s.disbursement_event_count
+            AS scoring_state_loan_disbursement_event_count,
+
+        s.repayment_event_count
+            AS scoring_state_loan_repayment_event_count,
+
+        s.fee_event_count
+            AS scoring_state_loan_fee_event_count,
+
+        s.interest_event_count
+            AS scoring_state_loan_interest_event_count,
+
+        CASE
+            WHEN s.disbursement_event_count > 0
+            THEN
+                TRY_CAST(s.repayment_event_count AS DOUBLE)
+                / TRY_CAST(s.disbursement_event_count AS DOUBLE)
+        END AS scoring_state_repayment_to_disbursement_event_ratio
+
+    FROM target_loans d
+
+    LEFT JOIN scoring_state s
+      ON s.disbursement_fid = d.disbursement_fid
+),
+
+-- ---------------------------------------------------------------------
+-- 7. Create one canonical record per prior loan and target loan
+--
+-- The selected record is the most recent state for that prior loan
+-- available before the target disbursement. This avoids summing repeated
+-- daily snapshots.
+-- ---------------------------------------------------------------------
+prior_loan_state_candidates AS (
+    SELECT
+        d.disbursement_fid AS target_disbursement_fid,
+
+        ls.loan_uid,
+        ls.loan_seq,
+        ls.current_loan_start_date,
+        ls.closure_date,
+        ls.tenure_days,
+        ls.aging_bucket,
+        ls.loan_status,
+        ls.is_anomaly_open,
+        ls.days_aging,
+        ls.outstanding_ugx,
+
+        ls.loan_disbursed_ugx,
+        ls.loan_repaid_ugx,
+        ls.loan_gross_repaid_ugx,
+        ls.loan_fees_paid_ugx,
+        ls.loan_interest_paid_ugx,
+
+        ROW_NUMBER() OVER (
+            PARTITION BY
+                d.disbursement_fid,
+                ls.loan_uid
+            ORDER BY
+                ls.state_date DESC,
+                ls.inserted_ts DESC
+        ) AS prior_loan_state_rn
+
+    FROM target_loans d
+
+    JOIN loan_state ls
+      ON ls.customer_msisdn = d.msisdn
+     AND ls.current_loan_start_date < d.loan_date
+     AND ls.state_date < d.loan_date
+     AND ls.loan_status <> 'NEVER_BORROWED'
+),
+
+prior_loans AS (
+    SELECT
+        target_disbursement_fid,
+        loan_uid,
+        loan_seq,
+        current_loan_start_date,
+        closure_date,
+        tenure_days,
+        aging_bucket,
+        loan_status,
+        is_anomaly_open,
+        days_aging,
+        outstanding_ugx,
+
+        loan_disbursed_ugx,
+        loan_repaid_ugx,
+        loan_gross_repaid_ugx,
+        loan_fees_paid_ugx,
+        loan_interest_paid_ugx
+
+    FROM prior_loan_state_candidates
+    WHERE prior_loan_state_rn = 1
+),
+
+prior_loans_ranked AS (
+    SELECT
+        p.*,
+
+        ROW_NUMBER() OVER (
+            PARTITION BY p.target_disbursement_fid
+            ORDER BY
+                p.current_loan_start_date DESC,
+                p.loan_seq DESC,
+                p.loan_uid DESC
+        ) AS prior_loan_recency
+
+    FROM prior_loans p
+),
+
+-- Rank closed prior loans independently. This correctly finds the most
+-- recent closed loan even when the overall most recent prior loan is open.
+closed_prior_loans_ranked AS (
+    SELECT
+        p.*,
+
+        ROW_NUMBER() OVER (
+            PARTITION BY p.target_disbursement_fid
+            ORDER BY
+                p.closure_date DESC,
+                p.current_loan_start_date DESC,
+                p.loan_seq DESC,
+                p.loan_uid DESC
+        ) AS closed_loan_recency
+
+    FROM prior_loans p
+    WHERE p.closure_date IS NOT NULL
+),
+
+-- ---------------------------------------------------------------------
+-- 8. Historical features across unique prior loans
+-- ---------------------------------------------------------------------
+prior_loan_features AS (
+    SELECT
+        target_disbursement_fid,
+
+        COUNT(*) AS prior_loan_count,
+
+        COUNT_IF(
+            closure_date IS NOT NULL
+        ) AS prior_closed_loan_count,
+
+        AVG(
+            CASE
+                WHEN closure_date IS NOT NULL
+                THEN TRY_CAST(tenure_days AS DOUBLE)
+            END
+        ) AS avg_tenure_days_closed_loans,
+
+        MAX(
+            CASE
+                WHEN prior_loan_recency <= 5
+                 AND closure_date IS NOT NULL
+                THEN tenure_days
+            END
+        ) AS max_tenure_days_last_5_prior_loans,
+
+        SUM(
+            CASE
+                WHEN loan_status = 'ANOMALY_OPEN'
+                  OR COALESCE(is_anomaly_open, FALSE)
+                THEN 1
+                ELSE 0
+            END
+        ) AS historical_anomaly_open_loan_count,
+
+        AVG(
+            CASE
+                WHEN loan_status = 'ANOMALY_OPEN'
+                  OR COALESCE(is_anomaly_open, FALSE)
+                THEN 1.0
+                ELSE 0.0
+            END
+        ) AS historical_anomaly_open_loan_rate,
+
+        -- Customer-history amounts built from one row per unique prior loan.
+        SUM(
+            COALESCE(loan_disbursed_ugx, 0)
+        ) AS historical_disbursed_ugx,
+
+        SUM(
+            COALESCE(loan_repaid_ugx, 0)
+        ) AS historical_repaid_ugx,
+
+        SUM(
+            COALESCE(loan_gross_repaid_ugx, 0)
+        ) AS historical_gross_repaid_ugx,
+
+        SUM(
+            COALESCE(loan_fees_paid_ugx, 0)
+        ) AS historical_fees_paid_ugx,
+
+        SUM(
+            COALESCE(loan_interest_paid_ugx, 0)
+        ) AS historical_interest_paid_ugx,
+
+        CASE
+            WHEN SUM(COALESCE(loan_disbursed_ugx, 0)) > 0
+            THEN
+                SUM(COALESCE(loan_repaid_ugx, 0))
+                / SUM(COALESCE(loan_disbursed_ugx, 0))
+        END AS historical_principal_repayment_ratio,
+
+        CASE
+            WHEN SUM(COALESCE(loan_disbursed_ugx, 0)) > 0
+            THEN
+                SUM(COALESCE(loan_gross_repaid_ugx, 0))
+                / SUM(COALESCE(loan_disbursed_ugx, 0))
+        END AS historical_gross_repayment_ratio,
+
+        AVG(
+            CASE
+                WHEN loan_disbursed_ugx > 0
+                THEN loan_repaid_ugx / loan_disbursed_ugx
+            END
+        ) AS avg_prior_loan_principal_repayment_ratio
+
+    FROM prior_loans_ranked
+    GROUP BY target_disbursement_fid
+),
+
+-- ---------------------------------------------------------------------
+-- 9. Most recent closed-loan features
+-- ---------------------------------------------------------------------
+last_closed_loan_features AS (
+    SELECT
+        target_disbursement_fid,
+
+        loan_uid AS last_closed_loan_uid,
+        closure_date AS last_closed_loan_closure_date,
+        tenure_days AS last_closed_loan_tenure_days,
+        aging_bucket AS last_closed_loan_aging_bucket,
+
+        loan_disbursed_ugx AS last_closed_loan_disbursed_ugx,
+        loan_repaid_ugx AS last_closed_loan_repaid_ugx,
+        loan_gross_repaid_ugx
+            AS last_closed_loan_gross_repaid_ugx,
+
+        CASE
+            WHEN loan_disbursed_ugx > 0
+            THEN loan_repaid_ugx / loan_disbursed_ugx
+        END AS last_closed_loan_principal_repayment_ratio
+
+    FROM closed_prior_loans_ranked
+    WHERE closed_loan_recency = 1
+),
+
+-- ---------------------------------------------------------------------
+-- 10. Consecutive on-time closed-loan streak
+--
+-- Provisional definition:
+--   tenure_days <= 1 means repaid within the daily product window.
+--
+-- Validate the exact tenure_days timestamp/calendar-day semantics before
+-- using this feature in production.
+-- ---------------------------------------------------------------------
+closed_loan_streak_rows AS (
+    SELECT
+        target_disbursement_fid,
+        closed_loan_recency,
+        tenure_days,
+
+        SUM(
+            CASE
+                WHEN tenure_days > 1
+                  OR tenure_days IS NULL
+                THEN 1
+                ELSE 0
+            END
+        ) OVER (
+            PARTITION BY target_disbursement_fid
+            ORDER BY closed_loan_recency
+            ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+        ) AS late_loans_seen
+
+    FROM closed_prior_loans_ranked
+),
+
+on_time_streak AS (
+    SELECT
+        target_disbursement_fid,
+
+        SUM(
+            CASE
+                WHEN tenure_days <= 1
+                 AND late_loans_seen = 0
+                THEN 1
+                ELSE 0
+            END
+        ) AS consecutive_on_time_loans
+
+    FROM closed_loan_streak_rows
+    GROUP BY target_disbursement_fid
+),
+
+-- ---------------------------------------------------------------------
+-- 11. Prior disbursement frequency and amount features
+-- ---------------------------------------------------------------------
+prior_disbursement_features AS (
+    SELECT
+        current_loan.disbursement_fid AS target_disbursement_fid,
+
+        COUNT(prior_loan.disbursement_fid)
+            AS prior_disbursement_count,
+
+        COUNT_IF(
+            prior_loan.loan_date
+                >= DATE_ADD('day', -30, current_loan.loan_date)
+        ) AS prior_disbursement_count_30d,
+
+        COUNT_IF(
+            prior_loan.loan_date
+                >= DATE_ADD('day', -90, current_loan.loan_date)
+        ) AS prior_disbursement_count_90d,
+
+        COUNT_IF(
+            prior_loan.loan_date
+                >= DATE_ADD('day', -180, current_loan.loan_date)
+        ) AS prior_disbursement_count_180d,
+
+        AVG(
+            CASE
+                WHEN prior_loan.loan_date
+                    >= DATE_ADD('day', -30, current_loan.loan_date)
+                THEN prior_loan.disbursement_amount_ugx
+            END
+        ) AS avg_prior_loan_amount_30d,
+
+        AVG(
+            CASE
+                WHEN prior_loan.loan_date
+                    >= DATE_ADD('day', -90, current_loan.loan_date)
+                THEN prior_loan.disbursement_amount_ugx
+            END
+        ) AS avg_prior_loan_amount_90d,
+
+        AVG(
+            CASE
+                WHEN prior_loan.loan_date
+                    >= DATE_ADD('day', -180, current_loan.loan_date)
+                THEN prior_loan.disbursement_amount_ugx
+            END
+        ) AS avg_prior_loan_amount_180d,
+
+        COALESCE(
+            SUM(
+                CASE
+                    WHEN prior_loan.loan_date
+                        >= DATE_ADD('day', -30, current_loan.loan_date)
+                    THEN prior_loan.disbursement_amount_ugx
+                    ELSE 0
+                END
+            ),
+            0
+        ) AS prior_disbursed_ugx_30d,
+
+        COALESCE(
+            SUM(
+                CASE
+                    WHEN prior_loan.loan_date
+                        >= DATE_ADD('day', -90, current_loan.loan_date)
+                    THEN prior_loan.disbursement_amount_ugx
+                    ELSE 0
+                END
+            ),
+            0
+        ) AS prior_disbursed_ugx_90d,
+
+        COALESCE(
+            SUM(
+                CASE
+                    WHEN prior_loan.loan_date
+                        >= DATE_ADD('day', -180, current_loan.loan_date)
+                    THEN prior_loan.disbursement_amount_ugx
+                    ELSE 0
+                END
+            ),
+            0
+        ) AS prior_disbursed_ugx_180d,
+
+        CASE
+            WHEN COUNT(prior_loan.disbursement_fid) > 0
+            THEN
+                DATE_DIFF(
+                    'month',
+                    MIN(prior_loan.loan_date),
+                    current_loan.loan_date
+                ) + 1
+        END AS months_since_first_observed_loan
+
+    FROM target_loans current_loan
+
+    LEFT JOIN disbursements prior_loan
+      ON prior_loan.msisdn = current_loan.msisdn
+     AND prior_loan.disbursement_ts < current_loan.disbursement_ts
+
+    GROUP BY
+        current_loan.disbursement_fid,
+        current_loan.loan_date
+),
+
+-- ---------------------------------------------------------------------
+-- 12. Current-loan amount and time features
+-- ---------------------------------------------------------------------
+current_loan_features AS (
+    SELECT
+        d.disbursement_fid,
+
+        EXTRACT(HOUR FROM d.disbursement_ts)
+            AS disbursement_hour,
+
+        EXTRACT(DAY_OF_WEEK FROM d.disbursement_ts)
+            AS disbursement_day_of_week,
+
+        CASE
+            WHEN EXTRACT(HOUR FROM d.disbursement_ts) >= 16
+            THEN 1
+            ELSE 0
+        END AS late_afternoon_disbursement,
+
+        CASE
+            WHEN p.avg_prior_loan_amount_30d > 0
+            THEN
+                d.disbursement_amount_ugx
+                / p.avg_prior_loan_amount_30d
+        END AS current_to_avg_prior_loan_amount_30d,
+
+        CASE
+            WHEN p.avg_prior_loan_amount_90d > 0
+            THEN
+                d.disbursement_amount_ugx
+                / p.avg_prior_loan_amount_90d
+        END AS current_to_avg_prior_loan_amount_90d,
+
+        CASE
+            WHEN p.months_since_first_observed_loan > 0
+            THEN
+                TRY_CAST(p.prior_disbursement_count AS DOUBLE)
+                / p.months_since_first_observed_loan
+        END AS prior_loans_per_observed_month
+
+    FROM target_loans d
+
+    LEFT JOIN prior_disbursement_features p
+      ON p.target_disbursement_fid = d.disbursement_fid
+),
+
+-- ---------------------------------------------------------------------
+-- 13. Collect future state rows for the target loan
+--
+-- These rows are used only for target construction and diagnostics.
+-- They must not be supplied to the model as predictors.
+-- ---------------------------------------------------------------------
+target_loan_outcomes AS (
+    SELECT
+        d.disbursement_fid,
+        d.msisdn,
+        d.split,
+
+        COUNT(ls.state_date)
+            AS outcome_state_row_count_30d,
+
+        COUNT(DISTINCT ls.state_date)
+            AS outcome_observed_date_count_30d,
+
+        MIN(ls.state_date)
+            AS first_outcome_state_date,
+
+        MAX(ls.state_date)
+            AS last_outcome_state_date,
+
+        MAX(
+            CASE
+                WHEN ls.state_date > d.loan_date
+                 AND ls.state_date <= d.label_horizon_7d_end
+                THEN ls.days_aging
+            END
+        ) AS max_days_aging_7d,
+
+        MAX(
+            CASE
+                WHEN ls.state_date > d.loan_date
+                 AND ls.state_date <= d.label_horizon_30d_end
+                THEN ls.days_aging
+            END
+        ) AS max_days_aging_30d,
+
+        MAX(
+            CASE
+                WHEN ls.state_date > d.loan_date
+                 AND ls.state_date <= d.label_horizon_7d_end
+                 AND (
+                        ls.loan_status = 'ANOMALY_OPEN'
+                        OR COALESCE(ls.is_anomaly_open, FALSE)
+                     )
+                THEN 1
+                ELSE 0
+            END
+        ) AS rollover_observed_7d,
+
+        MAX(
+            CASE
+                WHEN ls.state_date > d.loan_date
+                 AND ls.state_date <= d.label_horizon_30d_end
+                 AND (
+                        ls.loan_status = 'ANOMALY_OPEN'
+                        OR COALESCE(ls.is_anomaly_open, FALSE)
+                     )
+                THEN 1
+                ELSE 0
+            END
+        ) AS rollover_observed_30d,
+
+        MAX(
+            CASE
+                WHEN ls.state_date > d.loan_date
+                 AND ls.state_date <= d.label_horizon_30d_end
+                 AND (
+                        ls.loan_status IN (
+                            'SETTLED',
+                            'CLOSED',
+                            'OVERPAID'
+                        )
+                        OR (
+                            ls.closure_date IS NOT NULL
+                            AND ls.closure_date
+                                <= d.label_horizon_30d_end
+                        )
+                     )
+                THEN 1
+                ELSE 0
+            END
+        ) AS terminal_state_observed_30d
+
+    FROM target_loans d
+
+    LEFT JOIN loan_state ls
+      ON ls.customer_msisdn = d.msisdn
+     AND ls.current_loan_start_date = d.loan_date
+     AND ls.state_date >= d.loan_date
+     AND ls.state_date <= d.label_horizon_30d_end
+
+    GROUP BY
+        d.disbursement_fid,
+        d.msisdn,
+        d.split
+),
+
+-- ---------------------------------------------------------------------
+-- 14. Construct the loan-level targets
+-- ---------------------------------------------------------------------
+loan_labels AS (
+    SELECT
+        disbursement_fid,
+        msisdn,
+        split,
+
+        CASE
+            WHEN COALESCE(max_days_aging_7d, 0) >= 1
+              OR rollover_observed_7d = 1
+            THEN 1
+            ELSE 0
+        END AS bad_state_1dpd_7d,
+
+        CASE
+            WHEN COALESCE(max_days_aging_30d, 0) > 3
+              OR rollover_observed_30d = 1
+            THEN 1
+            ELSE 0
+        END AS bad_state_3dpd_30d,
+
+        max_days_aging_7d,
+        max_days_aging_30d,
+        rollover_observed_7d,
+        rollover_observed_30d,
+        terminal_state_observed_30d,
+
+        outcome_state_row_count_30d,
+        outcome_observed_date_count_30d,
+        first_outcome_state_date,
+        last_outcome_state_date
+
+    FROM target_loan_outcomes
+
+    -- Require evidence that the target loan occurs in loan_state_daily.
+    -- Do not require the agent to make an outcome-window transaction.
+    WHERE outcome_state_row_count_30d > 0
+)
+
+-- ---------------------------------------------------------------------
+-- 15. Final modeling dataset
+-- ---------------------------------------------------------------------
+SELECT
+    -- Identifiers and split
+    d.msisdn,
+    d.disbursement_fid,
+    d.disbursement_uid,
+    d.split,
+
+    d.disbursement_ts,
+    d.loan_date,
+    d.label_horizon_7d_end,
+    d.label_horizon_30d_end,
+
+    -- Current loan
+    d.disbursement_amount_ugx,
+    d.sales_region,
+    d.sales_territory,
+    d.district,
+
+    -- Time and amount features
+    c.disbursement_hour,
+    c.disbursement_day_of_week,
+    c.late_afternoon_disbursement,
+    c.current_to_avg_prior_loan_amount_30d,
+    c.current_to_avg_prior_loan_amount_90d,
+    c.prior_loans_per_observed_month,
+
+    -- Scoring-time debt-cycle features
+    COALESCE(s.has_observed_prior_state, 0)
+        AS has_observed_prior_state,
+
+    COALESCE(s.has_pre_window_history, 0)
+        AS has_pre_window_history,
+
+    COALESCE(s.has_unresolved_loan_at_scoring, 0)
+        AS has_unresolved_loan_at_scoring,
+
+    COALESCE(s.active_loan_days_aging_at_scoring, 0)
+        AS active_loan_days_aging_at_scoring,
+
+    COALESCE(s.active_loan_outstanding_ugx_at_scoring, 0)
+        AS active_loan_outstanding_ugx_at_scoring,
+
+    s.active_loan_aging_bucket_at_scoring,
+
+    COALESCE(s.anomaly_open_at_scoring, 0)
+        AS anomaly_open_at_scoring,
+
+    -- Scoring-state diagnostics
+    s.scoring_state_date,
+    s.scoring_state_loan_uid,
+    s.scoring_state_loan_seq,
+    s.scoring_state_loan_status,
+    s.days_since_last_repayment,
+
+    -- Amounts for the individual loan represented by scoring_state
+    s.scoring_state_loan_disbursed_ugx,
+    s.scoring_state_loan_repaid_ugx,
+    s.scoring_state_loan_gross_repaid_ugx,
+    s.scoring_state_loan_fees_paid_ugx,
+    s.scoring_state_loan_interest_paid_ugx,
+    s.scoring_state_loan_principal_repayment_ratio,
+    s.scoring_state_loan_gross_repayment_ratio,
+
+    s.scoring_state_loan_disbursement_event_count,
+    s.scoring_state_loan_repayment_event_count,
+    s.scoring_state_loan_fee_event_count,
+    s.scoring_state_loan_interest_event_count,
+    s.scoring_state_repayment_to_disbursement_event_ratio,
+
+    -- Aggregates across unique prior loans
+    COALESCE(h.prior_loan_count, 0)
+        AS prior_loan_count,
+
+    COALESCE(h.prior_closed_loan_count, 0)
+        AS prior_closed_loan_count,
+
+    h.avg_tenure_days_closed_loans,
+    h.max_tenure_days_last_5_prior_loans,
+
+    COALESCE(h.historical_anomaly_open_loan_count, 0)
+        AS historical_anomaly_open_loan_count,
+
+    h.historical_anomaly_open_loan_rate,
+
+    COALESCE(h.historical_disbursed_ugx, 0)
+        AS historical_disbursed_ugx,
+
+    COALESCE(h.historical_repaid_ugx, 0)
+        AS historical_repaid_ugx,
+
+    COALESCE(h.historical_gross_repaid_ugx, 0)
+        AS historical_gross_repaid_ugx,
+
+    COALESCE(h.historical_fees_paid_ugx, 0)
+        AS historical_fees_paid_ugx,
+
+    COALESCE(h.historical_interest_paid_ugx, 0)
+        AS historical_interest_paid_ugx,
+
+    h.historical_principal_repayment_ratio,
+    h.historical_gross_repayment_ratio,
+    h.avg_prior_loan_principal_repayment_ratio,
+
+    -- Most recent closed loan
+    lc.last_closed_loan_uid,
+    lc.last_closed_loan_closure_date,
+    lc.last_closed_loan_tenure_days,
+    lc.last_closed_loan_aging_bucket,
+    lc.last_closed_loan_disbursed_ugx,
+    lc.last_closed_loan_repaid_ugx,
+    lc.last_closed_loan_gross_repaid_ugx,
+    lc.last_closed_loan_principal_repayment_ratio,
+
+    COALESCE(st.consecutive_on_time_loans, 0)
+        AS consecutive_on_time_loans,
+
+    -- Prior disbursement history
+    COALESCE(p.prior_disbursement_count, 0)
+        AS prior_disbursement_count,
+
+    COALESCE(p.prior_disbursement_count_30d, 0)
+        AS prior_disbursement_count_30d,
+
+    COALESCE(p.prior_disbursement_count_90d, 0)
+        AS prior_disbursement_count_90d,
+
+    COALESCE(p.prior_disbursement_count_180d, 0)
+        AS prior_disbursement_count_180d,
+
+    p.avg_prior_loan_amount_30d,
+    p.avg_prior_loan_amount_90d,
+    p.avg_prior_loan_amount_180d,
+
+    COALESCE(p.prior_disbursed_ugx_30d, 0)
+        AS prior_disbursed_ugx_30d,
+
+    COALESCE(p.prior_disbursed_ugx_90d, 0)
+        AS prior_disbursed_ugx_90d,
+
+    COALESCE(p.prior_disbursed_ugx_180d, 0)
+        AS prior_disbursed_ugx_180d,
+
+    p.months_since_first_observed_loan,
+
+    -- Targets
+    l.bad_state_3dpd_30d,
+    l.bad_state_1dpd_7d,
+
+    -- Label diagnostics: do not use these as model predictors
+    l.max_days_aging_7d,
+    l.max_days_aging_30d,
+    l.rollover_observed_7d,
+    l.rollover_observed_30d,
+    l.terminal_state_observed_30d,
+    l.outcome_state_row_count_30d,
+    l.outcome_observed_date_count_30d,
+    l.first_outcome_state_date,
+    l.last_outcome_state_date
+
+FROM target_loans d
+
+JOIN loan_labels l
+  ON l.disbursement_fid = d.disbursement_fid
+ AND l.msisdn = d.msisdn
+ AND l.split = d.split
+
+LEFT JOIN scoring_state_features s
+  ON s.disbursement_fid = d.disbursement_fid
+
+LEFT JOIN prior_loan_features h
+  ON h.target_disbursement_fid = d.disbursement_fid
+
+LEFT JOIN last_closed_loan_features lc
+  ON lc.target_disbursement_fid = d.disbursement_fid
+
+LEFT JOIN on_time_streak st
+  ON st.target_disbursement_fid = d.disbursement_fid
+
+LEFT JOIN prior_disbursement_features p
+  ON p.target_disbursement_fid = d.disbursement_fid
+
+LEFT JOIN current_loan_features c
+  ON c.disbursement_fid = d.disbursement_fid;
