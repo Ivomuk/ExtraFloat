@@ -574,7 +574,9 @@ def _parse_args(argv=None):
         help=(
             "Optional loan history snapshot CSV (data/loan_history_snapshot_query.txt "
             "output). Does NOT replace --loan-file -- see the module docstring. Feeds "
-            "the risk cap's unresolved-loan haircut on the 7-signal fallback path only."
+            "Stage 3 PD inference (loan-level-trained artifacts; takes precedence over "
+            "--repayment-file) and the risk cap's unresolved-loan haircut on the "
+            "7-signal fallback path only."
         ),
     )
     p.add_argument(
