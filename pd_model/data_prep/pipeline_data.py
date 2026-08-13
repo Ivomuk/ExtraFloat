@@ -102,9 +102,15 @@ def prepare_pd_training_and_validation_data(
     # ------------------------------------------------------------------ #
     # 1) Force index alignment
     # ------------------------------------------------------------------ #
+    # .loc[index] fancy indexing already returns an independent object under
+    # pandas' copy-on-write (confirmed: no shared memory, safe to mutate) --
+    # the trailing .copy() here was a redundant second full-frame duplication.
+    # Left in place pre-loan-level-grain, this was cheap; at millions of rows
+    # it was a real contributor to an ArrayMemoryError further down this
+    # function (line 202-205's split copies hit the same pattern).
     common_idx = df_pd_raw.index.intersection(df_pd_transformed.index)
-    df_pd_raw = df_pd_raw.loc[common_idx].copy()
-    df_pd_transformed = df_pd_transformed.loc[common_idx].copy()
+    df_pd_raw = df_pd_raw.loc[common_idx]
+    df_pd_transformed = df_pd_transformed.loc[common_idx]
     require_index_alignment(df_pd_raw, df_pd_transformed, context="prepare_pd_data")
 
     # ------------------------------------------------------------------ #
@@ -199,10 +205,12 @@ def prepare_pd_training_and_validation_data(
         train_mask = split_series <= train_cutoff
     val_mask = ~train_mask
 
-    df_train_trans = df_pd_transformed.loc[train_mask].copy()
-    df_train_raw = df_pd_raw.loc[train_mask].copy()
-    df_val_trans = df_pd_transformed.loc[val_mask].copy()
-    df_val_raw = df_pd_raw.loc[val_mask].copy()
+    # Same reasoning as Step 1 above -- boolean-mask .loc indexing is already
+    # independent under copy-on-write, so no explicit .copy() needed here.
+    df_train_trans = df_pd_transformed.loc[train_mask]
+    df_train_raw = df_pd_raw.loc[train_mask]
+    df_val_trans = df_pd_transformed.loc[val_mask]
+    df_val_raw = df_pd_raw.loc[val_mask]
 
     # ------------------------------------------------------------------ #
     # 6) Schema assertions
