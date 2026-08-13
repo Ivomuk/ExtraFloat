@@ -144,6 +144,7 @@ def train_xgb(
         objective="binary:logistic",
         tree_method="hist",
         eval_metric="auc",
+        early_stopping_rounds=cfg.xgb_early_stopping_rounds,
         random_state=42,
     )
     model.set_params(monotone_constraints=constraints_str)
@@ -184,7 +185,13 @@ def train_xgb(
 
     train_auc = roc_auc_score(y_train_arr, train_raw)
     val_auc = roc_auc_score(y_val_arr, val_raw)
-    logger.info("XGBoost train AUC=%.4f | val AUC=%.4f", train_auc, val_auc)
+    logger.info(
+        "XGBoost train AUC=%.4f | val AUC=%.4f | best_iteration=%d/%d",
+        train_auc,
+        val_auc,
+        model.best_iteration,
+        cfg.xgb_n_estimators,
+    )
 
     return model, train_scored, val_scored
 

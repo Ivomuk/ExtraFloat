@@ -100,6 +100,7 @@ def train_lgbm(
         y_train_arr,
         eval_set=[(X_val, y_val_arr)],
         eval_metric="auc",
+        callbacks=[lgb.early_stopping(stopping_rounds=cfg.lgb_early_stopping_rounds, verbose=False)],
     )
 
     train_raw = model.predict_proba(X_train)[:, 1]
@@ -116,7 +117,13 @@ def train_lgbm(
 
     train_auc = roc_auc_score(y_train_arr, train_raw)
     val_auc = roc_auc_score(y_val_arr, val_raw)
-    logger.info("LightGBM train AUC=%.4f | val AUC=%.4f", train_auc, val_auc)
+    logger.info(
+        "LightGBM train AUC=%.4f | val AUC=%.4f | best_iteration=%d/%d",
+        train_auc,
+        val_auc,
+        model.best_iteration_,
+        cfg.lgb_n_estimators,
+    )
 
     return model, train_scored, val_scored
 

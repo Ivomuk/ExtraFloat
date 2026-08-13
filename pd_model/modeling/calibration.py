@@ -417,6 +417,25 @@ def run_bootstrap_comparison(
     id_candidates = [feature_config.AGENT_KEY, "msisdn", "agent_id", "agent_key"]
     join_key = next((c for c in id_candidates if c in xgb_scored.columns and c in lgb_scored.columns), None)
 
+    # At the loan-level grain, an agent can have multiple loans in the
+    # validation set, so the id column isn't row-unique -- joining on it
+    # with drop_duplicates() below would silently collapse most of the
+    # population down to one (arbitrary, first-encountered) row per agent.
+    # xgb_scored/lgb_scored are always built from the identical eval frame
+    # for both models (same Xva, same index, by construction in
+    # run_pipeline.py), so index alignment is exactly as correct as the
+    # id-column join when the id is unique, and strictly more correct
+    # when it isn't -- fall back to it in that case.
+    if join_key is not None and (
+        xgb_scored[join_key].duplicated().any() or lgb_scored[join_key].duplicated().any()
+    ):
+        logger.info(
+            "bootstrap: '%s' is not row-unique in xgb_scored/lgb_scored "
+            "(loan-level grain) -- using index alignment instead of id-column join",
+            join_key,
+        )
+        join_key = None
+
     if join_key is not None:
         xgb_small = xgb_scored[[join_key, "bad_state", "raw_score"]].drop_duplicates(join_key)
         lgb_small = lgb_scored[[join_key, "bad_state", "raw_score"]].drop_duplicates(join_key)

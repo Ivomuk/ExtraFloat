@@ -128,6 +128,27 @@ class TestAddPolicyFlags:
         assert out["xgb_approved_at_50"].isin([0, 1]).all()
 
 
+def _scored_df_loan_level(n: int = 1000, n_agents: int = 300, seed: int = 5) -> pd.DataFrame:
+    """Like _scored_df(), but agent_msisdn repeats -- simulating the
+    loan-level grain, where an agent can have multiple loans (and
+    therefore multiple validation rows) rather than exactly one."""
+    rng = np.random.default_rng(seed)
+    x = rng.normal(0, 1, n)
+    y = (x + rng.normal(0, 0.5, n) > 0).astype(int)
+    return pd.DataFrame(
+        {
+            "agent_msisdn": [f"msisdn_{i % n_agents}" for i in range(n)],
+            "bad_state": y,
+            "raw_score": 1 / (1 + np.exp(-x)),
+            "thin_file_flag": rng.integers(0, 2, n),
+        }
+    )
+
+
+def _metric_value(result: pd.DataFrame, metric: str):
+    return result.loc[result["metric"] == metric, "value"].iloc[0]
+
+
 class TestBootstrap:
     def test_returns_dataframe_with_metric_column(self):
         df = _scored_df(1000, seed=3)
@@ -144,3 +165,23 @@ class TestBootstrap:
         metrics = result["metric"].tolist()
         assert "xgb_ci95_lo" in metrics
         assert "xgb_ci95_hi" in metrics
+
+    def test_unique_agent_msisdn_uses_id_join(self):
+        """Original agent-snapshot grain: agent_msisdn is row-unique, so the
+        id-column join (with its drop_duplicates safety net) is used."""
+        df = _scored_df(1000, seed=3)
+        cfg = ModelConfig(cal_min_n=100, cal_min_bads=5, bootstrap_n=50)
+        result = run_bootstrap_comparison(df, df, cfg=cfg)
+        assert _metric_value(result, "align_mode") == "join_on_agent_msisdn"
+        assert _metric_value(result, "n_rows_aligned") == 1000
+
+    def test_duplicated_agent_msisdn_falls_back_to_index_alignment(self):
+        """Loan-level grain regression guard: when agent_msisdn repeats (an
+        agent has multiple loans), the id-column join's drop_duplicates()
+        would silently collapse most rows down to one-per-agent. Must fall
+        back to index alignment instead, keeping every row."""
+        df = _scored_df_loan_level(1000, n_agents=300, seed=3)
+        cfg = ModelConfig(cal_min_n=100, cal_min_bads=5, bootstrap_n=50)
+        result = run_bootstrap_comparison(df, df, cfg=cfg)
+        assert _metric_value(result, "align_mode") == "index_intersection"
+        assert _metric_value(result, "n_rows_aligned") == 1000

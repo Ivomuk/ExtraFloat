@@ -117,6 +117,7 @@ class ModelConfig:
     xgb_subsample: float = 0.8
     xgb_colsample_bytree: float = 0.8
     xgb_reg_lambda: float = 1.0
+    xgb_early_stopping_rounds: int = 50
 
     # ------------------------------------------------------------------ #
     # LightGBM hyperparameters
@@ -128,6 +129,7 @@ class ModelConfig:
     lgb_colsample_bytree: float = 0.85
     lgb_min_child_samples: int = 40
     lgb_reg_lambda: float = 1.0
+    lgb_early_stopping_rounds: int = 50
 
     # ------------------------------------------------------------------ #
     # Calibration / bootstrap / policy
