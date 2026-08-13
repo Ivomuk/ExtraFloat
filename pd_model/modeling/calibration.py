@@ -211,9 +211,15 @@ def attach_cal_pd(
     """
     df, _ = _standardize_scored_df(scored_df, model_key)
 
-    # Boolean-mask row selection already returns an independent object under
-    # pandas 3.0 copy-on-write -- the .copy() was redundant.
-    cal_sub = cal_map_tbl[cal_map_tbl["model"].astype(str) == str(model_key)]
+    # cal_sub is mutated via column assignment below (cal_sub[col] = ...),
+    # which can trigger a cosmetic SettingWithCopyWarning on a boolean-mask
+    # selection even though pandas' copy-on-write already guarantees the
+    # write is safe and independent of cal_map_tbl (confirmed empirically --
+    # this is a heuristic false-positive, not a correctness issue). Restored
+    # the explicit .copy() purely to suppress the warning; cal_sub is a tiny
+    # table (one calibration-bin row per model, dozens of rows), so there's
+    # no memory cost either way.
+    cal_sub = cal_map_tbl[cal_map_tbl["model"].astype(str) == str(model_key)].copy()
     if cal_sub.shape[0] == 0:
         raise CalibrationError(f"[attach_cal_pd] Fail-closed: no calibration mapping for model '{model_key}'")
 
