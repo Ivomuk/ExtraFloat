@@ -1,0 +1,286 @@
+Important modeling exclusions
+Do not feed these future-derived diagnostic columns into the model:
+
+max_days_aging_7d
+max_days_aging_30d
+rollover_observed_7d
+rollover_observed_30d
+terminal_state_observed_30d
+outcome_state_row_count_30d
+outcome_observed_date_count_30d
+first_outcome_state_date
+last_outcome_state_date
+They are retained only for label auditing and would leak the outcome if treated as predictors.
+
+
+Purpose of each diagnostic
+max_days_aging_7d
+l.max_days_aging_7d
+The greatest days_aging reached by the target loan during the seven-day outcome window.
+
+It can be used to:
+
+verify bad_state_1dpd_7d;
+
+inspect the distribution of delinquency severity;
+
+compare alternative thresholds such as >= 1, > 1, or > 3;
+
+identify unexpected values;
+
+distinguish a slight delay from severe delinquency.
+
+Expected consistency check:
+
+bad_state_1dpd_7d = 1
+whenever:
+
+max_days_aging_7d >= 1
+OR rollover_observed_7d = 1
+The source notes define days_aging as time since the 24-hour due point. 
+
+max_days_aging_30d
+l.max_days_aging_30d
+The highest aging reached by the target loan within 30 days.
+
+It is the primary evidence behind:
+
+bad_state_3dpd_30d
+It can be used to:
+
+verify that the > 3 rule was applied correctly;
+
+compare alternative default thresholds;
+
+report delinquency severity;
+
+analyze whether model errors are concentrated around borderline cases;
+
+detect abnormal aging values.
+
+For example, a false positive where max_days_aging_30d = 3 is different from one where it is 0; likewise, a false negative on a loan reaching 30 days overdue is much more serious than one barely crossing the threshold.
+
+rollover_observed_7d
+l.rollover_observed_7d
+Indicates whether the target loan entered an ANOMALY_OPEN or equivalent anomaly state during its first seven days.
+
+It is useful for:
+
+verifying why a loan was labeled bad even when max_days_aging_7d is null or below 1;
+
+measuring how much of the bad population is caused by rollover rather than conventional aging;
+
+testing whether rollover handling is consistent;
+
+monitoring changes in rollover prevalence over time.
+
+The source exposes both loan_status and is_anomaly_open, so retaining a normalized rollover diagnostic helps reconcile these fields. 
+
+rollover_observed_30d
+l.rollover_observed_30d
+The same rollover indicator over the 30-day outcome horizon.
+
+It can explain cases such as:
+
+max_days_aging_30d <= 3
+bad_state_3dpd_30d = 1
+That combination is valid when the loan was labeled bad because it rolled over rather than because it crossed the aging threshold.
+
+It is also useful for decomposing the target:
+
+bad due to aging only
+bad due to rollover only
+bad due to both aging and rollover
+good
+For example:
+
+SELECT
+    CASE
+        WHEN max_days_aging_30d > 3
+         AND rollover_observed_30d = 1
+        THEN 'aging_and_rollover'
+
+        WHEN max_days_aging_30d > 3
+        THEN 'aging_only'
+
+        WHEN rollover_observed_30d = 1
+        THEN 'rollover_only'
+
+        ELSE 'good'
+    END AS label_reason,
+    COUNT(*) AS loans
+FROM model_data
+GROUP BY 1;
+terminal_state_observed_30d
+l.terminal_state_observed_30d
+Indicates whether a settled, closed, overpaid, or closure state was observed within the outcome horizon.
+
+It helps answer:
+
+Is a good label supported by evidence of repayment, or merely by the absence of an observed bad state?
+
+This is particularly important because:
+
+bad_state = 0
+may otherwise mean either:
+
+the loan was genuinely repaid without material delinquency; or
+
+the state history is incomplete and no bad row was captured.
+
+The current repository query explicitly warns that “no overdue or rollover observed” is not automatically equivalent to confirmed repayment unless state coverage is complete. 
+
+You can use this field to categorize good outcomes:
+
+CASE
+    WHEN bad_state_3dpd_30d = 0
+     AND terminal_state_observed_30d = 1
+    THEN 'confirmed_good'
+
+    WHEN bad_state_3dpd_30d = 0
+     AND terminal_state_observed_30d = 0
+    THEN 'unconfirmed_good'
+
+    ELSE 'bad'
+END
+Depending on warehouse semantics, you might eventually require a terminal state for a confirmed good label—or retain unconfirmed outcomes with a separate confidence flag.
+
+outcome_state_row_count_30d
+l.outcome_state_row_count_30d
+The number of physical target-loan state rows matched during the outcome interval.
+
+It helps detect:
+
+duplicate daily state records;
+
+loan-matching errors;
+
+unexpectedly sparse histories;
+
+unexpectedly high row counts;
+
+source-ingestion changes.
+
+This is a row-count diagnostic, not proof of 30 complete days. Multiple rows can exist on one date, which is why the distinct-date count is also retained.
+
+outcome_observed_date_count_30d
+l.outcome_observed_date_count_30d
+The number of distinct calendar dates on which the target loan was observed during the outcome window.
+
+It helps:
+
+measure state-history coverage;
+
+detect incomplete extraction;
+
+compare coverage between train and validation periods;
+
+investigate whether label rate varies with the amount of observed history;
+
+determine whether good labels are disproportionately based on sparse evidence.
+
+However, fewer than 30 observed dates does not necessarily mean incomplete data. A loan settled on day 1 may legitimately stop appearing. This diagnostic must therefore be interpreted with terminal-state information.
+
+A useful audit is:
+
+SELECT
+    terminal_state_observed_30d,
+    outcome_observed_date_count_30d,
+    COUNT(*) AS loans,
+    AVG(CAST(bad_state_3dpd_30d AS DOUBLE)) AS bad_rate
+FROM model_data
+GROUP BY 1, 2
+ORDER BY 1, 2;
+The current repository query uses distinct observed dates as an eligibility proxy, requiring at least five of seven dates.  Retaining the diagnostic lets you assess whether such a rule is justified instead of silently imposing it.
+
+first_outcome_state_date
+l.first_outcome_state_date
+The earliest matched state date for the target loan.
+
+It helps identify:
+
+delayed first observations;
+
+a failure to match the disbursement-day record;
+
+incorrect loan-start dates;
+
+source ingestion gaps;
+
+matching problems around month boundaries.
+
+For example:
+
+DATE_DIFF(
+    'day',
+    loan_date,
+    first_outcome_state_date
+)
+should usually be small. A large delay deserves investigation.
+
+last_outcome_state_date
+l.last_outcome_state_date
+The latest state date observed for the target loan within the label horizon.
+
+It helps determine whether:
+
+the loan remained open throughout the horizon;
+
+the loan disappeared from state data early;
+
+the disappearance coincides with a terminal state;
+
+the observation window was truncated;
+
+matching stopped unexpectedly.
+
+For a settled loan, an early last date can be perfectly valid. For a non-terminal loan, an early last date might indicate missing data.
+
+
+FEATURE_COLUMNS = [
+    "disbursement_amount_ugx",
+    "disbursement_hour",
+    "disbursement_day_of_week",
+    "late_afternoon_disbursement",
+    "has_observed_prior_state",
+    "has_pre_window_history",
+    "has_unresolved_loan_at_scoring",
+    "active_loan_days_aging_at_scoring",
+    "active_loan_outstanding_ugx_at_scoring",
+    "anomaly_open_at_scoring",
+    "days_since_last_repayment",
+    "scoring_state_loan_principal_repayment_ratio",
+    "prior_loan_count",
+    "avg_tenure_days_closed_loans",
+    "max_tenure_days_last_5_prior_loans",
+    "historical_anomaly_open_loan_rate",
+    "historical_principal_repayment_ratio",
+    "consecutive_on_time_loans",
+    "prior_disbursement_count_30d",
+    "prior_disbursement_count_90d",
+]
+
+
+Primary target
+bad_state_3dpd_30d = 1
+if the target loan ever has:
+
+days_aging > 3
+OR ANOMALY_OPEN
+during the 30 days after disbursement.
+
+It means:
+
+The target loan became more than three days overdue or entered rollover/anomaly status at any point in the 30 days following disbursement.
+It marks the target loan bad if it becomes more than three days overdue or enters rollover state within 30 days.
+
+Secondary target
+Also retain:
+
+bad_state_1dpd_7d
+to measure any breach of the product’s 24-hour obligation.
+
+It means:
+
+The target loan breached its 24-hour obligation by at least one aging day or entered rollover status within seven days.
+It identifies any breach of the 24-hour obligation during the following seven days. The source description says days_aging measures time since the 24-hour due point. 
