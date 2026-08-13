@@ -27,6 +27,7 @@ from pd_model.config.feature_config import (
     LEAKAGE_PATTERNS,
     PD_FEATURE_BLACKLIST,
 )
+from pd_model.preprocessing.loan_history_features import LABEL_DIAGNOSTIC_COLUMNS
 from pd_model.preprocessing.transformations import get_and_classify_pd_features
 
 
@@ -126,6 +127,59 @@ class TestBlacklistCompleteness:
         assert "outcome" in LEAKAGE_PATTERNS, "'outcome' not in LEAKAGE_PATTERNS"
 
 
+class TestLoanLevelDiagnosticsExcluded:
+    """data/loan_state_query_updated_materialized.txt's 9 label-diagnostic
+    columns are future-derived (label leakage) and must never reach the
+    model, regardless of whether pd_model/preprocessing/loan_history_features.py
+    already stripped them upstream -- this is defense-in-depth."""
+
+    def test_all_9_diagnostics_excluded_by_some_guard(self):
+        for col in LABEL_DIAGNOSTIC_COLUMNS:
+            excluded, reason = _is_excluded_by_any_guard(col)
+            assert excluded, f"Label-diagnostic column '{col}' not excluded by any guard"
+
+    def test_all_9_diagnostics_in_blacklist(self):
+        """Only 4 of the 9 are caught by LEAKAGE_PATTERNS's 'outcome' substring
+        (outcome_state_row_count_30d, outcome_observed_date_count_30d,
+        first_outcome_state_date, last_outcome_state_date); the other 5
+        (days-aging / rollover / terminal-state) rely on explicit blacklist
+        membership plus the narrower max_days_aging/rollover/terminal_state
+        LEAKAGE_PATTERNS entries."""
+        blacklist_low = {c.strip().lower() for c in PD_FEATURE_BLACKLIST}
+        for col in LABEL_DIAGNOSTIC_COLUMNS:
+            assert col.lower() in blacklist_low, (
+                f"Label-diagnostic column '{col}' not in PD_FEATURE_BLACKLIST"
+            )
+
+    def test_loan_level_id_columns_excluded(self):
+        id_cols = [
+            "msisdn",
+            "disbursement_fid",
+            "disbursement_uid",
+            "target_loan_uid",
+            "target_loan_seq",
+            "same_day_disbursement_position",
+            "same_day_disbursement_count",
+            "scoring_state_loan_uid",
+            "scoring_state_date",
+            "last_closed_loan_uid",
+            "last_closed_loan_closure_date",
+            "loan_seq_minus_observed_prior_loan_count",
+            "sales_region",
+            "sales_territory",
+            "district",
+            "loan_date",
+            "disbursement_ts",
+            "label_horizon_7d_end",
+            "label_horizon_30d_end",
+            "bad_state_3dpd_30d",
+            "bad_state_1dpd_7d",
+        ]
+        for col in id_cols:
+            excluded, reason = _is_excluded_by_any_guard(col)
+            assert excluded, f"Loan-level id/label column '{col}' not excluded (reason: {reason})"
+
+
 class TestLegitimateColumnsNotExcluded:
     def test_net_exposure_6m_not_excluded(self):
         """
@@ -152,6 +206,22 @@ class TestLegitimateColumnsNotExcluded:
     def test_repayment_vol_m4_not_excluded(self):
         excluded, reason = _is_excluded_by_any_guard("repayment_vol_m4")
         assert not excluded, f"repayment_vol_m4 should not be excluded: {reason}"
+
+    def test_active_loan_days_aging_at_scoring_not_excluded(self):
+        """Regression guard: LEAKAGE_PATTERNS's defense-in-depth entry for the
+        max_days_aging_* diagnostics must be narrow enough ('max_days_aging',
+        not the broader 'days_aging') to not also block this legitimate
+        FEATURE_COLUMNS entry. Caught via a synthetic end-to-end
+        run_pipeline smoke test before this fix."""
+        excluded, reason = _is_excluded_by_any_guard("active_loan_days_aging_at_scoring")
+        assert not excluded, (
+            f"active_loan_days_aging_at_scoring was excluded (reason: {reason}), but it "
+            "is a legitimate feature, not one of the 9 label-diagnostic columns."
+        )
+
+    def test_active_loan_days_aging_at_snapshot_not_excluded(self):
+        excluded, reason = _is_excluded_by_any_guard("active_loan_days_aging_at_snapshot")
+        assert not excluded, f"active_loan_days_aging_at_snapshot should not be excluded: {reason}"
 
 
 class TestPipelineIntegration:

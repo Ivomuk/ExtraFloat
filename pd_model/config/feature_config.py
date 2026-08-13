@@ -28,6 +28,15 @@ DATE_COLS: list[str] = [
     "Last_disbursement_date",
     "Last_repayment_date",
     "date_of_birth",
+    # data/loan_state_query_updated_materialized.txt (loan-level training query)
+    "loan_date",
+    "disbursement_ts",
+    "label_horizon_7d_end",
+    "label_horizon_30d_end",
+    "scoring_state_date",
+    "last_closed_loan_closure_date",
+    "first_outcome_state_date",
+    "last_outcome_state_date",
 ]
 
 # ======================================================================== #
@@ -100,6 +109,44 @@ PD_FEATURE_BLACKLIST: frozenset[str] = frozenset(
         # Sample-selection filter -- present in repayments CSV, must never enter features
         "outcome_observed_30d",
         "outcome_observed_30D",
+        # data/loan_state_query_updated_materialized.txt -- identifiers, join
+        # keys, and audit columns (see pd_model/preprocessing/loan_history_features.py)
+        "msisdn",
+        "disbursement_fid",
+        "disbursement_uid",
+        "target_loan_uid",
+        "target_loan_seq",
+        "same_day_disbursement_position",
+        "same_day_disbursement_count",
+        "scoring_state_loan_uid",
+        "scoring_state_date",
+        "last_closed_loan_uid",
+        "last_closed_loan_closure_date",
+        "loan_seq_minus_observed_prior_loan_count",
+        "sales_region",
+        "sales_territory",
+        "district",
+        "loan_date",
+        "disbursement_ts",
+        "label_horizon_7d_end",
+        "label_horizon_30d_end",
+        # Loan-level labels
+        "bad_state_3dpd_30d",
+        "bad_state_1dpd_7d",
+        # Label-diagnostic columns -- future-derived, retained by the SQL for
+        # label auditing only (see data/Features_Consult.txt). Only 4 of these
+        # 9 are caught by LEAKAGE_PATTERNS's "outcome" substring below; the
+        # other 5 (days_aging / rollover / terminal_state) match no existing
+        # pattern and would otherwise leak straight into the model.
+        "max_days_aging_7d",
+        "max_days_aging_30d",
+        "rollover_observed_7d",
+        "rollover_observed_30d",
+        "terminal_state_observed_30d",
+        "outcome_state_row_count_30d",
+        "outcome_observed_date_count_30d",
+        "first_outcome_state_date",
+        "last_outcome_state_date",
     }
 )
 
@@ -128,6 +175,18 @@ LEAKAGE_PATTERNS: tuple[str, ...] = (
     "recovery",
     "label",
     "target",
+    # Defense-in-depth for data/loan_state_query_updated_materialized.txt's
+    # label-diagnostic columns -- the 9 exact names are already in
+    # PD_FEATURE_BLACKLIST; these substrings catch any similarly-named
+    # future SQL columns automatically. NOTE: "max_days_aging" (not the
+    # broader "days_aging") -- the legitimate feature
+    # active_loan_days_aging_at_scoring / active_loan_days_aging_at_snapshot
+    # also contains "days_aging" and must not be blocked by this pattern
+    # (confirmed via a synthetic end-to-end run_pipeline smoke test, which
+    # raised DataLeakageError on that exact column before this fix).
+    "max_days_aging",
+    "rollover",
+    "terminal_state",
 )
 
 # Substrings indicating identity-like or bookkeeping columns
@@ -220,6 +279,16 @@ LOG_PATTERNS: tuple[str, ...] = (
     "voucher",
     "rev_",
     "payment_comm_",
+    # data/loan_state_query_updated_materialized.txt monetary columns
+    # (disbursement_amount_ugx, all_prior_loans_disbursed_ugx,
+    # active_loan_outstanding_ugx_at_scoring, avg_prior_loan_amount_30d, ...)
+    # match none of the patterns above -- "_val"/"_value" require that exact
+    # substring, which "ugx"/"amount" never contain. Without these two
+    # patterns these right-skewed money columns fall through to
+    # DEFAULT PROTECTED (left raw, unwinsorized) instead of getting the
+    # same log1p + winsorize treatment the old *_val_6M columns got.
+    "_ugx",
+    "_amount",
 )
 
 SIGNED_AMOUNT_PATTERNS: tuple[str, ...] = (

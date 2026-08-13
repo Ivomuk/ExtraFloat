@@ -37,11 +37,19 @@ Input files
     repayment/penalty cash-flow figures --loan-file provides, since its
     source table only exposes cumulative per-loan snapshots, not an event
     log.  What it adds instead is a live "is this agent currently
-    delinquent or mid-rollover" signal that feeds a haircut on the
-    7-signal risk fallback path only (compute_risk_cap() in
-    extrafloat_limit_engine_caps.py) -- never on the cal_pd path, where
-    the PD model's own training features already cover this.  Omit this
-    flag entirely to run exactly as before; absence is a clean no-op.
+    delinquent or mid-rollover" signal, consumed by two stages:
+      - Stage 3 (PD model): if the artifacts in --artifacts-dir were
+        trained in loan-level mode (pd_model/run_pipeline.py's
+        --loan-training-file), this supplies the loan-history features the
+        model expects at inference time -- see
+        pd_model.preprocessing.loan_history_features.run_phase_2_2_loan_history_pd_features_inference().
+        Takes precedence over --repayment-file when both are supplied.
+      - Stage 4 (limit engine): feeds a haircut on the 7-signal risk
+        fallback path only (compute_risk_cap() in
+        extrafloat_limit_engine_caps.py) -- never on the cal_pd path, where
+        the PD model's own training features already cover this.
+    Omit this flag entirely to run exactly as before; absence is a clean
+    no-op in both stages.
 
 Usage
 -----
@@ -238,13 +246,17 @@ def run_credit_risk_pipeline(
                                  Fed to the engine prior exposure cap.
     artifacts_dir              : directory containing trained PD model artifacts
                                  (xgb_model.joblib, lgbm_model.joblib, pd_calibration_map.csv, …)
-    repayment_file             : optional repayment history CSV for Phase 2.2 PD features.
-                                 Agents without repayment rows are treated as thin-file.
+    repayment_file             : optional repayment history CSV for Phase 2.2 PD features
+                                 (original agent-snapshot-grain artifacts). Agents without
+                                 repayment rows are treated as thin-file. Ignored by Stage 3
+                                 when loan_history_file is also supplied.
     loan_history_file          : optional loan history snapshot CSV
                                  (data/loan_history_snapshot_query.txt output). Does NOT
-                                 replace loan_file -- see the module docstring. Feeds the
-                                 engine risk cap's unresolved-loan haircut on the 7-signal
-                                 fallback path only. Omit for unchanged behaviour.
+                                 replace loan_file -- see the module docstring. Feeds Stage 3
+                                 PD inference (loan-level-trained artifacts; takes precedence
+                                 over repayment_file) and the engine risk cap's
+                                 unresolved-loan haircut on the 7-signal fallback path only.
+                                 Omit for unchanged behaviour.
     champion                   : "xgb" or "lgb" -- which model's cal_pd feeds into the engine
     keep_intermediate          : if True, all engine intermediate columns are retained
     engine_config              : optional dict to override DEFAULT_CAP_CONFIG values
@@ -302,6 +314,12 @@ def run_credit_risk_pipeline(
     if loan_history_file is not None:
         df_loan_history = load_loan_history_snapshot_features(loan_history_file)
         logger.info("Loan history snapshot file loaded: %d rows", len(df_loan_history))
+        if repayment_df is not None:
+            logger.warning(
+                "Both --repayment-file and --loan-history-file were supplied: "
+                "Stage 3 PD inference uses --loan-history-file and ignores "
+                "--repayment-file (see run_inference_pipeline)."
+            )
 
     # -- Stage 2: Agent segmentation -----------------------------------------
     logger.info("Stage 2: running agent segmentation")
@@ -354,6 +372,7 @@ def run_credit_risk_pipeline(
         df_raw=df_agent,
         artifacts_dir=artifacts_dir,
         repayment_df=repayment_df,
+        loan_history_df=df_loan_history,
         champion=champion,
     )
     logger.info(

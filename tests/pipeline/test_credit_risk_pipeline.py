@@ -343,6 +343,107 @@ def test_inference_receives_raw_data_with_agent_msisdn(tmp_path):
     assert "msisdn" not in captured["df_raw"].columns
 
 
+def test_loan_history_file_reaches_stage3_inference(tmp_path):
+    """--loan-history-file must reach both Stage 3 (PD inference, as
+    loan_history_df) and Stage 4 (engine features, as loan_history_snapshot_df)
+    -- the same loaded DataFrame, two consumers."""
+    from run_credit_risk_pipeline import run_credit_risk_pipeline
+
+    n = 4
+    msisdn_list = [f"256700{i:06d}" for i in range(n)]
+    df_features = _minimal_features_df(n=n)
+    pd_scored = _make_pd_scored(msisdn_list)
+    raw_df = pd.DataFrame({"agent_msisdn": msisdn_list, "commission": [1.0] * n})
+    loan_history_df = pd.DataFrame(
+        {"msisdn": msisdn_list, "observed_loan_count": [1] * n}
+    )
+
+    captured_inference = {}
+
+    def capture_inference(df_raw, **kwargs):
+        captured_inference.update(kwargs)
+        return pd_scored
+
+    captured_engine_kwargs = {}
+
+    def capture_engine_features(*args, **kwargs):
+        captured_engine_kwargs.update(kwargs)
+        return df_features
+
+    with (
+        patch("run_credit_risk_pipeline._check_artifacts"),
+        patch("run_credit_risk_pipeline.pd.read_csv", return_value=raw_df),
+        patch("run_credit_risk_pipeline.load_transaction_capacity_features", return_value=MagicMock()),
+        patch("run_credit_risk_pipeline.load_loan_summary_recent_features", return_value=MagicMock()),
+        patch("run_credit_risk_pipeline.load_borrower_limit_features", return_value=MagicMock()),
+        patch(
+            "run_credit_risk_pipeline.load_loan_history_snapshot_features",
+            return_value=loan_history_df,
+        ),
+        patch("run_credit_risk_pipeline.run_inference_pipeline", side_effect=capture_inference),
+        patch(
+            "run_credit_risk_pipeline.build_extrafloat_limit_engine_features",
+            side_effect=capture_engine_features,
+        ),
+    ):
+        run_credit_risk_pipeline(
+            transaction_file="dummy_txn.csv",
+            loan_file="dummy_loan.csv",
+            borrower_file="dummy_bor.csv",
+            artifacts_dir=str(tmp_path),
+            loan_history_file="dummy_loan_history.csv",
+        )
+
+    assert captured_inference.get("loan_history_df") is loan_history_df
+    assert captured_engine_kwargs.get("loan_history_snapshot_df") is loan_history_df
+
+
+def test_loan_history_file_absent_is_none_in_both_stages(tmp_path):
+    """Omitting --loan-history-file must leave both consumers untouched
+    (clean no-op, as documented)."""
+    from run_credit_risk_pipeline import run_credit_risk_pipeline
+
+    n = 4
+    msisdn_list = [f"256700{i:06d}" for i in range(n)]
+    df_features = _minimal_features_df(n=n)
+    pd_scored = _make_pd_scored(msisdn_list)
+    raw_df = pd.DataFrame({"agent_msisdn": msisdn_list, "commission": [1.0] * n})
+
+    captured_inference = {}
+
+    def capture_inference(df_raw, **kwargs):
+        captured_inference.update(kwargs)
+        return pd_scored
+
+    captured_engine_kwargs = {}
+
+    def capture_engine_features(*args, **kwargs):
+        captured_engine_kwargs.update(kwargs)
+        return df_features
+
+    with (
+        patch("run_credit_risk_pipeline._check_artifacts"),
+        patch("run_credit_risk_pipeline.pd.read_csv", return_value=raw_df),
+        patch("run_credit_risk_pipeline.load_transaction_capacity_features", return_value=MagicMock()),
+        patch("run_credit_risk_pipeline.load_loan_summary_recent_features", return_value=MagicMock()),
+        patch("run_credit_risk_pipeline.load_borrower_limit_features", return_value=MagicMock()),
+        patch("run_credit_risk_pipeline.run_inference_pipeline", side_effect=capture_inference),
+        patch(
+            "run_credit_risk_pipeline.build_extrafloat_limit_engine_features",
+            side_effect=capture_engine_features,
+        ),
+    ):
+        run_credit_risk_pipeline(
+            transaction_file="dummy_txn.csv",
+            loan_file="dummy_loan.csv",
+            borrower_file="dummy_bor.csv",
+            artifacts_dir=str(tmp_path),
+        )
+
+    assert captured_inference.get("loan_history_df") is None
+    assert captured_engine_kwargs.get("loan_history_snapshot_df") is None
+
+
 # -----------------------------------------------------------------------------
 # 7. Experience factor NOT applied on the cal_pd path (fix 3)
 # -----------------------------------------------------------------------------

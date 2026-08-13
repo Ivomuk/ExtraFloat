@@ -353,6 +353,7 @@ def run_inference_pipeline(
     df_raw: pd.DataFrame,
     artifacts_dir: Path,
     repayment_df: pd.DataFrame | None = None,
+    loan_history_df: pd.DataFrame | None = None,
     cfg: ModelConfig = DEFAULT_CONFIG,
     champion: str = "xgb",
 ) -> pd.DataFrame:
@@ -364,22 +365,46 @@ def run_inference_pipeline(
 
     Parameters
     ----------
-    df_raw        : raw agent snapshot DataFrame (same schema as training data)
-    artifacts_dir : path to directory containing model artifacts
-    repayment_df  : optional repayment history DataFrame for Phase 2.2 features.
-                    If None, loan repayment features are skipped (thin-file path).
-    cfg           : ModelConfig
-    champion      : "xgb" or "lgb"
+    df_raw          : raw agent snapshot DataFrame (same schema as training data)
+    artifacts_dir   : path to directory containing model artifacts
+    repayment_df    : optional repayment history DataFrame for Phase 2.2 features
+                      (original agent-snapshot grain path). Ignored when
+                      ``loan_history_df`` is supplied.
+    loan_history_df : optional data/loan_history_snapshot_query.txt output
+                      (e.g. via
+                      extrafloat.io.extrafloat_data_loaders.load_loan_history_snapshot_features()),
+                      for models trained on data/loan_state_query_updated_materialized.txt
+                      (loan-level grain path -- see pd_model/run_pipeline.py's
+                      --loan-training-file mode). Takes precedence over
+                      ``repayment_df`` when both are supplied.
+    cfg             : ModelConfig
+    champion        : "xgb" or "lgb"
 
     Returns
     -------
     Scored DataFrame (see score_new_agents for column details).
+
+    Notes
+    -----
+    When neither ``repayment_df`` nor ``loan_history_df`` is supplied, this
+    function falls back to a genuine thin-file path (``has_ever_loan=0`` for
+    every agent) rather than relying on ``classify_agent_loan_status()``'s
+    unconditional ``has_ever_loan`` requirement -- that requirement is only
+    satisfied by ``run_phase_2_2_repayment_pd_features()``, so calling this
+    with ``repayment_df=None`` on its own raises ``SchemaValidationError``
+    despite the historical assumption that it "skips gracefully to the
+    thin-file path". That pre-existing gap is left as-is on the
+    ``repayment_df``-only path; this fallback exists so the new
+    ``loan_history_df`` path doesn't repeat it.
     """
     from pd_model.modeling.scorecard import add_never_loan_scorecard_from_phase_2_1
     from pd_model.preprocessing.loan_features import (
         add_thin_file_flags,
         classify_agent_loan_status,
         run_phase_2_2_repayment_pd_features,
+    )
+    from pd_model.preprocessing.loan_history_features import (
+        run_phase_2_2_loan_history_pd_features_inference,
     )
     from pd_model.preprocessing.transaction_features import run_phase_2_1_richer_tx_behaviour
     from pd_model.preprocessing.transformations import build_transformed_dataframe
@@ -391,11 +416,17 @@ def run_inference_pipeline(
     # Phase 2.1 -- transaction behaviour features
     df = run_phase_2_1_richer_tx_behaviour(df_raw.copy(), cfg=cfg)
 
-    # Phase 2.2 -- loan repayment features (optional)
-    if repayment_df is not None:
+    # Phase 2.2 -- loan history / repayment features
+    if loan_history_df is not None:
+        df = run_phase_2_2_loan_history_pd_features_inference(df, loan_history_df, cfg=cfg)
+    elif repayment_df is not None:
         df, _ = run_phase_2_2_repayment_pd_features(df, repayment_df, cfg=cfg, verbose=False)
-    df = classify_agent_loan_status(df)
-    df = add_thin_file_flags(df, cfg=cfg)
+        df = classify_agent_loan_status(df)
+        df = add_thin_file_flags(df, cfg=cfg)
+    else:
+        df["has_ever_loan"] = 0
+        df = classify_agent_loan_status(df)
+        df = add_thin_file_flags(df, cfg=cfg)
 
     # Thin-file scorecard (sigmoid baseline)
     df = add_never_loan_scorecard_from_phase_2_1(df, cfg=cfg)

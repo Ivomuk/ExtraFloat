@@ -1,8 +1,8 @@
 """
 PD Model Feature + Training Pipeline -- CLI entry point.
 
-Usage
------
+Usage (original, agent-snapshot grain)
+---------------------------------------
 ::
 
     python -m pd_model.run_pipeline \\
@@ -16,14 +16,47 @@ Usage
         --champion            xgb \\
         --log-level           INFO
 
-The pipeline:
+Usage (loan-level grain, data/loan_state_query_updated_materialized.txt)
+--------------------------------------------------------------------------
+::
+
+    python -m pd_model.run_pipeline \\
+        --loan-training-file data/loan_state_training_export.csv \\
+        --train-file  data/snapshot_20250930.csv \\
+        --val-file    data/snapshot_20251115.csv \\
+        --train-snapshot-date 20250930 \\
+        --val-snapshot-date   20251115 \\
+        --output-dir          artifacts/ \\
+        --champion            xgb \\
+        --log-level           INFO
+
+``--loan-training-file`` and ``--repayment-file`` are mutually exclusive --
+exactly one must be supplied. ``--train-file``/``--val-file``/
+``--train-snapshot-date``/``--val-snapshot-date`` are required in both
+modes: in loan-level mode they still supply Phase 2.1 (commission/balance/
+capacity) features, frozen at one cohort-representative date per split and
+joined onto the loan grain by agent_msisdn -- a real point-in-time Phase 2.1
+join is a follow-up, not built here. ``--train-cutoff`` is required only in
+the original mode; in loan-level mode the query's own ``split`` column is
+authoritative and a representative cutoff is derived automatically for
+metadata/logging only.
+
+The pipeline (loan-level mode differences noted inline):
 1.  Load raw snapshots and stack into a combined modelling DataFrame.
+    Loan-level mode: load the loan-level training file directly (already
+    has ``split`` and the label per row).
 2.  Phase 2.1 -- transaction behaviour features.
+    Loan-level mode: joined onto the loan grain by (agent_msisdn, split).
 3.  Phase 2.2 -- loan repayment features + labelling.
+    Loan-level mode: ``run_phase_2_2_loan_history_pd_features()`` instead of
+    ``run_phase_2_2_repayment_pd_features()`` -- see
+    ``pd_model/preprocessing/loan_history_features.py``.
 4.  Thin-file scorecard (agents with no loan history).
 5.  Feature classification + transformation.
 6.  IV-based feature selection (train-only).
 7.  Train / validation split + final data prep.
+    Loan-level mode: the ``split`` column is used directly
+    (``precomputed_train_mask``), not a date-cutoff comparison.
 8.  Write ``feature_order.json`` and ``model_metadata.json``.
 9.  Train XGBoost model.
 10. Train LightGBM model.
@@ -51,6 +84,7 @@ import pandas as pd
 from pd_model.config import feature_config
 from pd_model.config.model_config import DEFAULT_CONFIG
 from pd_model.data_prep.pipeline_data import prepare_pd_training_and_validation_data
+from pd_model.exceptions import DataAlignmentError
 from pd_model.logging_config import configure_root_level, get_logger
 from pd_model.modeling.calibration import run_bootstrap_comparison, run_locked_policy_pipeline
 from pd_model.modeling.evaluation import compare_models_deciles
@@ -68,6 +102,7 @@ from pd_model.preprocessing.loan_features import (
     leakage_audit_phase_2_2,
     run_phase_2_2_repayment_pd_features,
 )
+from pd_model.preprocessing.loan_history_features import run_phase_2_2_loan_history_pd_features
 from pd_model.preprocessing.transaction_features import run_phase_2_1_richer_tx_behaviour
 from pd_model.preprocessing.transformations import (
     build_transformed_dataframe,
@@ -118,58 +153,169 @@ def run_pipeline(args: argparse.Namespace) -> None:
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # ------------------------------------------------------------------ #
-    # 1) Load and stack snapshots
-    # ------------------------------------------------------------------ #
-    logger.info("=== Step 1: Load snapshots ===")
-    train_df = _load_snapshot(args.train_file, args.train_snapshot_date, "train")
-    val_df = _load_snapshot(args.val_file, args.val_snapshot_date, "validation")
+    using_loan_level_grain = getattr(args, "loan_training_file", None) is not None
+    train_cutoff: pd.Timestamp | None = None
 
-    df_pd = pd.concat([train_df, val_df], ignore_index=True, sort=False)
-    df_pd = _parse_dates(df_pd)
+    if using_loan_level_grain:
+        # ------------------------------------------------------------------ #
+        # 1) Load the loan-level training file
+        #
+        # Grain: one row per disbursement_fid, with split and the label
+        # already assigned by data/loan_state_query_updated_materialized.txt.
+        # ------------------------------------------------------------------ #
+        logger.info("=== Step 1: Load loan-level training file ===")
+        df_loans = pd.read_csv(args.loan_training_file)
+        logger.info("Loaded %s: %d rows, %d cols", args.loan_training_file, *df_loans.shape)
 
-    dup_cnt = df_pd.duplicated(subset=[feature_config.AGENT_KEY, "snapshot_dt"]).sum()
-    if dup_cnt > 0:
-        logger.warning("Duplicate (agent, snapshot_dt) rows detected: %d", dup_cnt)
+        df_pd, _df_label_diagnostics = run_phase_2_2_loan_history_pd_features(
+            df_loans, cfg=cfg, verbose=True
+        )
 
-    logger.info("Combined DataFrame: %d rows, %d cols", *df_pd.shape)
+        dup_cnt = df_pd.duplicated(subset=[feature_config.AGENT_KEY, "disbursement_fid"]).sum()
+        if dup_cnt > 0:
+            logger.warning("Duplicate (agent, disbursement_fid) rows detected: %d", dup_cnt)
 
-    # ------------------------------------------------------------------ #
-    # 2) Phase 2.1 -- transaction behaviour features
-    # ------------------------------------------------------------------ #
-    logger.info("=== Step 2: Phase 2.1 -- transaction behaviour features ===")
-    df_pd = run_phase_2_1_richer_tx_behaviour(df_pd, cfg=cfg)
+        logger.info("Combined DataFrame: %d rows, %d cols", *df_pd.shape)
 
-    # ------------------------------------------------------------------ #
-    # 3) Load repayments and run Phase 2.2
-    # ------------------------------------------------------------------ #
-    logger.info("=== Step 3: Phase 2.2 -- repayment features + labelling ===")
-    df_repayments = pd.read_csv(args.repayment_file)
-    logger.info("Repayments loaded: %d rows", len(df_repayments))
+        # ------------------------------------------------------------------ #
+        # 2) Phase 2.1 -- transaction behaviour features
+        #
+        # Frozen at one cohort-representative date per split (train/val
+        # snapshot files, same as the original mode) and joined onto the
+        # loan grain by (agent_msisdn, split). This is coarser than true
+        # point-in-time (each loan's own disbursement date), and is a known,
+        # explicitly accepted limitation for this first version -- see the
+        # module docstring. Labels and loan-history features are point-in-time
+        # correct via the SQL regardless.
+        # ------------------------------------------------------------------ #
+        logger.info("=== Step 2: Phase 2.1 -- transaction behaviour features (frozen per-split date) ===")
+        train_snap_df = _load_snapshot(args.train_file, args.train_snapshot_date, "train")
+        val_snap_df = _load_snapshot(args.val_file, args.val_snapshot_date, "validation")
+        snap_df = pd.concat([train_snap_df, val_snap_df], ignore_index=True, sort=False)
+        snap_df = _parse_dates(snap_df)
+        snap_df = run_phase_2_1_richer_tx_behaviour(snap_df, cfg=cfg)
 
-    df_pd, _df_repayments_out = run_phase_2_2_repayment_pd_features(
-        df_pd, df_repayments, cfg=cfg, verbose=True
-    )
-    df_pd = classify_agent_loan_status(df_pd)
-    df_pd = add_thin_file_flags(df_pd, cfg=cfg)
+        snap_df[feature_config.AGENT_KEY] = snap_df[feature_config.AGENT_KEY].astype(str).str.strip()
+        df_pd[feature_config.AGENT_KEY] = df_pd[feature_config.AGENT_KEY].astype(str).str.strip()
 
-    # ------------------------------------------------------------------ #
-    # 4) Leakage audit
-    # ------------------------------------------------------------------ #
-    logger.info("=== Step 4: Leakage audit ===")
-    leakage_audit_phase_2_2(
-        df_pd,
-        hard_fail=args.hard_fail_leakage,
-        cfg=cfg,
-        verbose=True,
-        pd_feature_blacklist=feature_config.PD_FEATURE_BLACKLIST,
-    )
+        # One Phase 2.1 row per (agent, split) -- keep last on duplicates.
+        snap_df = snap_df.drop_duplicates(subset=[feature_config.AGENT_KEY, "split"], keep="last")
 
-    # ------------------------------------------------------------------ #
-    # 5) Thin-file scorecard
-    # ------------------------------------------------------------------ #
-    logger.info("=== Step 5: Thin-file scorecard ===")
-    df_pd = add_never_loan_scorecard_from_phase_2_1(df_pd, cfg=cfg)
+        phase21_cols = [c for c in snap_df.columns if c not in (feature_config.AGENT_KEY, "split")]
+        overlap = [c for c in phase21_cols if c in df_pd.columns]
+        if overlap:
+            logger.info(
+                "Step 2: %d Phase 2.1 column(s) overlap loan-level columns by name; "
+                "loan-level values kept, Phase 2.1 duplicates dropped: %s",
+                len(overlap),
+                overlap,
+            )
+            phase21_cols = [c for c in phase21_cols if c not in overlap]
+
+        n_before_join = len(df_pd)
+        df_pd = df_pd.merge(
+            snap_df[[feature_config.AGENT_KEY, "split"] + phase21_cols],
+            on=[feature_config.AGENT_KEY, "split"],
+            how="left",
+        )
+        if len(df_pd) != n_before_join:
+            raise DataAlignmentError(
+                f"[run_pipeline] Phase 2.1 join changed row count: {n_before_join} -> {len(df_pd)} "
+                "(snap_df not unique per (agent_msisdn, split) after dedup)"
+            )
+        logger.info("After Phase 2.1 join: %d rows, %d cols", *df_pd.shape)
+
+        # ------------------------------------------------------------------ #
+        # 3) Phase 2.2 already applied in Step 1 above
+        #    (run_phase_2_2_loan_history_pd_features derives bad_state and
+        #    thin_file_flag directly from the loan-level query output).
+        # ------------------------------------------------------------------ #
+        logger.info("=== Step 3: Phase 2.2 -- loan history features (applied in Step 1) ===")
+
+        # ------------------------------------------------------------------ #
+        # 4) Leakage audit
+        # ------------------------------------------------------------------ #
+        logger.info("=== Step 4: Leakage audit ===")
+        leakage_audit_phase_2_2(
+            df_pd,
+            hard_fail=args.hard_fail_leakage,
+            cfg=cfg,
+            verbose=True,
+            pd_feature_blacklist=feature_config.PD_FEATURE_BLACKLIST,
+        )
+
+        # ------------------------------------------------------------------ #
+        # 5) Thin-file scorecard
+        # ------------------------------------------------------------------ #
+        logger.info("=== Step 5: Thin-file scorecard ===")
+        df_pd = add_never_loan_scorecard_from_phase_2_1(df_pd, cfg=cfg)
+
+        # Derive a representative train_cutoff for metadata/logging only --
+        # the actual split uses the split column directly (Step 7), not this
+        # date. See prepare_pd_training_and_validation_data's
+        # precomputed_train_mask parameter.
+        train_loan_dates = pd.to_datetime(
+            df_pd.loc[df_pd["split"].eq("train"), "loan_date"], errors="coerce"
+        )
+        train_cutoff = train_loan_dates.max()
+        if pd.isna(train_cutoff):
+            train_cutoff = pd.Timestamp.today().normalize()
+
+    else:
+        # ------------------------------------------------------------------ #
+        # 1) Load and stack snapshots
+        # ------------------------------------------------------------------ #
+        logger.info("=== Step 1: Load snapshots ===")
+        train_df = _load_snapshot(args.train_file, args.train_snapshot_date, "train")
+        val_df = _load_snapshot(args.val_file, args.val_snapshot_date, "validation")
+
+        df_pd = pd.concat([train_df, val_df], ignore_index=True, sort=False)
+        df_pd = _parse_dates(df_pd)
+
+        dup_cnt = df_pd.duplicated(subset=[feature_config.AGENT_KEY, "snapshot_dt"]).sum()
+        if dup_cnt > 0:
+            logger.warning("Duplicate (agent, snapshot_dt) rows detected: %d", dup_cnt)
+
+        logger.info("Combined DataFrame: %d rows, %d cols", *df_pd.shape)
+
+        # ------------------------------------------------------------------ #
+        # 2) Phase 2.1 -- transaction behaviour features
+        # ------------------------------------------------------------------ #
+        logger.info("=== Step 2: Phase 2.1 -- transaction behaviour features ===")
+        df_pd = run_phase_2_1_richer_tx_behaviour(df_pd, cfg=cfg)
+
+        # ------------------------------------------------------------------ #
+        # 3) Load repayments and run Phase 2.2
+        # ------------------------------------------------------------------ #
+        logger.info("=== Step 3: Phase 2.2 -- repayment features + labelling ===")
+        df_repayments = pd.read_csv(args.repayment_file)
+        logger.info("Repayments loaded: %d rows", len(df_repayments))
+
+        df_pd, _df_repayments_out = run_phase_2_2_repayment_pd_features(
+            df_pd, df_repayments, cfg=cfg, verbose=True
+        )
+        df_pd = classify_agent_loan_status(df_pd)
+        df_pd = add_thin_file_flags(df_pd, cfg=cfg)
+
+        # ------------------------------------------------------------------ #
+        # 4) Leakage audit
+        # ------------------------------------------------------------------ #
+        logger.info("=== Step 4: Leakage audit ===")
+        leakage_audit_phase_2_2(
+            df_pd,
+            hard_fail=args.hard_fail_leakage,
+            cfg=cfg,
+            verbose=True,
+            pd_feature_blacklist=feature_config.PD_FEATURE_BLACKLIST,
+        )
+
+        # ------------------------------------------------------------------ #
+        # 5) Thin-file scorecard
+        # ------------------------------------------------------------------ #
+        logger.info("=== Step 5: Thin-file scorecard ===")
+        df_pd = add_never_loan_scorecard_from_phase_2_1(df_pd, cfg=cfg)
+
+        train_cutoff = pd.Timestamp(args.train_cutoff)
 
     # ------------------------------------------------------------------ #
     # 6) Feature classification + transformation (fit on train only)
@@ -179,8 +325,12 @@ def run_pipeline(args: argparse.Namespace) -> None:
     # Determine the temporal split boundary up-front so winsorization bounds
     # are fitted on training data only and applied to validation -- prevents
     # validation-distribution leakage into the transform_report saved to disk.
-    train_cutoff = pd.Timestamp(args.train_cutoff)
-    split_mask = pd.to_datetime(df_pd["snapshot_dt"], errors="coerce") <= train_cutoff
+    # Loan-level mode: the SQL's own split column is authoritative (Decision 5);
+    # original mode: date-cutoff comparison as before.
+    if using_loan_level_grain:
+        split_mask = df_pd["split"].eq("train")
+    else:
+        split_mask = pd.to_datetime(df_pd["snapshot_dt"], errors="coerce") <= train_cutoff
     df_train_raw = df_pd[split_mask].copy()
     df_val_raw = df_pd[~split_mask].copy()
     logger.info(
@@ -273,9 +423,18 @@ def run_pipeline(args: argparse.Namespace) -> None:
     df_val_trans = df_val_trans[val_cols]
 
     # Re-combine into the unified frames that prepare_pd_training_and_validation_data
-    # expects; it will re-split internally using the same train_cutoff.
+    # expects; it will re-split internally using the same train_cutoff (or, in
+    # loan-level mode, the precomputed_train_mask derived below).
     df_pd_raw = pd.concat([df_train_raw, df_val_raw], ignore_index=True)
     df_pd_transformed = pd.concat([df_train_trans, df_val_trans], ignore_index=True)
+    precomputed_train_mask = (
+        pd.Series(
+            [True] * len(df_train_raw) + [False] * len(df_val_raw),
+            index=df_pd_raw.index,
+        )
+        if using_loan_level_grain
+        else None
+    )
 
     # ------------------------------------------------------------------ #
     # 7) Train/val split + final data prep
@@ -305,6 +464,7 @@ def run_pipeline(args: argparse.Namespace) -> None:
         pd_feature_blacklist=feature_config.PD_FEATURE_BLACKLIST,
         forbidden_feature_patterns=feature_config.LEAKAGE_PATTERNS,
         date_cols=feature_config.DATE_COLS,
+        precomputed_train_mask=precomputed_train_mask,
     )
 
     # ------------------------------------------------------------------ #
@@ -616,7 +776,19 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--train-file", required=True, help="Path to training snapshot CSV")
     parser.add_argument("--val-file", required=True, help="Path to validation snapshot CSV")
-    parser.add_argument("--repayment-file", required=True, help="Path to repayments CSV")
+    parser.add_argument(
+        "--repayment-file",
+        default=None,
+        help="Path to repayments CSV (original agent-snapshot grain mode). "
+        "Mutually exclusive with --loan-training-file; exactly one is required.",
+    )
+    parser.add_argument(
+        "--loan-training-file",
+        default=None,
+        help="Path to the loan-level training export from "
+        "data/loan_state_query_updated_materialized.txt (loan-level grain mode). "
+        "Mutually exclusive with --repayment-file; exactly one is required.",
+    )
     parser.add_argument(
         "--train-snapshot-date",
         required=True,
@@ -631,8 +803,10 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--train-cutoff",
-        required=True,
-        help="Inclusive upper bound for training rows (YYYY-MM-DD)",
+        default=None,
+        help="Inclusive upper bound for training rows (YYYY-MM-DD). Required "
+        "only in original mode (--repayment-file); ignored in loan-level "
+        "mode, where the loan-level file's own split column is authoritative.",
     )
     parser.add_argument(
         "--output-dir",
@@ -679,6 +853,14 @@ def _build_parser() -> argparse.ArgumentParser:
 def main() -> None:
     parser = _build_parser()
     args = parser.parse_args()
+
+    if bool(args.repayment_file) == bool(args.loan_training_file):
+        parser.error(
+            "exactly one of --repayment-file (original mode) or "
+            "--loan-training-file (loan-level mode) must be supplied"
+        )
+    if args.loan_training_file is None and args.train_cutoff is None:
+        parser.error("--train-cutoff is required in original mode (--repayment-file)")
 
     level = getattr(logging, args.log_level.upper(), logging.INFO)
     configure_root_level(level)

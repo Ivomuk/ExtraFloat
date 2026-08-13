@@ -24,7 +24,7 @@ def prepare_pd_training_and_validation_data(
     df_pd_raw: pd.DataFrame,
     df_pd_transformed: pd.DataFrame,
     target_col: str,
-    train_cutoff: pd.Timestamp,
+    train_cutoff: pd.Timestamp | None,
     id_cols: list[str],
     protected_cols: list[str],
     pd_feature_blacklist: frozenset[str],
@@ -32,6 +32,7 @@ def prepare_pd_training_and_validation_data(
     date_cols: list[str],
     split_date_col: str = "snapshot_dt",
     allowed_features: list[str] | None = None,
+    precomputed_train_mask: pd.Series | None = None,
 ) -> tuple[
     pd.DataFrame,  # X_train_raw
     pd.DataFrame,  # X_train_trans
@@ -63,14 +64,31 @@ def prepare_pd_training_and_validation_data(
                                    non-numeric passthrough columns).
         df_pd_transformed:         Transformed numeric features (aligned index with raw).
         target_col:                Binary target column name.
-        train_cutoff:              Inclusive upper bound for training rows.
+        train_cutoff:              Inclusive upper bound for training rows. Ignored
+                                   when ``precomputed_train_mask`` is supplied.
         id_cols:                   Columns to exclude (agent keys, etc.).
         protected_cols:            Non-feature columns to exclude (flags, etc.).
         pd_feature_blacklist:      Exact-match exclusion set (case-insensitive).
         forbidden_feature_patterns:Substring exclusion patterns (case-insensitive).
         date_cols:                 Date/datetime columns to exclude.
         split_date_col:            Column used to perform the train/val split.
+                                   Ignored when ``precomputed_train_mask`` is
+                                   supplied (still coerced to datetime if present,
+                                   for downstream diagnostics only).
         allowed_features:          If provided, restrict candidates to this list.
+        precomputed_train_mask:    Optional boolean Series, aligned to
+                                   ``df_pd_raw``'s index, used directly as the
+                                   train/validation split instead of comparing
+                                   ``split_date_col`` against ``train_cutoff``.
+                                   Use this when the split is already
+                                   authoritative upstream (e.g. the ``split``
+                                   column baked into
+                                   data/loan_state_query_updated_materialized.txt's
+                                   ``cohorts`` CTE) -- more robust than
+                                   re-deriving a date cutoff that SQL already
+                                   computed. When ``None`` (default), behaviour
+                                   is unchanged from before this parameter
+                                   existed.
 
     Returns:
         11-tuple:
@@ -90,24 +108,28 @@ def prepare_pd_training_and_validation_data(
     require_index_alignment(df_pd_raw, df_pd_transformed, context="prepare_pd_data")
 
     # ------------------------------------------------------------------ #
-    # 2) Split date validation
+    # 2) Split date validation (skipped when precomputed_train_mask is given)
     # ------------------------------------------------------------------ #
-    if split_date_col not in df_pd_raw.columns and split_date_col not in df_pd_transformed.columns:
-        raise SchemaValidationError(
-            f"[prepare_pd_data] split_date_col '{split_date_col}' missing from both DataFrames"
-        )
+    if precomputed_train_mask is None:
+        if split_date_col not in df_pd_raw.columns and split_date_col not in df_pd_transformed.columns:
+            raise SchemaValidationError(
+                f"[prepare_pd_data] split_date_col '{split_date_col}' missing from both DataFrames"
+            )
 
-    if split_date_col in df_pd_raw.columns:
-        df_pd_raw[split_date_col] = pd.to_datetime(df_pd_raw[split_date_col], errors="coerce")
-        split_series = df_pd_raw[split_date_col]
-    else:
-        df_pd_transformed[split_date_col] = pd.to_datetime(df_pd_transformed[split_date_col], errors="coerce")
-        split_series = df_pd_transformed[split_date_col]
+        if split_date_col in df_pd_raw.columns:
+            df_pd_raw[split_date_col] = pd.to_datetime(df_pd_raw[split_date_col], errors="coerce")
+            split_series = df_pd_raw[split_date_col]
+        else:
+            df_pd_transformed[split_date_col] = pd.to_datetime(
+                df_pd_transformed[split_date_col], errors="coerce"
+            )
+            split_series = df_pd_transformed[split_date_col]
 
-    if not split_series.notna().all():
-        raise SchemaValidationError(f"[prepare_pd_data] split_date_col '{split_date_col}' has NaT values")
+        if not split_series.notna().all():
+            raise SchemaValidationError(f"[prepare_pd_data] split_date_col '{split_date_col}' has NaT values")
 
-    # Coerce optional date columns if present
+    # Coerce optional date columns if present (regardless of split strategy --
+    # downstream diagnostics may still want these as real datetimes).
     for c in date_cols:
         for df_ref in [df_pd_raw, df_pd_transformed]:
             if c in df_ref.columns and not pd.api.types.is_datetime64_any_dtype(df_ref[c]):
@@ -158,14 +180,23 @@ def prepare_pd_training_and_validation_data(
         raise DataLeakageError(f"[prepare_pd_data] {agent_key} leaked into candidate_features")
 
     # ------------------------------------------------------------------ #
-    # 5) Time-based split
+    # 5) Train/validation split
     # ------------------------------------------------------------------ #
-    if split_date_col in df_pd_raw.columns:
-        split_series = pd.to_datetime(df_pd_raw[split_date_col], errors="coerce")
+    if precomputed_train_mask is not None:
+        train_mask = precomputed_train_mask.reindex(df_pd_raw.index)
+        if train_mask.isna().any():
+            raise SchemaValidationError(
+                "[prepare_pd_data] precomputed_train_mask does not cover every row "
+                "in the aligned index"
+            )
+        train_mask = train_mask.astype(bool)
     else:
-        split_series = pd.to_datetime(df_pd_transformed[split_date_col], errors="coerce")
+        if split_date_col in df_pd_raw.columns:
+            split_series = pd.to_datetime(df_pd_raw[split_date_col], errors="coerce")
+        else:
+            split_series = pd.to_datetime(df_pd_transformed[split_date_col], errors="coerce")
 
-    train_mask = split_series <= train_cutoff
+        train_mask = split_series <= train_cutoff
     val_mask = ~train_mask
 
     df_train_trans = df_pd_transformed.loc[train_mask].copy()
