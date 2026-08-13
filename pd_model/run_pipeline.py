@@ -236,9 +236,21 @@ def run_pipeline(args: argparse.Namespace) -> None:
             df_loans, cfg=cfg, verbose=True
         )
 
-        dup_cnt = df_pd.duplicated(subset=[feature_config.AGENT_KEY, "disbursement_fid"]).sum()
+        # disbursement_fid is the loan-level primary key (unique per loan,
+        # source: analytics.momo_loan_book_tracker_disbursements_daily) --
+        # check it alone, not the (agent, disbursement_fid) compound. The
+        # compound key is strictly weaker: it would miss the same
+        # disbursement_fid appearing under two different agent_msisdn
+        # values, which is a genuine data-integrity bug (a loan attached to
+        # the wrong agent), not a benign edge case the compound key should
+        # be tolerating.
+        dup_cnt = df_pd.duplicated(subset=["disbursement_fid"]).sum()
         if dup_cnt > 0:
-            logger.warning("Duplicate (agent, disbursement_fid) rows detected: %d", dup_cnt)
+            logger.warning(
+                "Duplicate disbursement_fid rows detected: %d -- disbursement_fid should be "
+                "unique per loan; check the export for schema/join issues upstream.",
+                dup_cnt,
+            )
 
         _reduce_object_column_memory(df_pd)
 
