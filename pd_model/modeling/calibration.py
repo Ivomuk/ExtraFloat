@@ -211,7 +211,9 @@ def attach_cal_pd(
     """
     df, _ = _standardize_scored_df(scored_df, model_key)
 
-    cal_sub = cal_map_tbl[cal_map_tbl["model"].astype(str) == str(model_key)].copy()
+    # Boolean-mask row selection already returns an independent object under
+    # pandas 3.0 copy-on-write -- the .copy() was redundant.
+    cal_sub = cal_map_tbl[cal_map_tbl["model"].astype(str) == str(model_key)]
     if cal_sub.shape[0] == 0:
         raise CalibrationError(f"[attach_cal_pd] Fail-closed: no calibration mapping for model '{model_key}'")
 
@@ -312,7 +314,11 @@ def build_policy_tables(
     thresh_tbl["cutoff_var"] = sort_var
 
     band_var = sort_var
-    band_df = df.replace([np.inf, -np.inf], np.nan).dropna(subset=[band_var, "y"]).copy()
+    # .replace()/.dropna() already produce a safely-mutable result under
+    # pandas' copy-on-write (confirmed empirically, including the edge case
+    # where nothing is actually dropped/replaced -- writes still don't
+    # propagate back to df) -- the trailing .copy() was redundant.
+    band_df = df.replace([np.inf, -np.inf], np.nan).dropna(subset=[band_var, "y"])
     band_df["band_decile"] = pd.qcut(band_df[band_var], q=10, labels=False, duplicates="drop")
     dec_tbl = (
         band_df.groupby("band_decile")

@@ -389,6 +389,15 @@ def run_pipeline(args: argparse.Namespace) -> None:
         df_pd = classify_agent_loan_status(df_pd)
         df_pd = add_thin_file_flags(df_pd, cfg=cfg)
 
+        # train_df/val_df are folded into df_pd (via concat) and never read
+        # again; df_repayments and _df_repayments_out (label diagnostics,
+        # unused) are consumed entirely by run_phase_2_2_repayment_pd_features
+        # above and never read again either. Mirrors the loan-level branch's
+        # del+gc.collect() for train_snap_df/val_snap_df/snap_df and
+        # df_loans/_df_label_diagnostics.
+        del train_df, val_df, df_repayments, _df_repayments_out
+        gc.collect()
+
         # ------------------------------------------------------------------ #
         # 4) Leakage audit
         # ------------------------------------------------------------------ #
@@ -647,6 +656,12 @@ def run_pipeline(args: argparse.Namespace) -> None:
     agent_val_thick = agent_val.loc[thick_val_mask]
     thin_val_thick = thin_val.loc[thick_val_mask]
 
+    # X_train_trans/X_val_trans are now fully sliced into Xtr/Xva, and
+    # agent_train/agent_val are now fully sliced into
+    # agent_train_thick/agent_val_thick -- none of the four is read again.
+    del X_train_trans, X_val_trans, agent_train, agent_val
+    gc.collect()
+
     xgb_model, xgb_train_scored, xgb_val_scored = train_xgb(
         Xtr, y_train_thick, Xva, y_val_thick, cfg=cfg
     )
@@ -656,6 +671,11 @@ def run_pipeline(args: argparse.Namespace) -> None:
     ]:
         scored_df.insert(0, feature_config.AGENT_KEY, agent_ids.values)
         scored_df[feature_config.THIN_FILE_COL] = thin_flags.values
+
+    # xgb_train_scored is never read again (only xgb_val_scored feeds Steps
+    # 10b+); free it before LightGBM training allocates more memory.
+    del xgb_train_scored
+    gc.collect()
 
     # ------------------------------------------------------------------ #
     # 10) Train LightGBM  (same thick-file Xtr / Xva)
@@ -670,6 +690,9 @@ def run_pipeline(args: argparse.Namespace) -> None:
     ]:
         scored_df.insert(0, feature_config.AGENT_KEY, agent_ids.values)
         scored_df[feature_config.THIN_FILE_COL] = thin_flags.values
+
+    del lgb_train_scored
+    gc.collect()
 
     # ------------------------------------------------------------------ #
     # 10b) Split val 50/50: selection half (AUC/bootstrap) vs calibration half
@@ -688,6 +711,9 @@ def run_pipeline(args: argparse.Namespace) -> None:
     lgb_val_select = lgb_val_scored.iloc[_idx_sel].reset_index(drop=True)
     xgb_val_cal = xgb_val_scored.iloc[_idx_cal].reset_index(drop=True)
     lgb_val_cal = lgb_val_scored.iloc[_idx_cal].reset_index(drop=True)
+
+    del xgb_val_scored, lgb_val_scored
+    gc.collect()
 
     logger.info(
         "Val split: selection=%d rows | calibration=%d rows | bad_rate_sel=%.4f | bad_rate_cal=%.4f",
@@ -735,11 +761,25 @@ def run_pipeline(args: argparse.Namespace) -> None:
     )
     logger.info("Model comparison:\n%s", cmp_summary.to_string(index=False))
 
+    # xgb_val_select/lgb_val_select are never read again except a row count
+    # at metadata-write time (Step 14); capture that now and free both
+    # frames before Step 12's calibration pipeline runs.
+    n_val_select = len(xgb_val_select)
+    del xgb_val_select, lgb_val_select
+    gc.collect()
+
     # ------------------------------------------------------------------ #
     # 12) Calibration + policy pipeline  (calibration half only)
     # ------------------------------------------------------------------ #
     logger.info("=== Step 12: Calibration + policy pipeline ===")
     locked_artifacts = run_locked_policy_pipeline(xgb_val_cal, lgb_val_cal, cfg=cfg, output_dir=output_dir)
+
+    # xgb_val_cal/lgb_val_cal are consumed entirely by
+    # run_locked_policy_pipeline above and never read again except a row
+    # count at metadata-write time; capture that now and free both.
+    n_val_cal = len(xgb_val_cal)
+    del xgb_val_cal, lgb_val_cal
+    gc.collect()
 
     # ------------------------------------------------------------------ #
     # 13) Build unified ops_scored table
@@ -752,8 +792,11 @@ def run_pipeline(args: argparse.Namespace) -> None:
     try:
         # run_locked_policy_pipeline already calibrated both models and returned
         # sorted DataFrames with cal_pd attached; apply policy flags for both.
-        xgb_sorted = locked_artifacts["xgb_policy_df_sorted"].copy()
-        lgb_sorted = locked_artifacts["lgb_policy_df_sorted"].copy()
+        # No .copy() needed -- add_policy_flags() itself does `out = agent_df.copy()`
+        # as its own first line, so the .copy() here was a redundant second
+        # detach of the same object.
+        xgb_sorted = locked_artifacts["xgb_policy_df_sorted"]
+        lgb_sorted = locked_artifacts["lgb_policy_df_sorted"]
 
         xgb_sorted = add_policy_flags(
             xgb_sorted, locked_artifacts["xgb_policy_threshold_tbl"], prefix="xgb", cfg=cfg
@@ -761,6 +804,12 @@ def run_pipeline(args: argparse.Namespace) -> None:
         lgb_sorted = add_policy_flags(
             lgb_sorted, locked_artifacts["lgb_policy_threshold_tbl"], prefix="lgb", cfg=cfg
         )
+
+        # locked_artifacts is never read again -- everything needed
+        # (xgb_sorted/lgb_sorted, already policy-flagged) has been
+        # extracted above.
+        del locked_artifacts
+        gc.collect()
 
         # Rename model-specific cal_pd before merging
         xgb_sorted = xgb_sorted.rename(columns={feature_config.CAL_PD_COL: "xgb_cal_pd"})
@@ -865,8 +914,8 @@ def run_pipeline(args: argparse.Namespace) -> None:
         # Training stats
         "train_rows": len(X_train_raw),
         "val_rows": len(X_val_raw),
-        "val_select_rows": len(xgb_val_select),
-        "val_cal_rows": len(xgb_val_cal),
+        "val_select_rows": n_val_select,
+        "val_cal_rows": n_val_cal,
         "candidate_features": len(candidate_features),
         "selected_features": len(selected_features),
         "bad_rate_train": float(y_train.mean()),

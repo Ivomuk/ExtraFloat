@@ -564,10 +564,14 @@ def build_transformed_dataframe(
         df_pd[col] = pd.to_numeric(df_pd[col], errors="coerce").astype("float32")
 
     # 2) Apply transformations
+    # apply_pd_transformations() always does `df_out = df.copy()` as its own
+    # first line (needed to protect its other, test-only callers that pass
+    # live fixtures) -- so the .copy() here was a second, redundant detach
+    # of the same already-narrow, already-population-row-count object.
     df_numeric_transformed, _unclassified, transform_report = apply_pd_transformations(
-        df_pd[pd_features].copy()
+        df_pd[pd_features]
         if all(c in df_pd.columns for c in pd_features)
-        else df_pd[[c for c in pd_features if c in df_pd.columns]].copy(),
+        else df_pd[[c for c in pd_features if c in df_pd.columns]],
         pd_features=pd_features,
         log_cols=log_cols,
         cap_cols=cap_cols,

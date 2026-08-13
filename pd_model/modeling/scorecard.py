@@ -94,13 +94,17 @@ def fit_thin_file_lr(
 
     thin_flag = df_train_raw.get("thin_file_flag", pd.Series(0, index=df_train_raw.index))
     thin_mask = pd.to_numeric(thin_flag, errors="coerce").fillna(0).eq(1)
-    df_thin = df_train_raw[thin_mask]
 
-    if label_col not in df_thin.columns:
+    if label_col not in df_train_raw.columns:
         logger.warning("fit_thin_file_lr: label_col '%s' not found -- skipping LR fit", label_col)
         return None, []
 
-    y = pd.to_numeric(df_thin[label_col], errors="coerce").fillna(0).astype(int)
+    # Column existence doesn't depend on the row filter -- check against
+    # df_train_raw directly, and read only the single label column for the
+    # thin-mask row-slice, instead of materializing df_thin = df_train_raw[thin_mask]
+    # (a full-column-width copy of df_train_raw, still un-narrowed at this
+    # point in run_pipeline.py) just to read one column out of it.
+    y = pd.to_numeric(df_train_raw.loc[thin_mask, label_col], errors="coerce").fillna(0).astype(int)
     n_pos = int(y.sum())
     n_thin = len(y)
 
@@ -113,13 +117,14 @@ def fit_thin_file_lr(
         return None, []
 
     candidates = feature_candidates if feature_candidates is not None else _THIN_FILE_LR_FEATURES
-    feature_cols = [c for c in candidates if c in df_thin.columns]
+    feature_cols = [c for c in candidates if c in df_train_raw.columns]
 
     if not feature_cols:
         logger.warning("fit_thin_file_lr: no candidate features found -- skipping")
         return None, []
 
-    X = df_thin[feature_cols].apply(pd.to_numeric, errors="coerce")
+    # Narrow to the candidate feature columns before the thin-mask row filter.
+    X = df_train_raw.loc[thin_mask, feature_cols].apply(pd.to_numeric, errors="coerce")
 
     lr_pipeline = Pipeline([
         ("imputer", SimpleImputer(strategy="median")),
@@ -156,7 +161,12 @@ def fit_thin_file_lr(
             thin_col = "thin_file_flag"
             val_thin_flag = df_val_raw.get(thin_col, pd.Series(0, index=df_val_raw.index))
             val_thin_mask = pd.to_numeric(val_thin_flag, errors="coerce").fillna(0).eq(1)
-            df_thin_val = df_val_raw.loc[val_thin_mask]
+            # Narrow to the feature + label columns before the thin-mask row
+            # filter, same reasoning as the train-side fix above.
+            val_cols = [c for c in feature_cols if c in df_val_raw.columns]
+            if label_col in df_val_raw.columns:
+                val_cols = val_cols + [label_col]
+            df_thin_val = df_val_raw.loc[val_thin_mask, val_cols]
 
             X_cal = df_thin_val[[c for c in feature_cols if c in df_thin_val.columns]].reindex(
                 columns=feature_cols
@@ -286,6 +296,21 @@ def add_never_loan_scorecard_from_phase_2_1(
         df_sc["never_loan_pd_like"] = np.nan
         df_sc["never_loan_top_drivers"] = np.nan
         return df_sc
+
+    # NOTE: points accumulation below intentionally computes over the FULL
+    # population (df_sc), not the thin-file subset -- several terms use
+    # _winsor()/population .quantile() calls (e.g. avg_balance_to_vol_3m_ratio,
+    # commission_vs_cluster_mean_ratio, vol_monthly_volatility_cv's excess
+    # threshold), and those bounds are population-size-dependent: computing
+    # them from the thin-file subset alone instead of the full population
+    # silently changes the winsorization thresholds and therefore the
+    # resulting points (confirmed empirically -- an earlier attempt to
+    # narrow this whole section to the thin subset changed ~78/264 thin
+    # agents' never_loan_points by up to ~0.19, not just performance).
+    # Only the top-drivers block below is narrowed to the thin-file subset,
+    # since _s_flag() there is purely elementwise (fillna+clip, no quantile
+    # dependency) -- population-independent, and also where the large
+    # fixed-width string-array cost actually comes from.
 
     # ------------------------------------------------------------------ #
     # Helper accessors
@@ -418,7 +443,26 @@ def add_never_loan_scorecard_from_phase_2_1(
 
     # ------------------------------------------------------------------ #
     # Top drivers
+    #
+    # Narrowed to the thin-file subset -- unlike the points-accumulation
+    # section above, _s_flag() here has no population-quantile dependency
+    # (pure elementwise fillna+clip), so restricting its input to
+    # df_thin_sc doesn't change any value, only how much data is touched.
+    # This is also where nearly all the memory cost lives: np.where(flag,
+    # tag, "") over the full population produces a fixed-width Unicode
+    # array (confirmed empirically: ~108 bytes/row for the longest tag) per
+    # driver_map entry, ~11 of them held live simultaneously before
+    # np.vstack, plus a pure-Python per-row string-join afterward -- all of
+    # which the original code did at full-population size even though only
+    # the thin-file rows were ever kept.
     # ------------------------------------------------------------------ #
+    df_thin_sc = df_sc.loc[thin_mask]
+
+    def _s_flag_thin(col: str) -> pd.Series:
+        if col not in df_thin_sc.columns:
+            return pd.Series(0.0, index=df_thin_sc.index)
+        return pd.to_numeric(df_thin_sc[col], errors="coerce").fillna(0).clip(0, 1)
+
     driver_map = [
         ("inactive6m", "is_fully_inactive_6m"),
         ("inactive_consec", "is_consecutively_inactive"),
@@ -435,17 +479,17 @@ def add_never_loan_scorecard_from_phase_2_1(
 
     tags_list = []
     for tag, col_name in driver_map:
-        if col_name in df_sc.columns:
-            tags_list.append(np.where(_s_flag(col_name) > 0, tag, ""))
+        if col_name in df_thin_sc.columns:
+            tags_list.append(np.where(_s_flag_thin(col_name) > 0, tag, ""))
 
     df_sc["never_loan_top_drivers"] = pd.Series(pd.NA, index=df_sc.index, dtype=object)
     if tags_list:
         tags_arr = np.vstack(tags_list).T
         tags_series = pd.Series(
             ["|".join([t for t in row if t != ""]) for row in tags_arr],
-            index=df_sc.index,
+            index=df_thin_sc.index,
         ).replace("", np.nan)
-        df_sc.loc[thin_mask, "never_loan_top_drivers"] = tags_series.loc[thin_mask]
+        df_sc.loc[thin_mask, "never_loan_top_drivers"] = tags_series
 
     logger.info(
         "Scorecard complete: median_score=%.1f, median_pd_like=%.3f",

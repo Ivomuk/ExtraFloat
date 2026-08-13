@@ -121,6 +121,32 @@ SNAPSHOT_TO_TRAINING_COLUMN_MAP: dict[str, str] = {
 # ======================================================================== #
 
 
+def _apply_bad_flags_loan_level_inplace(df: pd.DataFrame) -> None:
+    """
+    Core logic of ``compute_bad_flags_loan_level()``, mutating *df* in place.
+
+    Factored out so ``run_phase_2_2_loan_history_pd_features()`` can invoke
+    it directly on its own already-exclusively-owned frame, instead of
+    going through ``compute_bad_flags_loan_level()``'s own defensive
+    ``.copy()`` -- which is real and necessary for that function's other
+    callers, but redundant when the caller already owns a private object
+    nothing else references (confirmed via grep: every current caller of
+    this logic already exclusively owns its input at the point of call).
+    """
+    require_columns(df, ["bad_state_3dpd_30d"], context="compute_bad_flags_loan_level")
+
+    df["bad_state"] = (pd.to_numeric(df["bad_state_3dpd_30d"], errors="coerce").fillna(0) > 0).astype(int)
+
+    require_binary_column(df, "bad_state", context="compute_bad_flags_loan_level")
+
+    logger.info(
+        "compute_bad_flags_loan_level: bad_state=%d/%d (%.2f%%)",
+        int(df["bad_state"].sum()),
+        len(df),
+        float(df["bad_state"].mean()) * 100,
+    )
+
+
 def compute_bad_flags_loan_level(df_pd: pd.DataFrame) -> pd.DataFrame:
     """
     Derive ``bad_state`` from the primary label ``bad_state_3dpd_30d``
@@ -136,25 +162,42 @@ def compute_bad_flags_loan_level(df_pd: pd.DataFrame) -> pd.DataFrame:
     Returns:
         Copy of *df_pd* with ``bad_state`` added.
     """
-    require_columns(df_pd, ["bad_state_3dpd_30d"], context="compute_bad_flags_loan_level")
     df = df_pd.copy()
-
-    df["bad_state"] = (pd.to_numeric(df["bad_state_3dpd_30d"], errors="coerce").fillna(0) > 0).astype(int)
-
-    require_binary_column(df, "bad_state", context="compute_bad_flags_loan_level")
-
-    logger.info(
-        "compute_bad_flags_loan_level: bad_state=%d/%d (%.2f%%)",
-        int(df["bad_state"].sum()),
-        len(df),
-        float(df["bad_state"].mean()) * 100,
-    )
+    _apply_bad_flags_loan_level_inplace(df)
     return df
 
 
 # ======================================================================== #
 # Thin-file classification
 # ======================================================================== #
+
+
+def _apply_thin_file_flag_inplace(df: pd.DataFrame, cfg: ModelConfig) -> None:
+    """
+    Core logic of ``derive_thin_file_flag()``, mutating *df* in place. See
+    ``_apply_bad_flags_loan_level_inplace()`` for why this is factored out
+    -- same rationale, same "every current caller already owns its input"
+    verification.
+    """
+    require_columns(df, ["observed_prior_loan_count"], context="derive_thin_file_flag")
+
+    has_loan_history = (
+        pd.to_numeric(df["observed_prior_loan_count"], errors="coerce").fillna(0) > 0
+    ).astype(int)
+
+    df["has_ever_loan"] = has_loan_history
+    df["has_loan_history"] = has_loan_history
+    df["is_new_agent"] = (has_loan_history == 0).astype(int)
+    df["thin_file_flag"] = (has_loan_history == 0).astype(int)
+    df["thin_file_pd_prior"] = np.where(df["thin_file_flag"] == 1, cfg.thin_file_pd_prior, 0.0)
+
+    n_thin = int(df["thin_file_flag"].sum())
+    logger.info(
+        "derive_thin_file_flag: %d/%d thin-file agents (thin_file_pd_prior=%.2f)",
+        n_thin,
+        len(df),
+        cfg.thin_file_pd_prior,
+    )
 
 
 def derive_thin_file_flag(
@@ -180,26 +223,8 @@ def derive_thin_file_flag(
     Returns:
         Copy of *df_pd* with the flags above added.
     """
-    require_columns(df_pd, ["observed_prior_loan_count"], context="derive_thin_file_flag")
     df = df_pd.copy()
-
-    has_loan_history = (
-        pd.to_numeric(df["observed_prior_loan_count"], errors="coerce").fillna(0) > 0
-    ).astype(int)
-
-    df["has_ever_loan"] = has_loan_history
-    df["has_loan_history"] = has_loan_history
-    df["is_new_agent"] = (has_loan_history == 0).astype(int)
-    df["thin_file_flag"] = (has_loan_history == 0).astype(int)
-    df["thin_file_pd_prior"] = np.where(df["thin_file_flag"] == 1, cfg.thin_file_pd_prior, 0.0)
-
-    n_thin = int(df["thin_file_flag"].sum())
-    logger.info(
-        "derive_thin_file_flag: %d/%d thin-file agents (thin_file_pd_prior=%.2f)",
-        n_thin,
-        len(df),
-        cfg.thin_file_pd_prior,
-    )
+    _apply_thin_file_flag_inplace(df, cfg)
     return df
 
 
@@ -268,10 +293,14 @@ def run_phase_2_2_loan_history_pd_features(
         df_diagnostics = pd.DataFrame(columns=["agent_msisdn", "disbursement_fid"])
 
     # -- Label --
-    df = compute_bad_flags_loan_level(df)
+    # df is already exclusively owned by this function (copied from
+    # df_loans at the top) -- call the in-place core logic directly instead
+    # of compute_bad_flags_loan_level(), which would re-copy the input again
+    # only to protect a contract nothing here relies on.
+    _apply_bad_flags_loan_level_inplace(df)
 
     # -- Thin-file classification --
-    df = derive_thin_file_flag(df, cfg=cfg)
+    _apply_thin_file_flag_inplace(df, cfg)
 
     if verbose:
         logger.info(
