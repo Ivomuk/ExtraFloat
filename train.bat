@@ -2,7 +2,7 @@
 python -m pd_model.run_pipeline ^
   --train-file            data/mfs_daily_agent_mart_20260531.csv ^
   --val-file              data/mfs_daily_agent_mart_20260731.csv ^
-  --loan-training-file    data/state_data_202608122330.csv ^
+  --loan-training-file    data/state_data_202608131214.csv ^
   --train-snapshot-date   20260531 ^
   --val-snapshot-date     20260731 ^
   --output-dir            pd_model/artifacts ^
