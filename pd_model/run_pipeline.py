@@ -162,6 +162,51 @@ def _downcast_float64_to_float32(df: pd.DataFrame) -> None:
         df[float64_cols] = df[float64_cols].astype("float32")
 
 
+# Loan-level bookkeeping/join-key columns from
+# data/loan_state_query_updated_materialized.txt that are (a) in
+# PD_FEATURE_BLACKLIST -- never candidate features -- and (b) not read
+# anywhere else in pd_model/ (confirmed by grep). They're internal
+# artifacts of the SQL's loan-to-state mapping, not human-interpretable
+# on their own (unlike disbursement_fid, the canonical loan id, which IS
+# kept for the duplicate-row diagnostic and general audit value). Object
+# (string) columns are far more memory-expensive per row than numeric
+# ones -- each value is a separate Python heap object, not just a few
+# bytes -- so carrying millions of rows of these through the whole
+# pipeline for zero downstream benefit is pure waste.
+_UNUSED_LOAN_LEVEL_ID_COLUMNS: tuple[str, ...] = (
+    "disbursement_uid",
+    "target_loan_uid",
+    "scoring_state_loan_uid",
+    "last_closed_loan_uid",
+)
+
+# Low-cardinality string columns worth converting to category dtype
+# in-place: collapses millions of repeated string objects down to a
+# handful of category levels + a small integer code per row.
+_LOW_CARDINALITY_STRING_COLUMNS: tuple[str, ...] = (
+    "split",
+    "sales_region",
+    "sales_territory",
+    "district",
+)
+
+
+def _reduce_object_column_memory(df: pd.DataFrame) -> None:
+    """In-place: drop unused high-cardinality id columns, categorize
+    known low-cardinality ones. See the constants above for rationale."""
+    present_unused = [c for c in _UNUSED_LOAN_LEVEL_ID_COLUMNS if c in df.columns]
+    if present_unused:
+        df.drop(columns=present_unused, inplace=True)
+        logger.info(
+            "Dropped %d unused id column(s) to reduce memory: %s",
+            len(present_unused),
+            present_unused,
+        )
+    for c in _LOW_CARDINALITY_STRING_COLUMNS:
+        if c in df.columns and df[c].dtype == object:
+            df[c] = df[c].astype("category")
+
+
 # ======================================================================== #
 # Pipeline
 # ======================================================================== #
@@ -193,6 +238,8 @@ def run_pipeline(args: argparse.Namespace) -> None:
         dup_cnt = df_pd.duplicated(subset=[feature_config.AGENT_KEY, "disbursement_fid"]).sum()
         if dup_cnt > 0:
             logger.warning("Duplicate (agent, disbursement_fid) rows detected: %d", dup_cnt)
+
+        _reduce_object_column_memory(df_pd)
 
         logger.info("Combined DataFrame: %d rows, %d cols", *df_pd.shape)
 
