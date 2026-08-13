@@ -222,7 +222,13 @@ def apply_thin_file_lr(
     prior_floor = float(_cfg.thin_file_pd_prior)
     n_floored = int((y_prob < prior_floor).sum())
     y_prob = np.maximum(y_prob, prior_floor)
-    df.loc[thin_mask, "never_loan_pd_like"] = y_prob
+    # Match the existing column's dtype before assigning. never_loan_pd_like
+    # may already be float32 (run_pipeline.py downcasts float64 -> float32
+    # ahead of this call, for memory reasons on large loan-level exports);
+    # pandas 3.0 raises LossySetitemError on a bare float64 -> float32 .loc
+    # assignment instead of silently narrowing, so cast explicitly.
+    target_dtype = df["never_loan_pd_like"].dtype if "never_loan_pd_like" in df.columns else y_prob.dtype
+    df.loc[thin_mask, "never_loan_pd_like"] = y_prob.astype(target_dtype, copy=False)
 
     logger.info(
         "apply_thin_file_lr: updated never_loan_pd_like for %d thin-file agents "

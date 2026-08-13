@@ -51,10 +51,19 @@ def prepare_pd_training_and_validation_data(
 
     Steps
     -----
-    1. Force index alignment between raw and transformed DataFrames.
-    2. Validate the split date column and coerce to datetime.
-    3. Build the candidate numeric feature list (exclude IDs, protected,
-       blacklisted, date, target, pattern-matched columns).
+    1. Build the candidate numeric feature list (exclude IDs, protected,
+       blacklisted, date, target, pattern-matched columns). Done first,
+       ahead of index alignment -- only needs column names/dtypes, not
+       row data, so there's no reason to reindex every column in the
+       input before knowing which ~40-50 of them are even needed.
+    2. Narrow both DataFrames to just candidate_features plus the handful
+       of other columns this function reads (agent key, thin-file flag,
+       target, split date column), then force index alignment. Narrowing
+       before the reindex (not after) is what keeps this from allocating
+       a single contiguous block across every raw/engineered column in
+       the input -- confirmed as the fix for an ArrayMemoryError on a
+       loan-level, millions-of-rows export.
+    3. Validate the split date column and coerce to datetime.
     4. Assert no pattern-based leakage in candidate features.
     5. Time-split at ``train_cutoff``.
     6. Build X / y matrices and apply final schema assertions.
@@ -100,21 +109,85 @@ def prepare_pd_training_and_validation_data(
     thin_col = feature_config.THIN_FILE_COL
 
     # ------------------------------------------------------------------ #
-    # 1) Force index alignment
+    # 1) Candidate numeric feature selection -- moved ahead of index
+    #    alignment/reindex below. Only needs column names/dtypes (cheap,
+    #    metadata-only), not row data, so there's no reason to pay for a
+    #    full reindex of every column before knowing which ~40-50 of them
+    #    are even needed downstream.
     # ------------------------------------------------------------------ #
-    # .loc[index] fancy indexing already returns an independent object under
-    # pandas' copy-on-write (confirmed: no shared memory, safe to mutate) --
-    # the trailing .copy() here was a redundant second full-frame duplication.
-    # Left in place pre-loan-level-grain, this was cheap; at millions of rows
-    # it was a real contributor to an ArrayMemoryError further down this
-    # function (line 202-205's split copies hit the same pattern).
+    forbidden_patterns_low = [str(p).lower() for p in forbidden_feature_patterns]
+    blacklist_low = {str(c).lower() for c in pd_feature_blacklist}
+    id_cols_low = {str(c).lower() for c in id_cols}
+    protected_low = {str(c).lower() for c in protected_cols}
+    # Explicit date-column exclusion. Previously this was covered only
+    # indirectly (the date-coercion loop used to run BEFORE this
+    # selection, so date columns already failed the is_numeric_dtype
+    # check below by the time this loop saw them). Now that selection
+    # runs first, that implicit protection is gone, so exclude by name
+    # directly -- strictly more robust than the coercion-order trick it
+    # replaces (works even for still-object/string-encoded dates).
+    date_cols_low = {str(c).lower() for c in date_cols}
+
+    base_cols = allowed_features if allowed_features is not None else df_pd_transformed.columns
+    candidate_features: list[str] = []
+
+    for c in base_cols:
+        if c not in df_pd_transformed.columns:
+            continue
+        c_low = str(c).lower()
+        if c_low in id_cols_low:
+            continue
+        if c_low in protected_low:
+            continue
+        if c_low in blacklist_low:
+            continue
+        if c_low in date_cols_low:
+            continue
+        if c == target_col or c == split_date_col:
+            continue
+        if not pd.api.types.is_numeric_dtype(df_pd_transformed[c]):
+            continue
+        candidate_features.append(c)
+
+    logger.info(
+        "prepare_pd_data: %d candidate numeric features identified",
+        len(candidate_features),
+    )
+
+    # ------------------------------------------------------------------ #
+    # 2) Narrow to only what this function reads, then force index
+    #    alignment. Narrowing BEFORE the reindex (not after) is the fix --
+    #    .loc[index] fancy indexing already returns an independent object
+    #    under pandas' copy-on-write (confirmed: no shared memory, safe to
+    #    mutate), but reindexing the FULL raw/engineered column set before
+    #    narrowing still forces one giant contiguous allocation across
+    #    every column in the input. Confirmed as the cause of an
+    #    ArrayMemoryError on a loan-level, millions-of-rows export
+    #    (~169 raw+engineered columns narrowed down to ~45-55 needed here).
+    # ------------------------------------------------------------------ #
+    need_split_col = precomputed_train_mask is None
+    raw_needed = list(
+        dict.fromkeys(
+            candidate_features
+            + [agent_key, thin_col, target_col]
+            + ([split_date_col] if need_split_col else [])
+        )
+    )
+    trans_needed = list(
+        dict.fromkeys(
+            candidate_features + [target_col] + ([split_date_col] if need_split_col else [])
+        )
+    )
+    raw_needed = [c for c in raw_needed if c in df_pd_raw.columns]
+    trans_needed = [c for c in trans_needed if c in df_pd_transformed.columns]
+
     common_idx = df_pd_raw.index.intersection(df_pd_transformed.index)
-    df_pd_raw = df_pd_raw.loc[common_idx]
-    df_pd_transformed = df_pd_transformed.loc[common_idx]
+    df_pd_raw = df_pd_raw.loc[common_idx, raw_needed]
+    df_pd_transformed = df_pd_transformed.loc[common_idx, trans_needed]
     require_index_alignment(df_pd_raw, df_pd_transformed, context="prepare_pd_data")
 
     # ------------------------------------------------------------------ #
-    # 2) Split date validation (skipped when precomputed_train_mask is given)
+    # 3) Split date validation (skipped when precomputed_train_mask is given)
     # ------------------------------------------------------------------ #
     if precomputed_train_mask is None:
         if split_date_col not in df_pd_raw.columns and split_date_col not in df_pd_transformed.columns:
@@ -135,43 +208,14 @@ def prepare_pd_training_and_validation_data(
             raise SchemaValidationError(f"[prepare_pd_data] split_date_col '{split_date_col}' has NaT values")
 
     # Coerce optional date columns if present (regardless of split strategy --
-    # downstream diagnostics may still want these as real datetimes).
+    # downstream diagnostics may still want these as real datetimes). Now a
+    # no-op for everything except split_date_col, since Step 2 above already
+    # narrowed away every other date column -- left in place rather than
+    # deleted since it's effectively free and still correct.
     for c in date_cols:
         for df_ref in [df_pd_raw, df_pd_transformed]:
             if c in df_ref.columns and not pd.api.types.is_datetime64_any_dtype(df_ref[c]):
                 df_ref[c] = pd.to_datetime(df_ref[c], errors="coerce")
-
-    # ------------------------------------------------------------------ #
-    # 3) Candidate numeric feature selection
-    # ------------------------------------------------------------------ #
-    forbidden_patterns_low = [str(p).lower() for p in forbidden_feature_patterns]
-    blacklist_low = {str(c).lower() for c in pd_feature_blacklist}
-    id_cols_low = {str(c).lower() for c in id_cols}
-    protected_low = {str(c).lower() for c in protected_cols}
-
-    base_cols = allowed_features if allowed_features is not None else df_pd_transformed.columns
-    candidate_features: list[str] = []
-
-    for c in base_cols:
-        if c not in df_pd_transformed.columns:
-            continue
-        c_low = str(c).lower()
-        if c_low in id_cols_low:
-            continue
-        if c_low in protected_low:
-            continue
-        if c_low in blacklist_low:
-            continue
-        if c == target_col or c == split_date_col:
-            continue
-        if not pd.api.types.is_numeric_dtype(df_pd_transformed[c]):
-            continue
-        candidate_features.append(c)
-
-    logger.info(
-        "prepare_pd_data: %d candidate numeric features identified",
-        len(candidate_features),
-    )
 
     # ------------------------------------------------------------------ #
     # 4) Pattern-based leakage guard

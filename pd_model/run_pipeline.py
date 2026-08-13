@@ -70,6 +70,7 @@ from __future__ import annotations
 
 import argparse
 import datetime
+import gc
 import hashlib
 import json
 import logging
@@ -412,6 +413,12 @@ def run_pipeline(args: argparse.Namespace) -> None:
     # ArrayMemoryError above pointed here).
     df_train_raw = df_pd[split_mask]
     df_val_raw = df_pd[~split_mask]
+    # df_pd is never read again after this point (confirmed by grep) -- it's
+    # likely the single largest object in the run (full loan-level row count,
+    # widest column count before any narrowing), and it would otherwise sit
+    # alive in scope through Steps 6-13 for no reason.
+    del df_pd
+    gc.collect()
     logger.info(
         "Pre-transform split: %d train rows / %d val rows (cutoff=%s)",
         len(df_train_raw),
@@ -515,6 +522,27 @@ def run_pipeline(args: argparse.Namespace) -> None:
         else None
     )
 
+    # After the prepare_pd_training_and_validation_data() call below, df_pd_raw
+    # is only ever needed again for one thing further down (building df_sc_thin
+    # for the thin-file half of ops_scored), and that only ever reads 7 columns
+    # (build_ops_scored_table's _THIN_SCORECARD_COLS + agent_msisdn). Extract
+    # that tiny lookup now, before df_pd_raw's full width becomes dead weight
+    # carried through Steps 8-13 (IV selection, model training, calibration).
+    _thin_lookup_cols = [
+        c
+        for c in [
+            feature_config.AGENT_KEY,
+            feature_config.THIN_FILE_COL,
+            "bad_state",
+            "never_loan_points",
+            "never_loan_score_0_100",
+            "never_loan_pd_like",
+            "never_loan_top_drivers",
+        ]
+        if c in df_pd_raw.columns
+    ]
+    df_thin_lookup = df_pd_raw[_thin_lookup_cols].copy()
+
     # ------------------------------------------------------------------ #
     # 7) Train/val split + final data prep
     # ------------------------------------------------------------------ #
@@ -545,6 +573,13 @@ def run_pipeline(args: argparse.Namespace) -> None:
         date_cols=feature_config.DATE_COLS,
         precomputed_train_mask=precomputed_train_mask,
     )
+
+    # df_pd_raw/df_pd_transformed/df_train_raw/df_val_raw/df_train_trans/
+    # df_val_trans are never read again -- everything needed going forward
+    # is in the X_*/y_*/candidate_features/thin_*/agent_* return values above,
+    # plus df_thin_lookup (extracted just above) for the one remaining need.
+    del df_pd_raw, df_pd_transformed, df_train_raw, df_val_raw, df_train_trans, df_val_trans
+    gc.collect()
 
     # ------------------------------------------------------------------ #
     # 8) IV feature selection
@@ -721,7 +756,7 @@ def run_pipeline(args: argparse.Namespace) -> None:
         # thin-file scorecard rows
         thin_mask_val = thin_val.astype(bool)
         df_sc_thin = (
-            df_pd_raw.loc[X_val_raw.index[thin_mask_val]].copy()
+            df_thin_lookup.loc[X_val_raw.index[thin_mask_val]].copy()
             if thin_mask_val.sum() > 0
             else pd.DataFrame()
         )
