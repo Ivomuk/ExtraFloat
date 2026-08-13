@@ -267,18 +267,23 @@ WHERE state_day_rn = 1;
 
 DROP TABLE IF EXISTS hive.analytics.tmp_target_loans;
 
+-- cohort_end values below must satisfy cohort_end + 30 days <= max_state_date
+-- in hive.analytics.tmp_loan_state (see the DATE_ADD guard further down and
+-- state_data_availability), or that entire split comes back empty. Last
+-- checked: max_state_date = 2026-06-19, so 2026-05-20 was the latest safe
+-- cohort_end. Re-check max_state_date before reusing these dates later.
 CREATE TABLE hive.analytics.tmp_target_loans AS
 WITH cohorts AS (
     SELECT
         DATE '2026-01-01' AS cohort_start,
-        DATE '2026-05-31' AS cohort_end,
+        DATE '2026-04-30' AS cohort_end,
         'train' AS split
 
     UNION ALL
 
     SELECT
-        DATE '2026-06-01' AS cohort_start,
-        DATE '2026-07-31' AS cohort_end,
+        DATE '2026-05-01' AS cohort_start,
+        DATE '2026-05-20' AS cohort_end,
         'validation' AS split
 ),
 
