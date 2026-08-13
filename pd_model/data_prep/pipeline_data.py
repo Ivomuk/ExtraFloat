@@ -10,6 +10,8 @@ Provides:
 
 from __future__ import annotations
 
+import gc
+
 import pandas as pd
 
 from pd_model.config import feature_config
@@ -256,6 +258,13 @@ def prepare_pd_training_and_validation_data(
     df_val_trans = df_pd_transformed.loc[val_mask]
     df_val_raw = df_pd_raw.loc[val_mask]
 
+    # df_pd_raw/df_pd_transformed (this function's own locally-narrowed
+    # copies, rebound at the Step-2 reindex above) are dead weight from
+    # here on -- everything downstream reads from the just-built
+    # df_train_raw/df_train_trans/df_val_raw/df_val_trans instead.
+    del df_pd_raw, df_pd_transformed
+    gc.collect()
+
     # ------------------------------------------------------------------ #
     # 6) Schema assertions
     # ------------------------------------------------------------------ #
@@ -306,6 +315,12 @@ def prepare_pd_training_and_validation_data(
     X_val_trans = df_val_trans[candidate_features]
     y_val = df_val_trans[target_col]
 
+    # df_train_trans/df_val_trans are fully superseded now (their only
+    # further reads, X_*_trans and y_*, are already extracted above) --
+    # df_train_raw/df_val_raw stay alive a bit longer for thin_train/thin_val.
+    del df_train_trans, df_val_trans
+    gc.collect()
+
     if X_train_raw.shape != X_train_trans.shape:
         raise DataAlignmentError("[prepare_pd_data] Train raw/trans shapes differ")
     if X_val_raw.shape != X_val_trans.shape:
@@ -321,6 +336,12 @@ def prepare_pd_training_and_validation_data(
     thin_val = (
         df_val_raw[thin_col] if thin_col in df_val_raw.columns else pd.Series(0, index=df_val_raw.index)
     )
+
+    # df_train_raw/df_val_raw are fully superseded now -- agent_train/agent_val
+    # were already extracted as independent copies earlier, and X_train_raw/
+    # X_val_raw/thin_train/thin_val hold everything else still needed.
+    del df_train_raw, df_val_raw
+    gc.collect()
 
     logger.info(
         "prepare_pd_data: Train=%d rows | Val=%d rows | Features=%d",
