@@ -235,6 +235,13 @@ def run_pipeline(args: argparse.Namespace) -> None:
         df_pd, _df_label_diagnostics = run_phase_2_2_loan_history_pd_features(
             df_loans, cfg=cfg, verbose=True
         )
+        # df_loans (the full raw CSV, likely one of the largest objects in
+        # the run -- unprocessed, full column width, no downcast yet) and
+        # _df_label_diagnostics (never consumed -- retained only for label
+        # auditing, which nothing in this script currently does) are both
+        # dead weight from here on. Free them now rather than after Step 6.
+        del df_loans, _df_label_diagnostics
+        gc.collect()
 
         # disbursement_fid is the loan-level primary key (unique per loan,
         # source: analytics.momo_loan_book_tracker_disbursements_daily) --
@@ -303,6 +310,11 @@ def run_pipeline(args: argparse.Namespace) -> None:
                 "(snap_df not unique per (agent_msisdn, split) after dedup)"
             )
         logger.info("After Phase 2.1 join: %d rows, %d cols", *df_pd.shape)
+
+        # train_snap_df/val_snap_df are folded into snap_df; snap_df itself
+        # is only needed for the merge just above. None are read again.
+        del train_snap_df, val_snap_df, snap_df
+        gc.collect()
 
         # ------------------------------------------------------------------ #
         # 3) Phase 2.2 already applied in Step 1 above
