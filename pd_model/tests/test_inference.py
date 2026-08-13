@@ -238,6 +238,8 @@ class TestRunInferencePipelineLoanHistory:
             {
                 "msisdn": [f"256{i:08d}" for i in range(n)],
                 "observed_loan_count": rng.integers(0, 10, n),
+                "prior_loan_count_180d": rng.integers(0, 10, n),
+                "prior_active_loan_months_180d": rng.integers(0, 6, n),
                 "has_unresolved_loan_at_snapshot": rng.integers(0, 2, n),
             }
         )

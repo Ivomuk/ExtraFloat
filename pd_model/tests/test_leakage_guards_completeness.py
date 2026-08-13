@@ -180,6 +180,37 @@ class TestLoanLevelDiagnosticsExcluded:
             assert excluded, f"Loan-level id/label column '{col}' not excluded (reason: {reason})"
 
 
+class TestThinFileRoutingColumnsExcluded:
+    """prior_loan_count_180d / prior_active_loan_months_180d /
+    no_loan_history_flag feed thin_file_flag routing only (see
+    loan_history_features.py's derive_thin_file_flag) and must never enter
+    the thick-file model as predictors."""
+
+    def test_thin_file_routing_columns_in_blacklist(self):
+        for col in ("prior_loan_count_180d", "prior_active_loan_months_180d", "no_loan_history_flag"):
+            assert col in PD_FEATURE_BLACKLIST, f"'{col}' not in PD_FEATURE_BLACKLIST"
+
+    def test_thin_file_routing_columns_excluded_by_guard(self):
+        for col in ("prior_loan_count_180d", "prior_active_loan_months_180d", "no_loan_history_flag"):
+            excluded, reason = _is_excluded_by_any_guard(col)
+            assert excluded, f"'{col}' not excluded by any guard (reason: {reason})"
+
+    def test_thin_file_routing_columns_excluded_from_pipeline(self):
+        df = pd.DataFrame(
+            {
+                "agent_msisdn": [f"256{i:07d}" for i in range(50)],
+                "snapshot_dt": pd.to_datetime("2025-09-30"),
+                "bad_state": np.random.default_rng(3).integers(0, 2, 50),
+                "prior_loan_count_180d": np.random.default_rng(3).integers(0, 10, 50),
+                "prior_active_loan_months_180d": np.random.default_rng(3).integers(0, 6, 50),
+                "disbursement_vol_m5": np.random.default_rng(3).uniform(0, 1, 50),
+            }
+        )
+        pd_features, *_ = get_and_classify_pd_features(df)
+        assert "prior_loan_count_180d" not in pd_features
+        assert "prior_active_loan_months_180d" not in pd_features
+
+
 class TestLegitimateColumnsNotExcluded:
     def test_net_exposure_6m_not_excluded(self):
         """

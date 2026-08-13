@@ -1007,6 +1007,25 @@ prior_disbursement_features AS (
                 >= DATE_ADD('day', -180, current_loan.loan_date)
         ) AS prior_disbursement_count_180d,
 
+        -- Thin-file routing signals: sufficient recent loan volume AND
+        -- temporal breadth over the trailing 180 days, both point-in-time
+        -- per target loan. Using disbursement_ts (not loan_date) for the
+        -- window bound, matching the join condition below, correctly
+        -- credits an earlier same-day disbursement as prior history for a
+        -- later one on that same calendar date.
+        COUNT_IF(
+            prior_loan.disbursement_ts
+                >= DATE_ADD('day', -180, current_loan.disbursement_ts)
+        ) AS prior_loan_count_180d,
+
+        COUNT(
+            DISTINCT CASE
+                WHEN prior_loan.disbursement_ts
+                        >= DATE_ADD('day', -180, current_loan.disbursement_ts)
+                THEN DATE_TRUNC('month', prior_loan.disbursement_ts)
+            END
+        ) AS prior_active_loan_months_180d,
+
         AVG(
             CASE
                 WHEN prior_loan.loan_date
@@ -1419,6 +1438,12 @@ SELECT
 
     COALESCE(p.prior_disbursement_count_180d, 0)
         AS prior_disbursement_count_180d,
+
+    COALESCE(p.prior_loan_count_180d, 0)
+        AS prior_loan_count_180d,
+
+    COALESCE(p.prior_active_loan_months_180d, 0)
+        AS prior_active_loan_months_180d,
 
     p.avg_prior_loan_amount_30d,
     p.avg_prior_loan_amount_90d,

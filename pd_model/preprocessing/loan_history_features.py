@@ -22,9 +22,17 @@ Provides:
 - ``compute_bad_flags_loan_level``   -- derives ``bad_state`` from
                                        ``bad_state_3dpd_30d``.
 - ``derive_thin_file_flag``          -- ``thin_file_flag`` from
-                                       ``observed_prior_loan_count`` (exact
-                                       count, not a same-day-inflated proxy,
-                                       so no additional threshold is needed).
+                                       ``prior_loan_count_180d`` /
+                                       ``prior_active_loan_months_180d``
+                                       (point-in-time, 180-day-bounded loan
+                                       count AND active-month breadth --
+                                       requires both to clear the
+                                       ``cfg.thin_file_min_lifetime_loans`` /
+                                       ``cfg.thin_file_min_active_months``
+                                       floors to be thick-file). Also adds
+                                       ``no_loan_history_flag``, a separate
+                                       lifetime "never borrowed" signal from
+                                       ``observed_prior_loan_count``.
 - ``run_phase_2_2_loan_history_pd_features``            -- training path.
 - ``run_phase_2_2_loan_history_pd_features_inference``  -- scoring-time
                                        counterpart (no label to derive).
@@ -77,7 +85,8 @@ _TRAINING_REQUIRED_COLUMNS: list[str] = [
 # exactly (has_observed_prior_state, has_pre_window_history,
 # days_since_last_repayment, avg_tenure_days_closed_loans,
 # max_tenure_days_last_5_closed_loans, historical_anomaly_open_loan_rate,
-# consecutive_on_time_loans, months_since_first_observed_loan) pass through
+# consecutive_on_time_loans, months_since_first_observed_loan,
+# prior_loan_count_180d, prior_active_loan_months_180d) pass through
 # unrenamed. Columns describing the *candidate loan being requested*
 # (disbursement_amount_ugx, disbursement_hour, disbursement_day_of_week,
 # late_afternoon_disbursement, current_to_avg_prior_loan_amount_*,
@@ -179,23 +188,49 @@ def _apply_thin_file_flag_inplace(df: pd.DataFrame, cfg: ModelConfig) -> None:
     -- same rationale, same "every current caller already owns its input"
     verification.
     """
-    require_columns(df, ["observed_prior_loan_count"], context="derive_thin_file_flag")
+    require_columns(
+        df,
+        ["observed_prior_loan_count", "prior_loan_count_180d", "prior_active_loan_months_180d"],
+        context="derive_thin_file_flag",
+    )
 
-    has_loan_history = (
-        pd.to_numeric(df["observed_prior_loan_count"], errors="coerce").fillna(0) > 0
+    # Lifetime "never borrowed at all" signal -- has_ever_loan/has_loan_history
+    # keep their existing meaning (any history, ever); this is NOT the
+    # thick-file routing decision, only thin_file_flag below is.
+    no_loan_history = (
+        pd.to_numeric(df["observed_prior_loan_count"], errors="coerce").fillna(0) == 0
     ).astype(int)
 
-    df["has_ever_loan"] = has_loan_history
-    df["has_loan_history"] = has_loan_history
-    df["is_new_agent"] = (has_loan_history == 0).astype(int)
-    df["thin_file_flag"] = (has_loan_history == 0).astype(int)
+    df["has_ever_loan"] = 1 - no_loan_history
+    df["has_loan_history"] = 1 - no_loan_history
+    df["is_new_agent"] = no_loan_history
+    df["no_loan_history_flag"] = no_loan_history
+
+    # Thick-file routing requires BOTH sufficient recent loan volume AND
+    # sufficient temporal breadth over the trailing 180 days, point-in-time
+    # per target loan (see data/loan_state_query_updated_materialized.txt's
+    # prior_disbursement_features CTE). One prior loan, or a burst of loans
+    # in a single month, is not enough evidence for the full behavioral
+    # model -- fewer than cfg.thin_file_min_lifetime_loans loans OR fewer
+    # than cfg.thin_file_min_active_months distinct active months routes to
+    # the conservative thin-file LR path instead.
+    prior_loans_180d = pd.to_numeric(df["prior_loan_count_180d"], errors="coerce").fillna(0)
+    active_months_180d = pd.to_numeric(df["prior_active_loan_months_180d"], errors="coerce").fillna(0)
+
+    df["thin_file_flag"] = (
+        (prior_loans_180d < cfg.thin_file_min_lifetime_loans)
+        | (active_months_180d < cfg.thin_file_min_active_months)
+    ).astype(int)
     df["thin_file_pd_prior"] = np.where(df["thin_file_flag"] == 1, cfg.thin_file_pd_prior, 0.0)
 
     n_thin = int(df["thin_file_flag"].sum())
+    n_no_history = int(df["no_loan_history_flag"].sum())
     logger.info(
-        "derive_thin_file_flag: %d/%d thin-file agents (thin_file_pd_prior=%.2f)",
+        "derive_thin_file_flag: %d/%d thin-file agents (%d with no loan history at all, "
+        "thin_file_pd_prior=%.2f)",
         n_thin,
         len(df),
+        n_no_history,
         cfg.thin_file_pd_prior,
     )
 
@@ -206,19 +241,28 @@ def derive_thin_file_flag(
 ) -> pd.DataFrame:
     """
     Add ``has_ever_loan``, ``has_loan_history``, ``is_new_agent``,
-    ``thin_file_flag``, and ``thin_file_pd_prior`` from
-    ``observed_prior_loan_count``.
+    ``no_loan_history_flag``, ``thin_file_flag``, and ``thin_file_pd_prior``.
 
-    ``thin_file_flag = 1`` iff ``observed_prior_loan_count == 0``.
-    ``observed_prior_loan_count`` is an exact count of distinct prior loans
-    reconstructed from loan_state_daily, not a same-day-inflated monthly
-    proxy, so no additional month/loan-count floor is needed (unlike the
-    old ``thin_file_min_active_months`` / ``thin_file_min_lifetime_loans``
-    dual threshold in ``loan_features.py``).
+    ``thin_file_flag = 1`` iff ``prior_loan_count_180d < cfg.thin_file_min_lifetime_loans``
+    OR ``prior_active_loan_months_180d < cfg.thin_file_min_active_months`` --
+    both are point-in-time, 180-day-bounded counts reconstructed per target
+    loan in SQL (``data/loan_state_query_updated_materialized.txt``'s
+    ``prior_disbursement_features`` CTE), not the old six-prebuilt-monthly-
+    column proxy in ``loan_features.py``. One prior loan, or a burst of
+    loans concentrated in a single month, is therefore correctly routed to
+    the conservative thin-file LR path rather than the full behavioral
+    model, which the older ``observed_prior_loan_count == 0`` rule treated
+    as thick-file.
+
+    ``no_loan_history_flag = 1`` iff ``observed_prior_loan_count == 0``
+    (lifetime, unbounded) -- a distinct, stricter "never borrowed at all"
+    signal, separate from ``thin_file_flag``'s routing decision.
 
     Args:
-        df_pd: Modelling DataFrame; must contain ``observed_prior_loan_count``.
-        cfg:   Model config supplying ``thin_file_pd_prior``.
+        df_pd: Modelling DataFrame; must contain ``observed_prior_loan_count``,
+               ``prior_loan_count_180d``, and ``prior_active_loan_months_180d``.
+        cfg:   Model config supplying ``thin_file_pd_prior``,
+               ``thin_file_min_lifetime_loans``, ``thin_file_min_active_months``.
 
     Returns:
         Copy of *df_pd* with the flags above added.
@@ -255,7 +299,8 @@ def run_phase_2_2_loan_history_pd_features(
     3. Normalise the join key: ``msisdn`` -> ``agent_msisdn``.
     4. Derive ``bad_state`` from ``bad_state_3dpd_30d``.
     5. Derive ``thin_file_flag`` and related flags from
-       ``observed_prior_loan_count``.
+       ``prior_loan_count_180d`` / ``prior_active_loan_months_180d``
+       (see ``derive_thin_file_flag`` docstring).
 
     Args:
         df_loans: Loan-level training DataFrame (query output).

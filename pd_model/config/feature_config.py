@@ -84,6 +84,12 @@ PD_FEATURE_BLACKLIST: frozenset[str] = frozenset(
         # Thin-file / policy controls
         "thin_file_flag",
         "thin_file_pd_prior",
+        "no_loan_history_flag",
+        # Point-in-time, 180-day-bounded thin-file routing signals -- feed
+        # thin_file_flag only, not the thick-file model (see
+        # loan_history_features.py's derive_thin_file_flag).
+        "prior_loan_count_180d",
+        "prior_active_loan_months_180d",
         # Routing intermediates — derived from disbursement_vol_mN which are in the
         # feature set; these summaries are redundant and cause spurious leakage flags
         # because no-loan-history agents (bad_state≈0) always have value 0.

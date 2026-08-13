@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from pd_model.config.model_config import DEFAULT_CONFIG
 from pd_model.exceptions import DataAlignmentError
 from pd_model.preprocessing.loan_history_features import (
     LABEL_DIAGNOSTIC_COLUMNS,
@@ -31,6 +32,8 @@ def _loan_df(n: int = 100) -> pd.DataFrame:
             "bad_state_3dpd_30d": rng.integers(0, 2, n),
             "bad_state_1dpd_7d": rng.integers(0, 2, n),
             "observed_prior_loan_count": rng.integers(0, 10, n),
+            "prior_loan_count_180d": rng.integers(0, 10, n),
+            "prior_active_loan_months_180d": rng.integers(0, 6, n),
             "active_loan_days_aging_at_scoring": rng.integers(0, 10, n).astype(float),
             "disbursement_amount_ugx": rng.exponential(50000, n),
             "max_days_aging_7d": rng.integers(0, 10, n).astype(float),
@@ -71,13 +74,29 @@ class TestComputeBadFlagsLoanLevel:
             compute_bad_flags_loan_level(df)
 
 
-class TestDeriveThinFileFlag:
-    def test_thin_file_iff_zero_prior_loans(self):
-        df = _loan_df()
-        out = derive_thin_file_flag(df)
-        expected = (out["observed_prior_loan_count"] == 0).astype(int)
-        assert (out["thin_file_flag"] == expected).all()
+def _thin_file_cases_df() -> pd.DataFrame:
+    """
+    One row per case called out in the thin-file redesign:
+    0: never borrowed at all (no_loan_history_flag=1, thin).
+    1: exactly one prior loan (thin under the new rule -- was thick under
+       the old observed_prior_loan_count==0 rule).
+    2: 10 loans, all in a single active month (burst guard -- passes the
+       loan-count floor but fails the active-months floor, still thin).
+    3: 5 loans spread across 4 distinct months (thick -- clears both floors).
+    4: 20 lifetime loans but none in the trailing 180 days (stale history --
+       thin via the 180d-bounded columns, but NOT no_loan_history_flag,
+       since the agent has genuinely borrowed before).
+    """
+    return pd.DataFrame(
+        {
+            "observed_prior_loan_count": [0, 1, 10, 5, 20],
+            "prior_loan_count_180d": [0, 1, 10, 5, 0],
+            "prior_active_loan_months_180d": [0, 1, 1, 4, 0],
+        }
+    )
 
+
+class TestDeriveThinFileFlag:
     def test_thin_file_flag_binary(self):
         df = _loan_df()
         out = derive_thin_file_flag(df)
@@ -94,10 +113,60 @@ class TestDeriveThinFileFlag:
         out = derive_thin_file_flag(df)
         assert (out["has_ever_loan"] == out["has_loan_history"]).all()
 
-    def test_is_new_agent_inverse_of_thin_file(self):
+    def test_is_new_agent_matches_no_loan_history_flag(self):
+        """is_new_agent tracks the lifetime no_loan_history signal, not the
+        180d-bounded thin_file_flag -- these diverge for stale/burst cases."""
         df = _loan_df()
         out = derive_thin_file_flag(df)
-        assert (out["is_new_agent"] == out["thin_file_flag"]).all()
+        assert (out["is_new_agent"] == out["no_loan_history_flag"]).all()
+
+    def test_one_prior_loan_is_thin_file(self):
+        """A single prior loan must route to thin-file -- the old rule
+        (observed_prior_loan_count == 0) incorrectly treated this as thick."""
+        out = derive_thin_file_flag(_thin_file_cases_df())
+        assert out.loc[1, "thin_file_flag"] == 1
+
+    def test_burst_of_loans_in_one_month_is_thin_file(self):
+        """10 loans clearing the loan-count floor but concentrated in a
+        single active month must still route to thin-file (active-months
+        floor not met)."""
+        out = derive_thin_file_flag(_thin_file_cases_df())
+        assert out.loc[2, "thin_file_flag"] == 1
+
+    def test_sufficient_volume_and_breadth_is_thick_file(self):
+        out = derive_thin_file_flag(_thin_file_cases_df())
+        assert out.loc[3, "thin_file_flag"] == 0
+
+    def test_stale_history_is_thin_but_not_no_loan_history(self):
+        """20 lifetime loans, none in the trailing 180 days: thin_file_flag
+        fires (recent evidence is stale) but no_loan_history_flag does not
+        (the agent has genuinely borrowed before)."""
+        out = derive_thin_file_flag(_thin_file_cases_df())
+        assert out.loc[4, "thin_file_flag"] == 1
+        assert out.loc[4, "no_loan_history_flag"] == 0
+
+    def test_no_loan_history_flag_iff_zero_lifetime_loans(self):
+        out = derive_thin_file_flag(_thin_file_cases_df())
+        expected = (out["observed_prior_loan_count"] == 0).astype(int)
+        assert (out["no_loan_history_flag"] == expected).all()
+
+    def test_thresholds_are_config_driven(self):
+        """thin_file_flag reads cfg.thin_file_min_lifetime_loans /
+        cfg.thin_file_min_active_months, not hardcoded literals."""
+        df = _thin_file_cases_df()
+        assert DEFAULT_CONFIG.thin_file_min_lifetime_loans == 5
+        assert DEFAULT_CONFIG.thin_file_min_active_months == 4
+        out = derive_thin_file_flag(df, cfg=DEFAULT_CONFIG)
+        expected = (
+            (df["prior_loan_count_180d"] < DEFAULT_CONFIG.thin_file_min_lifetime_loans)
+            | (df["prior_active_loan_months_180d"] < DEFAULT_CONFIG.thin_file_min_active_months)
+        ).astype(int)
+        assert (out["thin_file_flag"] == expected).all()
+
+    def test_raises_without_180d_columns(self):
+        df = _loan_df().drop(columns=["prior_loan_count_180d"])
+        with pytest.raises(ValueError, match="prior_loan_count_180d"):
+            derive_thin_file_flag(df)
 
 
 class TestRunPhase22LoanHistoryPdFeatures:
@@ -187,6 +256,8 @@ class TestRunPhase22LoanHistoryPdFeaturesInference:
             {
                 "msisdn": [f"256{i:07d}" for i in range(n)],
                 "observed_loan_count": rng.integers(0, 5, n),
+                "prior_loan_count_180d": rng.integers(0, 5, n),
+                "prior_active_loan_months_180d": rng.integers(0, 4, n),
                 "has_unresolved_loan_at_snapshot": rng.integers(0, 2, n),
             }
         )

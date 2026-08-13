@@ -532,6 +532,19 @@ disbursement_history_features AS (
             pd.loan_date >= DATE_ADD('day', -180, b.snapshot_date)
         ) AS disbursement_count_180d,
 
+        -- Thin-file routing signals, mirroring the training query's
+        -- prior_loan_count_180d / prior_active_loan_months_180d.
+        COUNT_IF(
+            pd.loan_date >= DATE_ADD('day', -180, b.snapshot_date)
+        ) AS prior_loan_count_180d,
+
+        COUNT(
+            DISTINCT CASE
+                WHEN pd.loan_date >= DATE_ADD('day', -180, b.snapshot_date)
+                THEN DATE_TRUNC('month', pd.loan_date)
+            END
+        ) AS prior_active_loan_months_180d,
+
         AVG(
             CASE
                 WHEN pd.loan_date >= DATE_ADD('day', -30, b.snapshot_date)
@@ -719,6 +732,12 @@ SELECT
 
     COALESCE(dh.disbursement_count_180d, 0)
         AS disbursement_count_180d,
+
+    COALESCE(dh.prior_loan_count_180d, 0)
+        AS prior_loan_count_180d,
+
+    COALESCE(dh.prior_active_loan_months_180d, 0)
+        AS prior_active_loan_months_180d,
 
     dh.avg_loan_amount_30d,
     dh.avg_loan_amount_90d,
