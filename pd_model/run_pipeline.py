@@ -143,6 +143,25 @@ def _parse_dates(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def _downcast_float64_to_float32(df: pd.DataFrame) -> None:
+    """
+    In-place: halve memory for all float64 columns.
+
+    The loan-level grain (one row per loan) can be an order of magnitude
+    more rows than the original agent-snapshot grain, so full-precision
+    copies of the whole modelling frame (e.g. add_never_loan_scorecard_from_phase_2_1's
+    df_pd_in.copy(), or the train/val split further down) can require a
+    multi-GiB single allocation. Feature columns get cast to float32 again
+    later in build_transformed_dataframe regardless, so downcasting here
+    changes nothing downstream -- it just does it before the first
+    full-frame copy at scale rather than after. Idempotent / near-free to
+    call again once already downcast.
+    """
+    float64_cols = df.select_dtypes(include="float64").columns
+    if len(float64_cols) > 0:
+        df[float64_cols] = df[float64_cols].astype("float32")
+
+
 # ======================================================================== #
 # Pipeline
 # ======================================================================== #
@@ -248,6 +267,7 @@ def run_pipeline(args: argparse.Namespace) -> None:
         # 5) Thin-file scorecard
         # ------------------------------------------------------------------ #
         logger.info("=== Step 5: Thin-file scorecard ===")
+        _downcast_float64_to_float32(df_pd)
         df_pd = add_never_loan_scorecard_from_phase_2_1(df_pd, cfg=cfg)
 
         # Derive a representative train_cutoff for metadata/logging only --
@@ -313,6 +333,7 @@ def run_pipeline(args: argparse.Namespace) -> None:
         # 5) Thin-file scorecard
         # ------------------------------------------------------------------ #
         logger.info("=== Step 5: Thin-file scorecard ===")
+        _downcast_float64_to_float32(df_pd)
         df_pd = add_never_loan_scorecard_from_phase_2_1(df_pd, cfg=cfg)
 
         train_cutoff = pd.Timestamp(args.train_cutoff)
@@ -322,18 +343,11 @@ def run_pipeline(args: argparse.Namespace) -> None:
     # ------------------------------------------------------------------ #
     logger.info("=== Step 6: Feature classification + transformation ===")
 
-    # Downcast float64 -> float32 before the split below. The loan-level
-    # grain is one row per loan rather than one row per agent-snapshot, so
-    # it can be an order of magnitude more rows than the original grain --
-    # confirmed via a numpy ArrayMemoryError (~5 GiB single-allocation
-    # failure) trying to consolidate a ~3.5M-row, 195-column float64 frame
-    # during the .copy() below. Feature columns get cast to float32 later
-    # in build_transformed_dataframe anyway, so doing it for all float64
-    # columns here (halving this step's memory footprint) changes nothing
-    # downstream.
-    float64_cols = df_pd.select_dtypes(include="float64").columns
-    if len(float64_cols) > 0:
-        df_pd[float64_cols] = df_pd[float64_cols].astype("float32")
+    # Re-downcast: Step 5's scorecard adds its own float64 columns
+    # (never_loan_points, never_loan_score_0_100, never_loan_pd_like), so
+    # this catches those too, on top of the pre-Step-5 downcast above.
+    # Cheap / near-free if there's nothing new to convert.
+    _downcast_float64_to_float32(df_pd)
 
     # Determine the temporal split boundary up-front so winsorization bounds
     # are fitted on training data only and applied to validation -- prevents
@@ -516,9 +530,11 @@ def run_pipeline(args: argparse.Namespace) -> None:
         int(thick_val_mask.sum()), len(thin_val),
     )
 
-    Xtr = X_train_trans.loc[thick_train_mask, selected_features].copy()
+    # No .copy() needed -- .loc[row_mask, col_list] is already independent
+    # under pandas' copy-on-write (same reasoning as Steps 6/7 above).
+    Xtr = X_train_trans.loc[thick_train_mask, selected_features]
     y_train_thick = y_train.loc[thick_train_mask]
-    Xva = X_val_trans.loc[thick_val_mask, selected_features].copy()
+    Xva = X_val_trans.loc[thick_val_mask, selected_features]
     y_val_thick = y_val.loc[thick_val_mask]
     agent_train_thick = agent_train.loc[thick_train_mask]
     thin_train_thick = thin_train.loc[thick_train_mask]
