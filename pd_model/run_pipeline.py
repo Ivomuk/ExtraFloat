@@ -322,6 +322,19 @@ def run_pipeline(args: argparse.Namespace) -> None:
     # ------------------------------------------------------------------ #
     logger.info("=== Step 6: Feature classification + transformation ===")
 
+    # Downcast float64 -> float32 before the split below. The loan-level
+    # grain is one row per loan rather than one row per agent-snapshot, so
+    # it can be an order of magnitude more rows than the original grain --
+    # confirmed via a numpy ArrayMemoryError (~5 GiB single-allocation
+    # failure) trying to consolidate a ~3.5M-row, 195-column float64 frame
+    # during the .copy() below. Feature columns get cast to float32 later
+    # in build_transformed_dataframe anyway, so doing it for all float64
+    # columns here (halving this step's memory footprint) changes nothing
+    # downstream.
+    float64_cols = df_pd.select_dtypes(include="float64").columns
+    if len(float64_cols) > 0:
+        df_pd[float64_cols] = df_pd[float64_cols].astype("float32")
+
     # Determine the temporal split boundary up-front so winsorization bounds
     # are fitted on training data only and applied to validation -- prevents
     # validation-distribution leakage into the transform_report saved to disk.
@@ -331,8 +344,13 @@ def run_pipeline(args: argparse.Namespace) -> None:
         split_mask = df_pd["split"].eq("train")
     else:
         split_mask = pd.to_datetime(df_pd["snapshot_dt"], errors="coerce") <= train_cutoff
-    df_train_raw = df_pd[split_mask].copy()
-    df_val_raw = df_pd[~split_mask].copy()
+    # Boolean-mask row selection already returns an independent copy in
+    # pandas (never a view), so the .copy() previously chained here was
+    # redundant -- it forced a second full consolidate+copy pass right
+    # after the first, doubling peak memory at exactly this line (the
+    # ArrayMemoryError above pointed here).
+    df_train_raw = df_pd[split_mask]
+    df_val_raw = df_pd[~split_mask]
     logger.info(
         "Pre-transform split: %d train rows / %d val rows (cutoff=%s)",
         len(df_train_raw),
