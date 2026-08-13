@@ -2,10 +2,9 @@
 python -m pd_model.run_pipeline ^
   --train-file            data/mfs_daily_agent_mart_20260531.csv ^
   --val-file              data/mfs_daily_agent_mart_20260731.csv ^
-  --repayment-file        data/snapshots_202601112144.csv ^
+  --loan-training-file    data/state_data_202608122330.csv ^
   --train-snapshot-date   20260531 ^
   --val-snapshot-date     20260731 ^
-  --train-cutoff          2026-05-31 ^
   --output-dir            pd_model/artifacts ^
   --champion              xgb > training_log.txt 2>&1
 
