@@ -4,9 +4,12 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from sklearn.metrics import roc_auc_score
+
 from pd_model.config.model_config import ModelConfig
 from pd_model.exceptions import CalibrationError
 from pd_model.modeling.calibration import (
+    _batched_auc,
     add_policy_flags,
     attach_cal_pd,
     build_pd_calibration_map,
@@ -185,3 +188,49 @@ class TestBootstrap:
         result = run_bootstrap_comparison(df, df, cfg=cfg)
         assert _metric_value(result, "align_mode") == "index_intersection"
         assert _metric_value(result, "n_rows_aligned") == 1000
+
+
+class TestBatchedAucEquivalence:
+    """Regression guard pinning the empirical equivalence found while
+    vectorizing the bootstrap loop: _batched_auc must match
+    sklearn.metrics.roc_auc_score row-for-row, including under ties."""
+
+    def test_matches_sklearn_with_ties(self):
+        rng = np.random.default_rng(0)
+        n_rows = 40
+        batch = 25
+        y_b = rng.integers(0, 2, size=(batch, n_rows))
+        # Force ties: small integer-valued scores, not continuous.
+        score_b = rng.integers(0, 5, size=(batch, n_rows)).astype(float)
+
+        # Ensure every row has both classes present so sklearn doesn't raise.
+        for row in range(batch):
+            if y_b[row].sum() == 0:
+                y_b[row, 0] = 1
+            elif y_b[row].sum() == n_rows:
+                y_b[row, 0] = 0
+
+        expected = np.array([roc_auc_score(y_b[i], score_b[i]) for i in range(batch)])
+        actual = _batched_auc(y_b, score_b)
+
+        assert np.allclose(actual, expected, atol=1e-9)
+
+    def test_degenerate_rows_are_nan(self):
+        """A row with only one class present must yield NaN, matching the
+        old loop's `if np.unique(y_b).size < 2: continue` skip behaviour."""
+        y_b = np.array([[1, 1, 1], [0, 1, 1], [0, 0, 0]])
+        score_b = np.array([[0.1, 0.5, 0.9], [0.1, 0.5, 0.9], [0.1, 0.5, 0.9]])
+        actual = _batched_auc(y_b, score_b)
+        assert np.isnan(actual[0])  # all positive
+        assert not np.isnan(actual[1])
+        assert np.isnan(actual[2])  # all negative
+
+    def test_bootstrap_comparison_produces_finite_cis(self):
+        """End-to-end sanity check that the vectorized loop still produces
+        usable CI bounds through the full run_bootstrap_comparison path."""
+        df = _scored_df(1000, seed=3)
+        cfg = ModelConfig(cal_min_n=100, cal_min_bads=5, bootstrap_n=200)
+        result = run_bootstrap_comparison(df, df, cfg=cfg)
+        for metric in ("xgb_ci95_lo", "xgb_ci95_hi", "diff_ci95_lo", "diff_ci95_hi"):
+            value = _metric_value(result, metric)
+            assert np.isfinite(value), f"{metric} is not finite: {value}"

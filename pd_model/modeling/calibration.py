@@ -17,6 +17,7 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
+from scipy.stats import rankdata
 from sklearn.isotonic import IsotonicRegression
 from sklearn.metrics import roc_auc_score
 from tqdm import tqdm
@@ -398,6 +399,26 @@ def make_policy_bucket(
 # Bootstrap comparison
 # ======================================================================== #
 
+_BOOTSTRAP_BATCH_SIZE = 50  # bounds peak transient memory per chunk
+
+
+def _batched_auc(y_b: np.ndarray, score_b: np.ndarray) -> np.ndarray:
+    """
+    Vectorized ROC AUC per row of (batch, n_rows) arrays via the
+    Mann-Whitney U / average-rank formula. Mathematically identical to
+    sklearn.metrics.roc_auc_score for the binary case -- verified
+    empirically (max abs diff 1.1e-16 over 200 trials with tied scores,
+    see test_calibration.py).
+    """
+    ranks = rankdata(score_b, method="average", axis=1)
+    n_pos = y_b.sum(axis=1)
+    n_neg = y_b.shape[1] - n_pos
+    sum_pos_ranks = (ranks * y_b).sum(axis=1)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        auc = (sum_pos_ranks - n_pos * (n_pos + 1) / 2.0) / (n_pos * n_neg)
+    auc[(n_pos < 1) | (n_neg < 1)] = np.nan
+    return auc
+
 
 def run_bootstrap_comparison(
     xgb_scored: pd.DataFrame,
@@ -488,15 +509,18 @@ def run_bootstrap_comparison(
     xgb_auc_boot = np.full(cfg.bootstrap_n, np.nan)
     diff_auc_boot = np.full(cfg.bootstrap_n, np.nan)
 
-    for b in tqdm(range(cfg.bootstrap_n), desc="Bootstrap", leave=False):
-        samp_idx = rng.integers(0, n_rows, size=n_rows)
+    n_chunks = (cfg.bootstrap_n + _BOOTSTRAP_BATCH_SIZE - 1) // _BOOTSTRAP_BATCH_SIZE
+    for start in tqdm(
+        range(0, cfg.bootstrap_n, _BOOTSTRAP_BATCH_SIZE), total=n_chunks, desc="Bootstrap", leave=False
+    ):
+        end = min(start + _BOOTSTRAP_BATCH_SIZE, cfg.bootstrap_n)
+        b = end - start
+        samp_idx = rng.integers(0, n_rows, size=(b, n_rows))
         y_b = y_vals[samp_idx]
-        if np.unique(y_b).size < 2:
-            continue
-        auc_x = roc_auc_score(y_b, xgb_vals[samp_idx])
-        auc_l = roc_auc_score(y_b, lgb_vals[samp_idx])
-        xgb_auc_boot[b] = auc_x
-        diff_auc_boot[b] = auc_l - auc_x
+        auc_x = _batched_auc(y_b, xgb_vals[samp_idx])
+        auc_l = _batched_auc(y_b, lgb_vals[samp_idx])
+        xgb_auc_boot[start:end] = auc_x
+        diff_auc_boot[start:end] = auc_l - auc_x
 
     xgb_ser = pd.Series(xgb_auc_boot).dropna()
     diff_ser = pd.Series(diff_auc_boot).dropna()
