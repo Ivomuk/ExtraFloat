@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from pd_model.config.model_config import DEFAULT_CONFIG
+from pd_model.config.model_config import DEFAULT_CONFIG, ModelConfig
 from pd_model.exceptions import DataAlignmentError
 from pd_model.preprocessing.loan_history_features import (
     LABEL_DIAGNOSTIC_COLUMNS,
@@ -96,6 +96,9 @@ def _thin_file_cases_df() -> pd.DataFrame:
     )
 
 
+_WINDOWED_CFG = ModelConfig(thin_file_use_windowed_rule=True)
+
+
 class TestDeriveThinFileFlag:
     def test_thin_file_flag_binary(self):
         df = _loan_df()
@@ -120,53 +123,78 @@ class TestDeriveThinFileFlag:
         out = derive_thin_file_flag(df)
         assert (out["is_new_agent"] == out["no_loan_history_flag"]).all()
 
-    def test_one_prior_loan_is_thin_file(self):
-        """A single prior loan must route to thin-file -- the old rule
-        (observed_prior_loan_count == 0) incorrectly treated this as thick."""
-        out = derive_thin_file_flag(_thin_file_cases_df())
+    def test_one_prior_loan_is_thin_file_under_windowed_rule(self):
+        """A single prior loan must route to thin-file under the windowed
+        rule -- the interim/old rule (observed_prior_loan_count == 0)
+        incorrectly treats this as thick."""
+        out = derive_thin_file_flag(_thin_file_cases_df(), cfg=_WINDOWED_CFG)
         assert out.loc[1, "thin_file_flag"] == 1
 
-    def test_burst_of_loans_in_one_month_is_thin_file(self):
+    def test_burst_of_loans_in_one_month_is_thin_file_under_windowed_rule(self):
         """10 loans clearing the loan-count floor but concentrated in a
         single active month must still route to thin-file (active-months
-        floor not met)."""
-        out = derive_thin_file_flag(_thin_file_cases_df())
+        floor not met) under the windowed rule."""
+        out = derive_thin_file_flag(_thin_file_cases_df(), cfg=_WINDOWED_CFG)
         assert out.loc[2, "thin_file_flag"] == 1
 
-    def test_sufficient_volume_and_breadth_is_thick_file(self):
-        out = derive_thin_file_flag(_thin_file_cases_df())
+    def test_sufficient_volume_and_breadth_is_thick_file_under_windowed_rule(self):
+        out = derive_thin_file_flag(_thin_file_cases_df(), cfg=_WINDOWED_CFG)
         assert out.loc[3, "thin_file_flag"] == 0
 
-    def test_stale_history_is_thin_but_not_no_loan_history(self):
+    def test_stale_history_is_thin_but_not_no_loan_history_under_windowed_rule(self):
         """20 lifetime loans, none in the trailing 180 days: thin_file_flag
         fires (recent evidence is stale) but no_loan_history_flag does not
-        (the agent has genuinely borrowed before)."""
-        out = derive_thin_file_flag(_thin_file_cases_df())
+        (the agent has genuinely borrowed before) under the windowed rule."""
+        out = derive_thin_file_flag(_thin_file_cases_df(), cfg=_WINDOWED_CFG)
         assert out.loc[4, "thin_file_flag"] == 1
         assert out.loc[4, "no_loan_history_flag"] == 0
 
     def test_no_loan_history_flag_iff_zero_lifetime_loans(self):
+        """no_loan_history_flag is computed unconditionally, regardless of
+        which thin_file_flag rule is active."""
         out = derive_thin_file_flag(_thin_file_cases_df())
         expected = (out["observed_prior_loan_count"] == 0).astype(int)
         assert (out["no_loan_history_flag"] == expected).all()
 
-    def test_thresholds_are_config_driven(self):
-        """thin_file_flag reads cfg.thin_file_min_lifetime_loans /
-        cfg.thin_file_min_active_months, not hardcoded literals."""
+    def test_windowed_thresholds_are_config_driven(self):
+        """Under the windowed rule, thin_file_flag reads
+        cfg.thin_file_min_lifetime_loans / cfg.thin_file_min_active_months,
+        not hardcoded literals."""
         df = _thin_file_cases_df()
-        assert DEFAULT_CONFIG.thin_file_min_lifetime_loans == 5
-        assert DEFAULT_CONFIG.thin_file_min_active_months == 4
-        out = derive_thin_file_flag(df, cfg=DEFAULT_CONFIG)
+        assert _WINDOWED_CFG.thin_file_min_lifetime_loans == 5
+        assert _WINDOWED_CFG.thin_file_min_active_months == 4
+        out = derive_thin_file_flag(df, cfg=_WINDOWED_CFG)
         expected = (
-            (df["prior_loan_count_180d"] < DEFAULT_CONFIG.thin_file_min_lifetime_loans)
-            | (df["prior_active_loan_months_180d"] < DEFAULT_CONFIG.thin_file_min_active_months)
+            (df["prior_loan_count_180d"] < _WINDOWED_CFG.thin_file_min_lifetime_loans)
+            | (df["prior_active_loan_months_180d"] < _WINDOWED_CFG.thin_file_min_active_months)
         ).astype(int)
         assert (out["thin_file_flag"] == expected).all()
 
-    def test_raises_without_180d_columns(self):
+    def test_raises_without_180d_columns_when_windowed_rule_enabled(self):
         df = _loan_df().drop(columns=["prior_loan_count_180d"])
         with pytest.raises(ValueError, match="prior_loan_count_180d"):
-            derive_thin_file_flag(df)
+            derive_thin_file_flag(df, cfg=_WINDOWED_CFG)
+
+    def test_default_config_uses_interim_rule(self):
+        """Regression guard: DEFAULT_CONFIG.thin_file_use_windowed_rule must
+        stay False until the warehouse has a mature 180-day lookback (see
+        model_config.py comment) -- flipping this silently would
+        structurally misclassify an immature training cohort."""
+        assert DEFAULT_CONFIG.thin_file_use_windowed_rule is False
+
+    def test_default_rule_matches_no_loan_history_flag(self):
+        """With the windowed rule disabled (the default), thin_file_flag
+        must exactly equal no_loan_history_flag -- the interim fallback."""
+        out = derive_thin_file_flag(_thin_file_cases_df())
+        assert (out["thin_file_flag"] == out["no_loan_history_flag"]).all()
+
+    def test_default_rule_does_not_require_180d_columns(self):
+        """The interim rule must not require prior_loan_count_180d /
+        prior_active_loan_months_180d -- backward compatible with exports
+        that predate the windowed-rule SQL columns."""
+        df = _loan_df().drop(columns=["prior_loan_count_180d", "prior_active_loan_months_180d"])
+        out = derive_thin_file_flag(df)  # default cfg -- must not raise
+        assert (out["thin_file_flag"] == out["no_loan_history_flag"]).all()
 
 
 class TestRunPhase22LoanHistoryPdFeatures:

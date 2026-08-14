@@ -21,18 +21,22 @@ Provides:
                                        swap -- verified column-by-column.
 - ``compute_bad_flags_loan_level``   -- derives ``bad_state`` from
                                        ``bad_state_3dpd_30d``.
-- ``derive_thin_file_flag``          -- ``thin_file_flag`` from
-                                       ``prior_loan_count_180d`` /
+- ``derive_thin_file_flag``          -- ``thin_file_flag``, gated by
+                                       ``cfg.thin_file_use_windowed_rule``
+                                       (default False until the warehouse
+                                       has a mature 180-day lookback -- see
+                                       the function's own docstring):
+                                       windowed mode requires BOTH
+                                       ``prior_loan_count_180d`` and
                                        ``prior_active_loan_months_180d``
-                                       (point-in-time, 180-day-bounded loan
-                                       count AND active-month breadth --
-                                       requires both to clear the
-                                       ``cfg.thin_file_min_lifetime_loans`` /
-                                       ``cfg.thin_file_min_active_months``
-                                       floors to be thick-file). Also adds
-                                       ``no_loan_history_flag``, a separate
-                                       lifetime "never borrowed" signal from
-                                       ``observed_prior_loan_count``.
+                                       to clear ``cfg.thin_file_min_lifetime_loans``
+                                       / ``cfg.thin_file_min_active_months``;
+                                       interim mode (default) falls back to
+                                       the simpler lifetime
+                                       ``no_loan_history_flag``. Also always
+                                       adds ``no_loan_history_flag`` itself,
+                                       a lifetime "never borrowed" signal
+                                       from ``observed_prior_loan_count``.
 - ``run_phase_2_2_loan_history_pd_features``            -- training path.
 - ``run_phase_2_2_loan_history_pd_features_inference``  -- scoring-time
                                        counterpart (no label to derive).
@@ -188,11 +192,7 @@ def _apply_thin_file_flag_inplace(df: pd.DataFrame, cfg: ModelConfig) -> None:
     -- same rationale, same "every current caller already owns its input"
     verification.
     """
-    require_columns(
-        df,
-        ["observed_prior_loan_count", "prior_loan_count_180d", "prior_active_loan_months_180d"],
-        context="derive_thin_file_flag",
-    )
+    require_columns(df, ["observed_prior_loan_count"], context="derive_thin_file_flag")
 
     # Lifetime "never borrowed at all" signal -- has_ever_loan/has_loan_history
     # keep their existing meaning (any history, ever); this is NOT the
@@ -206,28 +206,50 @@ def _apply_thin_file_flag_inplace(df: pd.DataFrame, cfg: ModelConfig) -> None:
     df["is_new_agent"] = no_loan_history
     df["no_loan_history_flag"] = no_loan_history
 
-    # Thick-file routing requires BOTH sufficient recent loan volume AND
-    # sufficient temporal breadth over the trailing 180 days, point-in-time
-    # per target loan (see data/loan_state_query_updated_materialized.txt's
-    # prior_disbursement_features CTE). One prior loan, or a burst of loans
-    # in a single month, is not enough evidence for the full behavioral
-    # model -- fewer than cfg.thin_file_min_lifetime_loans loans OR fewer
-    # than cfg.thin_file_min_active_months distinct active months routes to
-    # the conservative thin-file LR path instead.
-    prior_loans_180d = pd.to_numeric(df["prior_loan_count_180d"], errors="coerce").fillna(0)
-    active_months_180d = pd.to_numeric(df["prior_active_loan_months_180d"], errors="coerce").fillna(0)
+    if cfg.thin_file_use_windowed_rule:
+        # Thick-file routing requires BOTH sufficient recent loan volume AND
+        # sufficient temporal breadth over the trailing 180 days, point-in-time
+        # per target loan (see data/loan_state_query_updated_materialized.txt's
+        # prior_disbursement_features CTE). One prior loan, or a burst of loans
+        # in a single month, is not enough evidence for the full behavioral
+        # model -- fewer than cfg.thin_file_min_lifetime_loans loans OR fewer
+        # than cfg.thin_file_min_active_months distinct active months routes to
+        # the conservative thin-file LR path instead.
+        require_columns(
+            df,
+            ["prior_loan_count_180d", "prior_active_loan_months_180d"],
+            context="derive_thin_file_flag",
+        )
+        prior_loans_180d = pd.to_numeric(df["prior_loan_count_180d"], errors="coerce").fillna(0)
+        active_months_180d = pd.to_numeric(df["prior_active_loan_months_180d"], errors="coerce").fillna(0)
+        df["thin_file_flag"] = (
+            (prior_loans_180d < cfg.thin_file_min_lifetime_loans)
+            | (active_months_180d < cfg.thin_file_min_active_months)
+        ).astype(int)
+        rule_desc = "windowed (180d loan-count + active-months)"
+    else:
+        # Interim rule while the warehouse hasn't yet accumulated a full
+        # 180-day lookback (needs cohort_start >= warehouse_start + 180d;
+        # as of max_state_date=2026-06-16 the warehouse only has 166 days of
+        # history, so the windowed rule would structurally misclassify the
+        # entire training cohort -- every training-period loan has too
+        # little *elapsed calendar time* to ever show 4 active months,
+        # regardless of the agent's real borrowing frequency). Falls back
+        # to the simpler lifetime "no history at all" rule, which has no
+        # minimum-elapsed-time requirement. Set
+        # cfg.thin_file_use_windowed_rule=True once the warehouse matures
+        # past ~2026-06-30.
+        df["thin_file_flag"] = no_loan_history
+        rule_desc = "interim (no_loan_history only -- windowed rule disabled, see cfg.thin_file_use_windowed_rule)"
 
-    df["thin_file_flag"] = (
-        (prior_loans_180d < cfg.thin_file_min_lifetime_loans)
-        | (active_months_180d < cfg.thin_file_min_active_months)
-    ).astype(int)
     df["thin_file_pd_prior"] = np.where(df["thin_file_flag"] == 1, cfg.thin_file_pd_prior, 0.0)
 
     n_thin = int(df["thin_file_flag"].sum())
     n_no_history = int(df["no_loan_history_flag"].sum())
     logger.info(
-        "derive_thin_file_flag: %d/%d thin-file agents (%d with no loan history at all, "
+        "derive_thin_file_flag [%s]: %d/%d thin-file agents (%d with no loan history at all, "
         "thin_file_pd_prior=%.2f)",
+        rule_desc,
         n_thin,
         len(df),
         n_no_history,
@@ -243,26 +265,41 @@ def derive_thin_file_flag(
     Add ``has_ever_loan``, ``has_loan_history``, ``is_new_agent``,
     ``no_loan_history_flag``, ``thin_file_flag``, and ``thin_file_pd_prior``.
 
-    ``thin_file_flag = 1`` iff ``prior_loan_count_180d < cfg.thin_file_min_lifetime_loans``
-    OR ``prior_active_loan_months_180d < cfg.thin_file_min_active_months`` --
-    both are point-in-time, 180-day-bounded counts reconstructed per target
-    loan in SQL (``data/loan_state_query_updated_materialized.txt``'s
-    ``prior_disbursement_features`` CTE), not the old six-prebuilt-monthly-
-    column proxy in ``loan_features.py``. One prior loan, or a burst of
-    loans concentrated in a single month, is therefore correctly routed to
-    the conservative thin-file LR path rather than the full behavioral
-    model, which the older ``observed_prior_loan_count == 0`` rule treated
-    as thick-file.
-
     ``no_loan_history_flag = 1`` iff ``observed_prior_loan_count == 0``
-    (lifetime, unbounded) -- a distinct, stricter "never borrowed at all"
-    signal, separate from ``thin_file_flag``'s routing decision.
+    (lifetime, unbounded) -- a genuine "never borrowed at all" signal,
+    computed unconditionally.
+
+    ``thin_file_flag`` has two modes, controlled by
+    ``cfg.thin_file_use_windowed_rule``:
+
+    - **True** (windowed rule): ``thin_file_flag = 1`` iff
+      ``prior_loan_count_180d < cfg.thin_file_min_lifetime_loans`` OR
+      ``prior_active_loan_months_180d < cfg.thin_file_min_active_months`` --
+      both are point-in-time, 180-day-bounded counts reconstructed per
+      target loan in SQL (``data/loan_state_query_updated_materialized.txt``'s
+      ``prior_disbursement_features`` CTE). Requires those two columns to
+      be present. Correctly catches a single prior loan, or a burst of
+      loans concentrated in one month, as thin-file. Only meaningful once
+      the warehouse has accumulated a genuine 180-day lookback for the
+      cohort being scored (warehouse start + 180 days) -- otherwise every
+      loan in an immature cohort is structurally unable to show
+      ``thin_file_min_active_months`` distinct months, regardless of the
+      agent's real borrowing frequency, and gets misclassified thin.
+    - **False** (default; interim rule): ``thin_file_flag`` falls back to
+      ``no_loan_history_flag`` (the old, simpler rule) -- no minimum
+      elapsed-calendar-time requirement, so not subject to the warehouse-
+      maturity bias above. Does not require the two windowed columns to
+      be present. Set ``cfg.thin_file_use_windowed_rule=True`` once the
+      warehouse has matured past ~180 days from its earliest data point.
 
     Args:
-        df_pd: Modelling DataFrame; must contain ``observed_prior_loan_count``,
-               ``prior_loan_count_180d``, and ``prior_active_loan_months_180d``.
+        df_pd: Modelling DataFrame; must contain ``observed_prior_loan_count``.
+               If ``cfg.thin_file_use_windowed_rule`` is True, must also
+               contain ``prior_loan_count_180d`` and
+               ``prior_active_loan_months_180d``.
         cfg:   Model config supplying ``thin_file_pd_prior``,
-               ``thin_file_min_lifetime_loans``, ``thin_file_min_active_months``.
+               ``thin_file_min_lifetime_loans``, ``thin_file_min_active_months``,
+               ``thin_file_use_windowed_rule``.
 
     Returns:
         Copy of *df_pd* with the flags above added.

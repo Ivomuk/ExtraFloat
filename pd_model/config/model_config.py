@@ -77,6 +77,23 @@ class ModelConfig:
     thin_file_min_active_months: int = 4  # distinct calendar months with disbursement > 0
     thin_file_min_lifetime_loans: int = 5  # minimum total loans (6-month window) for thick-file
 
+    # If True, loan_history_features.derive_thin_file_flag() requires BOTH
+    # prior_loan_count_180d >= thin_file_min_lifetime_loans AND
+    # prior_active_loan_months_180d >= thin_file_min_active_months
+    # (point-in-time, 180-day-bounded) to be thick-file. Defaults to False
+    # because the warehouse's earliest data is 2026-01-01 and, as of
+    # max_state_date=2026-06-16, has only accumulated 166 days of history --
+    # short of the 180 needed for even one non-truncated cohort day. Until
+    # max_state_date reaches ~2026-06-30, the windowed rule would
+    # structurally misclassify the entire training cohort as thin-file
+    # (loans have literally not had enough elapsed calendar time to show 4
+    # active months), not just under-observe it. Flip to True once the
+    # warehouse has matured past that point. While False, falls back to the
+    # simpler observed_prior_loan_count == 0 (lifetime, unbounded) rule,
+    # which has no minimum-elapsed-time requirement and so isn't subject to
+    # the same structural bias.
+    thin_file_use_windowed_rule: bool = False
+
     # ------------------------------------------------------------------ #
     # Winsorization / transformation
     # ------------------------------------------------------------------ #
