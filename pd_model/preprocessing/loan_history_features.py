@@ -10,9 +10,17 @@ unused -- this module has zero dependency on it, so the old module can be
 deleted later without touching this one.
 
 Provides:
-- ``LABEL_DIAGNOSTIC_COLUMNS``       -- the 9 future-derived columns that must
-                                       never reach the model (label leakage);
-                                       see ``data/Features_Consult.txt``.
+- ``LABEL_DIAGNOSTIC_COLUMNS``       -- the 11 future-derived columns that
+                                       must never reach the model (label
+                                       leakage); see
+                                       ``data/Features_Consult.txt``. Includes
+                                       ``post_disbursement_observed_date_count_30d``
+                                       / ``sufficient_follow_up_30d``, added
+                                       alongside the fix for a label-
+                                       observability gap where a lone
+                                       day-0 state row could satisfy the
+                                       old eligibility gate with zero real
+                                       post-disbursement observation.
 - ``SNAPSHOT_TO_TRAINING_COLUMN_MAP`` -- column-name correspondence between
                                        ``data/loan_history_snapshot_query.txt``
                                        (scoring time) and
@@ -71,6 +79,8 @@ LABEL_DIAGNOSTIC_COLUMNS: tuple[str, ...] = (
     "terminal_state_observed_30d",
     "outcome_state_row_count_30d",
     "outcome_observed_date_count_30d",
+    "post_disbursement_observed_date_count_30d",
+    "sufficient_follow_up_30d",
     "first_outcome_state_date",
     "last_outcome_state_date",
 )

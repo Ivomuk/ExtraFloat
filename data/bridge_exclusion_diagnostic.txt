@@ -1,0 +1,482 @@
+-- =====================================================================
+-- Bridge exclusion diagnostic (read-only, not part of the training pipeline)
+-- SQL dialect: Trino
+--
+-- WHY THIS FILE EXISTS
+--   data/loan_state_query_updated_materialized.txt's Statement 3 excludes
+--   any (msisdn, loan_date) customer-day where the disbursement<->state-loan
+--   positional bridge can't be established unambiguously
+--   (WHERE mapping_is_unambiguous = 1). Rejecting ambiguous groups instead
+--   of guessing is the right call, but nothing currently measures how much
+--   data that filter discards, or whether excluded groups skew riskier
+--   than included ones (e.g. high-frequency borrowers, operational
+--   incidents, rollovers, specific regions).
+--
+-- WHAT THIS FILE DOES
+--   Rebuilds the identical bridge logic (same CTEs, same
+--   mapping_is_unambiguous flag) WITHOUT the final filter, keeping every
+--   customer-day tagged with its inclusion/exclusion status, then reports:
+--     - exclusion rate, both per customer-day and disbursement-weighted
+--       (one excluded customer-day with N same-day loans excludes N
+--       target loans, not 1)
+--     - an approximate bad-rate for both included and excluded groups
+--     - all stratified by month(loan_date), sales_region,
+--       same_day_disbursement_count bucket, and a lightweight prior-loan
+--       count bucket as a customer-history-segment proxy
+--
+-- PREREQUISITE
+--   Run data/loan_state_query_updated_materialized.txt's Statements 1-2
+--   first (hive.analytics.tmp_disbursements / tmp_loan_state must exist
+--   and be current) -- this file reads them directly, does not rebuild
+--   them. No write access needed; this is a single read-only SELECT.
+--
+-- CAVEATS
+--   - The excluded-group bad rate is NOT a true per-loan label -- there's
+--     no reliable target_loan_uid for an ambiguous customer-day. It's a
+--     customer-day-level approximation: pool every state loan whose
+--     current_loan_start_date falls on that (msisdn, loan_date),
+--     regardless of position, and flag whether ANY of them shows
+--     days_aging > 3 or an anomaly-open state within 30 days. Treat it as
+--     directional, not exact.
+--   - The included-group bad rate here uses the same day-0-exclusive
+--     signal logic as the main query, but does NOT apply the full
+--     sufficient_follow_up_30d eligibility gate from
+--     data/loan_state_query_updated_materialized.txt's loan_labels CTE --
+--     this diagnostic isolates the mapping-ambiguity axis specifically,
+--     it isn't a second copy of the label pipeline. Rates here may differ
+--     slightly from the final training export for that reason.
+-- =====================================================================
+
+WITH cohorts AS (
+    SELECT
+        DATE '2026-01-01' AS cohort_start,
+        DATE '2026-04-30' AS cohort_end,
+        'train' AS split
+
+    UNION ALL
+
+    SELECT
+        DATE '2026-05-01' AS cohort_start,
+        DATE '2026-05-20' AS cohort_end,
+        'validation' AS split
+),
+
+state_data_availability AS (
+    SELECT MAX(state_date) AS max_state_date
+    FROM hive.analytics.tmp_loan_state
+),
+
+-- ---------------------------------------------------------------------
+-- Same-day disbursement/state-loan bridge -- verbatim from
+-- data/loan_state_query_updated_materialized.txt Statement 3, minus the
+-- final mapping_is_unambiguous filter. Keep in sync if that file's bridge
+-- logic changes.
+-- ---------------------------------------------------------------------
+same_day_disbursements_ranked AS (
+    SELECT
+        d.*,
+
+        ROW_NUMBER() OVER (
+            PARTITION BY d.msisdn, d.loan_date
+            ORDER BY
+                d.disbursement_ts,
+                d.disbursement_fid
+        ) AS same_day_disbursement_position,
+
+        COUNT(*) OVER (
+            PARTITION BY d.msisdn, d.loan_date
+        ) AS same_day_disbursement_count,
+
+        COUNT(d.disbursement_ts) OVER (
+            PARTITION BY d.msisdn, d.loan_date
+        ) AS nonnull_disbursement_ts_count
+
+    FROM hive.analytics.tmp_disbursements d
+),
+
+same_day_disbursement_validation AS (
+    SELECT
+        msisdn,
+        loan_date,
+
+        COUNT(*) AS disbursement_count,
+
+        COUNT(disbursement_ts) AS nonnull_disbursement_ts_count,
+
+        COUNT(DISTINCT disbursement_ts)
+            AS distinct_disbursement_ts_count
+
+    FROM hive.analytics.tmp_disbursements
+    GROUP BY
+        msisdn,
+        loan_date
+),
+
+state_loan_identity_ranked AS (
+    SELECT
+        ls.customer_msisdn AS msisdn,
+        ls.current_loan_start_date AS loan_date,
+        ls.loan_uid,
+        ls.loan_seq,
+
+        ROW_NUMBER() OVER (
+            PARTITION BY
+                ls.customer_msisdn,
+                ls.current_loan_start_date,
+                ls.loan_uid
+            ORDER BY
+                ls.state_date,
+                ls.inserted_ts
+        ) AS identity_rn
+
+    FROM hive.analytics.tmp_loan_state ls
+    WHERE ls.loan_status <> 'NEVER_BORROWED'
+      AND ls.current_loan_start_date IS NOT NULL
+      AND ls.loan_uid IS NOT NULL
+),
+
+state_loan_identities AS (
+    SELECT
+        msisdn,
+        loan_date,
+        loan_uid,
+        loan_seq
+    FROM state_loan_identity_ranked
+    WHERE identity_rn = 1
+),
+
+same_day_state_loans_ranked AS (
+    SELECT
+        s.msisdn,
+        s.loan_date,
+        s.loan_uid,
+        s.loan_seq,
+
+        ROW_NUMBER() OVER (
+            PARTITION BY s.msisdn, s.loan_date
+            ORDER BY
+                s.loan_seq,
+                s.loan_uid
+        ) AS same_day_state_loan_position
+
+    FROM state_loan_identities s
+),
+
+same_day_state_loan_validation AS (
+    SELECT
+        msisdn,
+        loan_date,
+
+        COUNT(*) AS state_loan_count,
+
+        COUNT(loan_seq) AS nonnull_loan_seq_count,
+
+        COUNT(DISTINCT loan_seq) AS distinct_loan_seq_count
+
+    FROM state_loan_identities
+    GROUP BY
+        msisdn,
+        loan_date
+),
+
+same_day_mapping_quality AS (
+    SELECT
+        d.msisdn,
+        d.loan_date,
+        d.disbursement_count,
+
+        COALESCE(s.state_loan_count, 0)
+            AS state_loan_count,
+
+        CASE
+            WHEN d.nonnull_disbursement_ts_count
+                    = d.disbursement_count
+             AND d.distinct_disbursement_ts_count
+                    = d.disbursement_count
+
+             AND COALESCE(s.nonnull_loan_seq_count, 0)
+                    = COALESCE(s.state_loan_count, 0)
+             AND COALESCE(s.distinct_loan_seq_count, 0)
+                    = COALESCE(s.state_loan_count, 0)
+
+             AND d.disbursement_count
+                    = COALESCE(s.state_loan_count, 0)
+
+            THEN 1
+            ELSE 0
+        END AS mapping_is_unambiguous
+
+    FROM same_day_disbursement_validation d
+
+    LEFT JOIN same_day_state_loan_validation s
+      ON s.msisdn = d.msisdn
+     AND s.loan_date = d.loan_date
+),
+
+loan_id_bridge AS (
+    SELECT
+        d.msisdn,
+        d.disbursement_fid,
+        d.disbursement_ts,
+        d.loan_date,
+
+        d.same_day_disbursement_count,
+
+        s.loan_uid,
+
+        q.mapping_is_unambiguous
+
+    FROM same_day_disbursements_ranked d
+
+    JOIN same_day_mapping_quality q
+      ON q.msisdn = d.msisdn
+     AND q.loan_date = d.loan_date
+
+    LEFT JOIN same_day_state_loans_ranked s
+      ON s.msisdn = d.msisdn
+     AND s.loan_date = d.loan_date
+     AND s.same_day_state_loan_position
+            = d.same_day_disbursement_position
+),
+
+-- ---------------------------------------------------------------------
+-- Scope to the same training/validation cohorts and label-observability
+-- window as the main query, but keep BOTH included and excluded rows.
+-- ---------------------------------------------------------------------
+candidate_rows AS (
+    SELECT
+        d.msisdn,
+        d.disbursement_fid,
+        d.loan_date,
+        d.sales_region,
+        b.same_day_disbursement_count,
+        b.mapping_is_unambiguous,
+        b.loan_uid AS target_loan_uid,
+        c.split
+
+    FROM hive.analytics.tmp_disbursements d
+
+    JOIN loan_id_bridge b
+      ON b.disbursement_fid = d.disbursement_fid
+     AND b.msisdn = d.msisdn
+
+    JOIN cohorts c
+      ON d.loan_date BETWEEN c.cohort_start AND c.cohort_end
+
+    CROSS JOIN state_data_availability a
+
+    WHERE DATE_ADD('day', 30, d.loan_date) <= a.max_state_date
+),
+
+customer_day_status AS (
+    SELECT
+        msisdn,
+        loan_date,
+        split,
+        MAX(sales_region) AS sales_region,
+        MAX(same_day_disbursement_count) AS same_day_disbursement_count,
+        MAX(mapping_is_unambiguous) AS mapping_is_unambiguous
+    FROM candidate_rows
+    GROUP BY msisdn, loan_date, split
+),
+
+-- ---------------------------------------------------------------------
+-- Included groups: real per-loan outcome (day-0-exclusive, matching the
+-- main query's delinquency logic), rolled up to "did any of this
+-- customer-day's loans go bad".
+-- ---------------------------------------------------------------------
+included_loan_outcomes AS (
+    SELECT
+        r.msisdn,
+        r.loan_date,
+        r.disbursement_fid,
+
+        MAX(CASE
+            WHEN ls.state_date > r.loan_date
+             AND ls.state_date <= DATE_ADD('day', 30, r.loan_date)
+            THEN ls.days_aging
+        END) AS max_days_aging_30d,
+
+        MAX(CASE
+            WHEN ls.state_date > r.loan_date
+             AND ls.state_date <= DATE_ADD('day', 30, r.loan_date)
+             AND (
+                    ls.loan_status = 'ANOMALY_OPEN'
+                    OR COALESCE(ls.is_anomaly_open, FALSE)
+                 )
+            THEN 1
+            ELSE 0
+        END) AS rollover_observed_30d
+
+    FROM candidate_rows r
+
+    JOIN hive.analytics.tmp_loan_state ls
+      ON ls.customer_msisdn = r.msisdn
+     AND ls.loan_uid = r.target_loan_uid
+     AND ls.state_date >= r.loan_date
+     AND ls.state_date <= DATE_ADD('day', 30, r.loan_date)
+
+    WHERE r.mapping_is_unambiguous = 1
+
+    GROUP BY r.msisdn, r.loan_date, r.disbursement_fid
+),
+
+included_customer_day_outcome AS (
+    SELECT
+        msisdn,
+        loan_date,
+        MAX(
+            CASE
+                WHEN COALESCE(max_days_aging_30d, 0) > 3
+                  OR rollover_observed_30d = 1
+                THEN 1
+                ELSE 0
+            END
+        ) AS any_bad_30d
+    FROM included_loan_outcomes
+    GROUP BY msisdn, loan_date
+),
+
+-- ---------------------------------------------------------------------
+-- Excluded groups: no reliable per-loan target_loan_uid -- approximate by
+-- pooling every state loan that started on this customer-day, regardless
+-- of position (see caveat at the top of this file).
+-- ---------------------------------------------------------------------
+excluded_customer_day_outcome AS (
+    SELECT
+        cd.msisdn,
+        cd.loan_date,
+        MAX(
+            CASE
+                WHEN ls.state_date > cd.loan_date
+                 AND ls.state_date <= DATE_ADD('day', 30, cd.loan_date)
+                 AND (
+                        COALESCE(ls.days_aging, 0) > 3
+                        OR ls.loan_status = 'ANOMALY_OPEN'
+                        OR COALESCE(ls.is_anomaly_open, FALSE)
+                     )
+                THEN 1
+                ELSE 0
+            END
+        ) AS any_bad_30d_approx
+
+    FROM customer_day_status cd
+
+    JOIN hive.analytics.tmp_loan_state ls
+      ON ls.customer_msisdn = cd.msisdn
+     AND ls.current_loan_start_date = cd.loan_date
+
+    WHERE cd.mapping_is_unambiguous = 0
+
+    GROUP BY cd.msisdn, cd.loan_date
+),
+
+-- ---------------------------------------------------------------------
+-- Lightweight customer-history-segment proxy: distinct prior loans
+-- (any state loan whose current_loan_start_date is strictly before this
+-- customer-day), bucketed. Self-contained -- does not reuse the main
+-- query's full prior_loan_features machinery.
+-- ---------------------------------------------------------------------
+prior_loan_counts AS (
+    SELECT
+        cd.msisdn,
+        cd.loan_date,
+        COUNT(DISTINCT ls.loan_uid) AS prior_loan_count
+
+    FROM customer_day_status cd
+
+    LEFT JOIN hive.analytics.tmp_loan_state ls
+      ON ls.customer_msisdn = cd.msisdn
+     AND ls.current_loan_start_date < cd.loan_date
+     AND ls.loan_status <> 'NEVER_BORROWED'
+
+    GROUP BY cd.msisdn, cd.loan_date
+),
+
+final_rows AS (
+    SELECT
+        cd.msisdn,
+        cd.loan_date,
+        cd.split,
+        cd.sales_region,
+        cd.same_day_disbursement_count,
+        cd.mapping_is_unambiguous,
+
+        CASE
+            WHEN cd.same_day_disbursement_count = 1 THEN '1'
+            WHEN cd.same_day_disbursement_count = 2 THEN '2'
+            WHEN cd.same_day_disbursement_count BETWEEN 3 AND 4 THEN '3-4'
+            ELSE '5+'
+        END AS same_day_count_bucket,
+
+        CASE
+            WHEN pc.prior_loan_count = 0 THEN '0'
+            WHEN pc.prior_loan_count BETWEEN 1 AND 4 THEN '1-4'
+            ELSE '5+'
+        END AS history_bucket,
+
+        CASE
+            WHEN cd.mapping_is_unambiguous = 1 THEN io.any_bad_30d
+            ELSE eo.any_bad_30d_approx
+        END AS approx_bad_30d
+
+    FROM customer_day_status cd
+
+    LEFT JOIN prior_loan_counts pc
+      ON pc.msisdn = cd.msisdn AND pc.loan_date = cd.loan_date
+
+    LEFT JOIN included_customer_day_outcome io
+      ON io.msisdn = cd.msisdn AND io.loan_date = cd.loan_date
+
+    LEFT JOIN excluded_customer_day_outcome eo
+      ON eo.msisdn = cd.msisdn AND eo.loan_date = cd.loan_date
+)
+
+SELECT
+    DATE_TRUNC('month', loan_date) AS loan_month,
+    sales_region,
+    same_day_count_bucket,
+    history_bucket,
+
+    COUNT(*) AS customer_day_count,
+    SUM(same_day_disbursement_count) AS disbursement_count,
+
+    SUM(CASE WHEN mapping_is_unambiguous = 0 THEN 1 ELSE 0 END)
+        AS excluded_customer_days,
+
+    SUM(CASE WHEN mapping_is_unambiguous = 0 THEN same_day_disbursement_count ELSE 0 END)
+        AS excluded_disbursements,
+
+    ROUND(
+        1.0 * SUM(CASE WHEN mapping_is_unambiguous = 0 THEN 1 ELSE 0 END)
+            / COUNT(*),
+        4
+    ) AS exclusion_rate_by_customer_day,
+
+    ROUND(
+        1.0 * SUM(CASE WHEN mapping_is_unambiguous = 0 THEN same_day_disbursement_count ELSE 0 END)
+            / NULLIF(SUM(same_day_disbursement_count), 0),
+        4
+    ) AS exclusion_rate_by_disbursement,
+
+    ROUND(
+        AVG(CASE WHEN mapping_is_unambiguous = 1 THEN approx_bad_30d END),
+        4
+    ) AS included_bad_rate,
+
+    ROUND(
+        AVG(CASE WHEN mapping_is_unambiguous = 0 THEN approx_bad_30d END),
+        4
+    ) AS excluded_bad_rate_approx
+
+FROM final_rows
+GROUP BY
+    DATE_TRUNC('month', loan_date),
+    sales_region,
+    same_day_count_bucket,
+    history_bucket
+ORDER BY
+    loan_month,
+    sales_region,
+    same_day_count_bucket,
+    history_bucket;

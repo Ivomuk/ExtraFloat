@@ -141,9 +141,10 @@ PD_FEATURE_BLACKLIST: frozenset[str] = frozenset(
         "bad_state_1dpd_7d",
         # Label-diagnostic columns -- future-derived, retained by the SQL for
         # label auditing only (see data/Features_Consult.txt). Only 4 of these
-        # 9 are caught by LEAKAGE_PATTERNS's "outcome" substring below; the
-        # other 5 (days_aging / rollover / terminal_state) match no existing
-        # pattern and would otherwise leak straight into the model.
+        # 11 are caught by LEAKAGE_PATTERNS's "outcome" substring below; the
+        # rest (days_aging / rollover / terminal_state / the two
+        # follow-up-observability columns) match no existing pattern and
+        # would otherwise leak straight into the model.
         "max_days_aging_7d",
         "max_days_aging_30d",
         "rollover_observed_7d",
@@ -151,6 +152,8 @@ PD_FEATURE_BLACKLIST: frozenset[str] = frozenset(
         "terminal_state_observed_30d",
         "outcome_state_row_count_30d",
         "outcome_observed_date_count_30d",
+        "post_disbursement_observed_date_count_30d",
+        "sufficient_follow_up_30d",
         "first_outcome_state_date",
         "last_outcome_state_date",
     }

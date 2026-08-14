@@ -1,0 +1,166 @@
+-- =====================================================================
+-- loan_seq vs inserted_ts ordering diagnostic (read-only, not part of
+-- the training pipeline)
+-- SQL dialect: Trino
+--
+-- WHY THIS FILE EXISTS
+--   data/loan_state_query_updated_materialized.txt's disbursement<->
+--   state-loan bridge pairs the Nth disbursement (ordered by
+--   disbursement_ts) with the Nth state loan (ordered by loan_seq) within
+--   a same-day multi-loan group. The validation checks in that file prove
+--   a one-to-one positional mapping exists (counts match, no nulls, no
+--   duplicates) -- they do NOT prove loan_seq is assigned in the same
+--   real-world chronological order as disbursement_ts. That's an
+--   unverified business-rule assumption.
+--
+-- WHAT THIS FILE DOES
+--   hive.analytics.tmp_loan_state carries inserted_ts (an independent,
+--   currently-unused timestamp) alongside loan_seq. For every same-day
+--   multi-loan-state group, ranks loans two ways -- by loan_seq and by
+--   inserted_ts -- and reports how often the two rankings agree. This
+--   does NOT prove the bridge's pairing is correct (inserted_ts is a
+--   proxy, not ground truth for when a loan was actually originated),
+--   but it gives an empirical read on how often the assumption is even
+--   internally consistent by this available signal. Frequent disagreement
+--   would be a concrete reason to distrust the positional bridge;
+--   near-universal agreement would be reassuring (though not proof).
+--
+-- PREREQUISITE
+--   Run data/loan_state_query_updated_materialized.txt's Statement 2
+--   first (hive.analytics.tmp_loan_state must exist and be current).
+--   Read-only; no write access needed.
+-- =====================================================================
+
+WITH state_loan_identity_ranked AS (
+    -- Same dedup as data/loan_state_query_updated_materialized.txt's
+    -- state_loan_identity_ranked, extended to also carry inserted_ts
+    -- through (not selected there today).
+    SELECT
+        ls.customer_msisdn AS msisdn,
+        ls.current_loan_start_date AS loan_date,
+        ls.loan_uid,
+        ls.loan_seq,
+        ls.inserted_ts,
+
+        ROW_NUMBER() OVER (
+            PARTITION BY
+                ls.customer_msisdn,
+                ls.current_loan_start_date,
+                ls.loan_uid
+            ORDER BY
+                ls.state_date,
+                ls.inserted_ts
+        ) AS identity_rn
+
+    FROM hive.analytics.tmp_loan_state ls
+    WHERE ls.loan_status <> 'NEVER_BORROWED'
+      AND ls.current_loan_start_date IS NOT NULL
+      AND ls.loan_uid IS NOT NULL
+      AND ls.inserted_ts IS NOT NULL
+),
+
+state_loan_identities AS (
+    SELECT
+        msisdn,
+        loan_date,
+        loan_uid,
+        loan_seq,
+        inserted_ts
+    FROM state_loan_identity_ranked
+    WHERE identity_rn = 1
+),
+
+group_sizes AS (
+    SELECT
+        msisdn,
+        loan_date,
+        COUNT(*) AS state_loan_count
+    FROM state_loan_identities
+    GROUP BY msisdn, loan_date
+),
+
+-- Only groups with more than one same-day state loan are ambiguity-prone
+-- in the first place -- a single-loan day has nothing to reorder.
+multi_loan_groups AS (
+    SELECT s.*
+    FROM state_loan_identities s
+    JOIN group_sizes g
+      ON g.msisdn = s.msisdn
+     AND g.loan_date = s.loan_date
+    WHERE g.state_loan_count > 1
+),
+
+ranked AS (
+    SELECT
+        msisdn,
+        loan_date,
+        loan_uid,
+        loan_seq,
+        inserted_ts,
+
+        ROW_NUMBER() OVER (
+            PARTITION BY msisdn, loan_date
+            ORDER BY loan_seq, loan_uid
+        ) AS rank_by_seq,
+
+        ROW_NUMBER() OVER (
+            PARTITION BY msisdn, loan_date
+            ORDER BY inserted_ts, loan_uid
+        ) AS rank_by_inserted
+
+    FROM multi_loan_groups
+),
+
+group_agreement AS (
+    SELECT
+        msisdn,
+        loan_date,
+
+        MAX(
+            CASE WHEN rank_by_seq <> rank_by_inserted THEN 1 ELSE 0 END
+        ) AS has_any_mismatch
+
+    FROM ranked
+    GROUP BY msisdn, loan_date
+)
+
+-- ---------------------------------------------------------------------
+-- Summary: overall agreement rate across all same-day multi-loan groups.
+-- ---------------------------------------------------------------------
+SELECT
+    COUNT(*) AS multi_loan_group_count,
+
+    SUM(CASE WHEN has_any_mismatch = 0 THEN 1 ELSE 0 END)
+        AS groups_fully_agreeing,
+
+    SUM(CASE WHEN has_any_mismatch = 1 THEN 1 ELSE 0 END)
+        AS groups_with_mismatch,
+
+    ROUND(
+        1.0 * SUM(CASE WHEN has_any_mismatch = 0 THEN 1 ELSE 0 END)
+            / NULLIF(COUNT(*), 0),
+        4
+    ) AS full_agreement_rate
+
+FROM group_agreement;
+
+-- ---------------------------------------------------------------------
+-- Sample of mismatching groups for manual inspection. Run this second
+-- SELECT separately (comment out the summary SELECT above, or run both
+-- if your client supports multi-statement results).
+-- ---------------------------------------------------------------------
+-- SELECT
+--     r.msisdn,
+--     r.loan_date,
+--     r.loan_uid,
+--     r.loan_seq,
+--     r.inserted_ts,
+--     r.rank_by_seq,
+--     r.rank_by_inserted
+-- FROM ranked r
+-- JOIN group_agreement a
+--   ON a.msisdn = r.msisdn
+--  AND a.loan_date = r.loan_date
+-- WHERE a.has_any_mismatch = 1
+-- ORDER BY r.msisdn, r.loan_date, r.rank_by_seq
+-- LIMIT 50;

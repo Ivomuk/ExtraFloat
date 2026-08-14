@@ -43,6 +43,8 @@ def _loan_df(n: int = 100) -> pd.DataFrame:
             "terminal_state_observed_30d": rng.integers(0, 2, n),
             "outcome_state_row_count_30d": rng.integers(0, 30, n),
             "outcome_observed_date_count_30d": rng.integers(0, 30, n),
+            "post_disbursement_observed_date_count_30d": rng.integers(0, 30, n),
+            "sufficient_follow_up_30d": rng.integers(0, 2, n),
             "first_outcome_state_date": pd.to_datetime("2025-10-01"),
             "last_outcome_state_date": pd.to_datetime("2025-10-28"),
         }

@@ -1249,9 +1249,37 @@ target_loan_outcomes AS (
         d.disbursement_fid,
         d.msisdn,
         d.split,
+        d.label_horizon_7d_end,
+        d.label_horizon_30d_end,
 
         COUNT(ls.state_date)
             AS outcome_state_row_count_30d,
+
+        -- Label-observability signals: outcome_state_row_count_30d above
+        -- (and outcome_observed_date_count_30d below) are day-0-inclusive
+        -- (the join itself starts at ls.state_date >= d.loan_date), so a
+        -- lone day-0 row satisfies "> 0" trivially with zero real
+        -- post-disbursement observation. These two are scoped to
+        -- ls.state_date > d.loan_date, matching every delinquency/
+        -- rollover/terminal-state calculation below, and are what the
+        -- corrected loan_labels eligibility gate actually uses.
+        COUNT(DISTINCT CASE
+            WHEN ls.state_date > d.loan_date
+             AND ls.state_date <= d.label_horizon_7d_end
+            THEN ls.state_date
+        END) AS post_disbursement_observed_date_count_7d,
+
+        COUNT(DISTINCT CASE
+            WHEN ls.state_date > d.loan_date
+             AND ls.state_date <= d.label_horizon_30d_end
+            THEN ls.state_date
+        END) AS post_disbursement_observed_date_count_30d,
+
+        MAX(CASE
+            WHEN ls.state_date > d.loan_date
+             AND ls.state_date <= d.label_horizon_30d_end
+            THEN ls.state_date
+        END) AS last_post_disbursement_state_date_30d,
 
         COUNT(DISTINCT ls.state_date)
             AS outcome_observed_date_count_30d,
@@ -1336,13 +1364,30 @@ target_loan_outcomes AS (
     GROUP BY
         d.disbursement_fid,
         d.msisdn,
-        d.split
+        d.split,
+        d.label_horizon_7d_end,
+        d.label_horizon_30d_end
 ),
 
 -- ---------------------------------------------------------------------
 -- Binary labels
+--
+-- Label-observability fix: outcome_state_row_count_30d alone is
+-- day-0-inclusive, so a target loan with exactly one state row on its
+-- disbursement date and nothing for days 1-30 would previously pass
+-- "outcome_state_row_count_30d > 0" and be silently admitted as a
+-- confirmed-good outcome despite zero real post-disbursement
+-- observation. Fixed via the standard asymmetric "known-bad shortcut"
+-- for censored-outcome problems: trust any observed bad signal
+-- regardless of follow-up completeness (bad_state_3dpd_30d=1 needs no
+-- extra evidence -- it's already derived only from ls.state_date >
+-- d.loan_date rows), or a definitively resolved terminal state, or
+-- (for a "good" label with neither) require the last post-disbursement
+-- observation to fall within 5 days of the 30-day horizon end --
+-- otherwise there's no way to distinguish "confirmed good" from
+-- "we simply stopped observing this loan".
 -- ---------------------------------------------------------------------
-loan_labels AS (
+loan_labels_raw AS (
     SELECT
         disbursement_fid,
         msisdn,
@@ -1370,11 +1415,46 @@ loan_labels AS (
 
         outcome_state_row_count_30d,
         outcome_observed_date_count_30d,
+        post_disbursement_observed_date_count_7d,
+        post_disbursement_observed_date_count_30d,
         first_outcome_state_date,
-        last_outcome_state_date
+        last_outcome_state_date,
+
+        CASE
+            WHEN post_disbursement_observed_date_count_30d > 0
+             AND last_post_disbursement_state_date_30d
+                    >= DATE_ADD('day', -5, label_horizon_30d_end)
+            THEN 1
+            ELSE 0
+        END AS sufficient_follow_up_30d
 
     FROM target_loan_outcomes
-    WHERE outcome_state_row_count_30d > 0
+),
+
+loan_labels AS (
+    SELECT
+        disbursement_fid,
+        msisdn,
+        split,
+        bad_state_1dpd_7d,
+        bad_state_3dpd_30d,
+        max_days_aging_7d,
+        max_days_aging_30d,
+        rollover_observed_7d,
+        rollover_observed_30d,
+        terminal_state_observed_30d,
+        outcome_state_row_count_30d,
+        outcome_observed_date_count_30d,
+        post_disbursement_observed_date_count_7d,
+        post_disbursement_observed_date_count_30d,
+        first_outcome_state_date,
+        last_outcome_state_date,
+        sufficient_follow_up_30d
+
+    FROM loan_labels_raw
+    WHERE bad_state_3dpd_30d = 1          -- known-bad shortcut
+       OR terminal_state_observed_30d = 1 -- definitively resolved
+       OR sufficient_follow_up_30d = 1    -- enough follow-up to trust "good"
 )
 
 -- ---------------------------------------------------------------------
@@ -1550,6 +1630,8 @@ SELECT
     l.terminal_state_observed_30d,
     l.outcome_state_row_count_30d,
     l.outcome_observed_date_count_30d,
+    l.post_disbursement_observed_date_count_30d,
+    l.sufficient_follow_up_30d,
     l.first_outcome_state_date,
     l.last_outcome_state_date
 
