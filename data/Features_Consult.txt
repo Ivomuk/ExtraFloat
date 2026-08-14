@@ -8,8 +8,25 @@ rollover_observed_30d
 terminal_state_observed_30d
 outcome_state_row_count_30d
 outcome_observed_date_count_30d
+post_disbursement_observed_date_count_7d
+post_disbursement_observed_date_count_30d
 first_outcome_state_date
 last_outcome_state_date
+observed_closure_date_30d
+closure_observation_state_date_30d
+required_observation_end_date_30d
+expected_observed_date_count_30d
+observed_date_count_to_required_end_30d
+last_state_date_to_required_end_30d
+follow_up_coverage_ratio_30d
+meets_coverage_ratio_30d
+near_horizon_observation_30d
+confirmed_good_30d
+has_post_disbursement_state_30d
+fails_coverage_ratio_30d
+fails_near_horizon_30d
+label_eligible_30d
+label_eligibility_reason_30d
 They are retained only for label auditing and would leak the outcome if treated as predictors.
 
 
@@ -235,6 +252,74 @@ the observation window was truncated;
 matching stopped unexpectedly.
 
 For a settled loan, an early last date can be perfectly valid. For a non-terminal loan, an early last date might indicate missing data.
+
+post_disbursement_observed_date_count_7d
+l.post_disbursement_observed_date_count_7d
+The number of distinct calendar dates observed strictly after the loan date, within the 7-day outcome window (day 0 excluded). The 30-day sibling of this column, post_disbursement_observed_date_count_30d, already existed; this is its 7-day counterpart, added so the same observability check can be run at either horizon.
+
+Label-eligibility columns (bounded coverage ratio + near-horizon gate)
+
+The columns below implement the asymmetric censoring policy used to derive label_eligible_30d: a known bad is trusted regardless of follow-up completeness, but a "good" label requires bounded, near-horizon observation evidence before it is trusted. See data/loan_state_query_updated_materialized.txt's statement-4 header comment for the full policy write-up.
+
+observed_closure_date_30d
+l.observed_closure_date_30d
+The earliest closure_date genuinely observed (state_date >= closure_date, ruling out a backfilled/provisional value) within the 30-day horizon. NULL if no closure was observed in-window.
+
+closure_observation_state_date_30d
+l.closure_observation_state_date_30d
+The state_date on which observed_closure_date_30d was first recorded. Useful for spotting ingestion latency between when a loan actually closed and when that closure became visible in the state feed.
+
+required_observation_end_date_30d
+l.required_observation_end_date_30d
+The date through which follow-up is required for this loan: the observed closure date if one occurred in-window, otherwise the full label_horizon_30d_end. A loan that closes early gets a correspondingly shorter, achievable observation requirement instead of always being held to the full 30 days.
+
+expected_observed_date_count_30d
+l.expected_observed_date_count_30d
+DATE_DIFF('day', loan_date, required_observation_end_date_30d) -- the denominator of follow_up_coverage_ratio_30d.
+
+observed_date_count_to_required_end_30d
+l.observed_date_count_to_required_end_30d
+The number of distinct calendar dates actually observed, strictly after loan_date, up through required_observation_end_date_30d. The numerator of follow_up_coverage_ratio_30d.
+
+last_state_date_to_required_end_30d
+l.last_state_date_to_required_end_30d
+The latest state_date observed, strictly after loan_date, up through required_observation_end_date_30d. Feeds near_horizon_observation_30d.
+
+follow_up_coverage_ratio_30d
+l.follow_up_coverage_ratio_30d
+observed_date_count_to_required_end_30d / expected_observed_date_count_30d. NULL only when expected_observed_date_count_30d is 0, which should never happen for a valid observation window (required_observation_end_date_30d is constructed to always be strictly after loan_date) -- a NULL here is a data-integrity signal (label_eligibility_reason_30d = 'CENSORED_INVALID_OBSERVATION_WINDOW'), not ordinary censoring.
+
+meets_coverage_ratio_30d
+l.meets_coverage_ratio_30d
+1 iff follow_up_coverage_ratio_30d >= 0.8. This is the single place the 0.8 threshold is evaluated; every other coverage-related column (fails_coverage_ratio_30d, confirmed_good_30d, label_eligibility_reason_30d) derives from this boolean rather than re-checking the literal.
+
+near_horizon_observation_30d
+l.near_horizon_observation_30d
+1 iff at least one post-disbursement date was observed and the last such date falls within 5 days of required_observation_end_date_30d. Distinguishes "confirmed good" from "we simply stopped observing this loan".
+
+confirmed_good_30d
+l.confirmed_good_30d
+1 iff bad_state_3dpd_30d = 0 AND observed_date_count_to_required_end_30d > 0 AND meets_coverage_ratio_30d = 1 AND near_horizon_observation_30d = 1. The "good" half of the asymmetric censoring rule -- deliberately stricter than merely "not observed bad".
+
+has_post_disbursement_state_30d
+l.has_post_disbursement_state_30d
+1 iff observed_date_count_to_required_end_30d > 0 -- whether any post-disbursement state was observed at all, independent of coverage ratio.
+
+fails_coverage_ratio_30d
+l.fails_coverage_ratio_30d
+The complement of meets_coverage_ratio_30d (1 iff meets_coverage_ratio_30d = 0). Provided as an explicit failure flag alongside label_eligibility_reason_30d, since the prioritized reason code can't simultaneously express every independent failure condition for a row.
+
+fails_near_horizon_30d
+l.fails_near_horizon_30d
+The complement of near_horizon_observation_30d. Same rationale as fails_coverage_ratio_30d.
+
+label_eligible_30d
+l.label_eligible_30d
+1 iff bad_state_3dpd_30d = 1 OR confirmed_good_30d = 1. This is the column pd_model/preprocessing/loan_history_features.py filters on to build the modelling population -- every CENSORED_* row (label_eligible_30d = 0) is dropped before bad_state is derived, but is retained in the full audit export (df_diagnostics) for review.
+
+label_eligibility_reason_30d
+l.label_eligibility_reason_30d
+One of: KNOWN_BAD, CONFIRMED_GOOD_TERMINAL, CONFIRMED_GOOD_HORIZON, CENSORED_NO_POST_DISBURSEMENT_STATE, CENSORED_INVALID_OBSERVATION_WINDOW, CENSORED_SPARSE_FOLLOW_UP, CENSORED_EARLY_LAST_OBSERVATION, CENSORED_OTHER. A prioritized, human-readable explanation of why label_eligible_30d has the value it does -- useful for auditing the censored population's composition (e.g. is exclusion dominated by sparse follow-up or by early-observation cutoff?). CENSORED_INVALID_OBSERVATION_WINDOW should never appear in a healthy build; a nonzero count is a build-blocking data-integrity failure, not routine censoring.
 
 
 FEATURE_COLUMNS = [

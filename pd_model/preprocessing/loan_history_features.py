@@ -10,17 +10,18 @@ unused -- this module has zero dependency on it, so the old module can be
 deleted later without touching this one.
 
 Provides:
-- ``LABEL_DIAGNOSTIC_COLUMNS``       -- the 11 future-derived columns that
-                                       must never reach the model (label
-                                       leakage); see
-                                       ``data/Features_Consult.txt``. Includes
-                                       ``post_disbursement_observed_date_count_30d``
-                                       / ``sufficient_follow_up_30d``, added
-                                       alongside the fix for a label-
-                                       observability gap where a lone
-                                       day-0 state row could satisfy the
-                                       old eligibility gate with zero real
-                                       post-disbursement observation.
+- ``LABEL_DIAGNOSTIC_COLUMNS``       -- the future-derived columns that must
+                                       never reach the model (label leakage);
+                                       see ``data/Features_Consult.txt``.
+                                       Includes the bounded coverage-ratio /
+                                       label-eligibility columns
+                                       (``follow_up_coverage_ratio_30d``,
+                                       ``meets_coverage_ratio_30d``,
+                                       ``label_eligible_30d``,
+                                       ``label_eligibility_reason_30d``, etc.)
+                                       that ``run_phase_2_2_loan_history_pd_features()``
+                                       uses to filter the modelling population
+                                       before stripping them.
 - ``SNAPSHOT_TO_TRAINING_COLUMN_MAP`` -- column-name correspondence between
                                        ``data/loan_history_snapshot_query.txt``
                                        (scoring time) and
@@ -79,10 +80,25 @@ LABEL_DIAGNOSTIC_COLUMNS: tuple[str, ...] = (
     "terminal_state_observed_30d",
     "outcome_state_row_count_30d",
     "outcome_observed_date_count_30d",
+    "post_disbursement_observed_date_count_7d",
     "post_disbursement_observed_date_count_30d",
-    "sufficient_follow_up_30d",
     "first_outcome_state_date",
     "last_outcome_state_date",
+    "observed_closure_date_30d",
+    "closure_observation_state_date_30d",
+    "required_observation_end_date_30d",
+    "expected_observed_date_count_30d",
+    "observed_date_count_to_required_end_30d",
+    "last_state_date_to_required_end_30d",
+    "follow_up_coverage_ratio_30d",
+    "meets_coverage_ratio_30d",
+    "near_horizon_observation_30d",
+    "confirmed_good_30d",
+    "has_post_disbursement_state_30d",
+    "fails_coverage_ratio_30d",
+    "fails_near_horizon_30d",
+    "label_eligible_30d",
+    "label_eligibility_reason_30d",
 )
 
 # Identifiers / labels that must be present on the incoming training frame.
@@ -92,6 +108,9 @@ _TRAINING_REQUIRED_COLUMNS: list[str] = [
     "split",
     "loan_date",
     "bad_state_3dpd_30d",
+    "bad_state_1dpd_7d",
+    "label_eligible_30d",
+    "follow_up_coverage_ratio_30d",
 ]
 
 # data/loan_history_snapshot_query.txt column -> data/loan_state_query_updated_materialized.txt
@@ -324,6 +343,74 @@ def derive_thin_file_flag(
 # ======================================================================== #
 
 
+def _validate_label_observability(df: pd.DataFrame) -> None:
+    """
+    Hard-fail data-integrity checks on the full, unfiltered training frame,
+    called before it is split into the audit frame and the modelling
+    population. Python-side echo of the pre-flight SQL checks documented in
+    ``data/loan_state_query_updated_materialized.txt`` -- catches the same
+    class of problem without depending on someone having run those checks
+    first.
+
+    Mutates *df* in place: once every row has passed validation, writes the
+    coerced numeric ``follow_up_coverage_ratio_30d`` back onto it, so
+    ``df_diagnostics`` and the audit summary's ``.mean()`` aggregation
+    aren't silently built from an object-typed column.
+
+    Raises:
+        DataAlignmentError: On a duplicated ``disbursement_fid``, a
+                            non-numeric, null, or out-of-[0, 1]-range
+                            ``follow_up_coverage_ratio_30d``.
+    """
+    dup_mask = df["disbursement_fid"].duplicated(keep=False)
+    if dup_mask.any():
+        raise DataAlignmentError(
+            f"[run_phase_2_2_loan_history] {int(dup_mask.sum())} rows share "
+            "a duplicated disbursement_fid -- a target loan must map to "
+            "exactly one row"
+        )
+
+    raw_ratio = df["follow_up_coverage_ratio_30d"]
+    coverage_ratio = pd.to_numeric(raw_ratio, errors="coerce")
+
+    non_numeric = raw_ratio.notna() & coverage_ratio.isna()
+    if non_numeric.any():
+        raise DataAlignmentError(
+            f"[run_phase_2_2_loan_history] {int(non_numeric.sum())} rows "
+            "have a non-numeric follow_up_coverage_ratio_30d"
+        )
+
+    missing_ratio = raw_ratio.isna()
+    if missing_ratio.any():
+        raise DataAlignmentError(
+            f"[run_phase_2_2_loan_history] {int(missing_ratio.sum())} rows "
+            "have a null follow_up_coverage_ratio_30d -- the SQL only "
+            "produces NULL here for CENSORED_INVALID_OBSERVATION_WINDOW, "
+            "itself a build-blocking integrity failure (see the pre-flight "
+            "checks in data/loan_state_query_updated_materialized.txt); a "
+            "genuinely unobserved loan with a valid window yields "
+            "0.0 / positive, never NULL"
+        )
+
+    # missing_ratio already ruled out nulls above, so coverage_ratio is
+    # fully non-null here -- no separate notna() guard needed.
+    out_of_range = (coverage_ratio > 1.0 + 1e-9) | (coverage_ratio < -1e-9)
+    if out_of_range.any():
+        raise DataAlignmentError(
+            f"[run_phase_2_2_loan_history] {int(out_of_range.sum())} rows "
+            "have follow_up_coverage_ratio_30d outside [0, 1] -- inspect "
+            "closure dates, loan mapping, and date bounds in the source "
+            "SQL export (see the pre-flight checks in "
+            "data/loan_state_query_updated_materialized.txt)"
+        )
+
+    # Every row now has a finite, in-range ratio -- write the coerced
+    # numeric dtype back so df_diagnostics and the audit summary's
+    # coverage_ratio_mean=(..., "mean") aren't silently built from an
+    # object-typed column.
+    df["follow_up_coverage_ratio_30d"] = coverage_ratio
+
+
 def run_phase_2_2_loan_history_pd_features(
     df_loans: pd.DataFrame,
     cfg: ModelConfig = DEFAULT_CONFIG,
@@ -333,19 +420,33 @@ def run_phase_2_2_loan_history_pd_features(
     Prepare the loan-level training frame produced by
     ``data/loan_state_query_updated_materialized.txt`` for modelling.
 
+    The SQL export is unfiltered -- every target loan, including
+    ``CENSORED_*`` rows, is present -- so eligibility filtering happens
+    here, not in SQL, and must run *before* label-diagnostic columns are
+    stripped (``label_eligible_30d`` is itself one of them).
+
     Steps
     -----
-    1. Validate required id/label columns.
-    2. Move the 9 label-diagnostic columns out of the feature-eligible frame
-       before anything reaches feature classification -- they are retained
-       separately, for label auditing only (see data/Features_Consult.txt).
+    1. Validate required id/label columns, including
+       ``label_eligible_30d`` and ``follow_up_coverage_ratio_30d``.
+    2. Normalise the join key: ``msisdn`` -> ``agent_msisdn``.
+    3. ``_validate_label_observability()``: hard-fail on duplicated
+       ``disbursement_fid`` or an invalid ``follow_up_coverage_ratio_30d``;
+       normalizes the ratio to numeric dtype in place.
+    4. Validate ``label_eligible_30d`` is strictly binary; normalize to
+       ``int8`` in place.
+    5. Build the full, unfiltered audit frame from the now-normalized
+       frame (every target loan, ``CENSORED_*`` rows included).
+    6. Filter to the modelling population via ``label_eligible_30d``.
+    7. Derive ``bad_state`` from ``bad_state_3dpd_30d``.
+    8. Strip label-diagnostic columns from the now-filtered modelling
+       frame -- they are retained separately, in the audit frame, for
+       label auditing only (see ``data/Features_Consult.txt``).
        ``bad_state_1dpd_7d`` (the secondary label) is NOT stripped here --
        it stays in the returned frame as a monitoring signal, but must
        never be used as a feature (enforced via
        ``feature_config.PD_FEATURE_BLACKLIST``, not by this function).
-    3. Normalise the join key: ``msisdn`` -> ``agent_msisdn``.
-    4. Derive ``bad_state`` from ``bad_state_3dpd_30d``.
-    5. Derive ``thin_file_flag`` and related flags from
+    9. Derive ``thin_file_flag`` and related flags from
        ``prior_loan_count_180d`` / ``prior_active_loan_months_180d``
        (see ``derive_thin_file_flag`` docstring).
 
@@ -356,9 +457,15 @@ def run_phase_2_2_loan_history_pd_features(
 
     Returns:
         Tuple of ``(df_pd_out, df_diagnostics)`` where *df_diagnostics*
-        holds the 9 label-diagnostic columns (keyed by ``agent_msisdn``,
-        ``disbursement_fid``) for label auditing, kept out of the modelling
-        frame.
+        holds the full, unfiltered audit frame (every target loan,
+        ``CENSORED_*`` rows included) for label auditing, kept out of the
+        modelling frame.
+
+    Raises:
+        DataAlignmentError: See ``_validate_label_observability()``; also
+                            raised if ``label_eligible_30d`` is not
+                            strictly binary, or if censored rows remain
+                            after eligibility filtering.
     """
     df = df_loans.copy()
     df.columns = [c.strip() for c in df.columns]
@@ -370,19 +477,51 @@ def run_phase_2_2_loan_history_pd_features(
         df = df.rename(columns={"msisdn": "agent_msisdn"})
     df["agent_msisdn"] = df["agent_msisdn"].astype(str).str.strip()
 
-    # -- Split off label-diagnostic columns before feature classification --
-    present_diagnostics = [c for c in LABEL_DIAGNOSTIC_COLUMNS if c in df.columns]
-    if present_diagnostics:
-        df_diagnostics = df[["agent_msisdn", "disbursement_fid"] + present_diagnostics].copy()
-        df = df.drop(columns=present_diagnostics)
-        logger.info(
-            "run_phase_2_2_loan_history: moved %d label-diagnostic column(s) out of the "
-            "feature-eligible frame (retained separately for label auditing only): %s",
-            len(present_diagnostics),
-            present_diagnostics,
+    # -- Validate + normalize on the full frame, before any filtering --
+    _validate_label_observability(df)
+
+    eligibility = pd.to_numeric(df["label_eligible_30d"], errors="coerce")
+    if eligibility.isna().any() or not eligibility.isin([0, 1]).all():
+        raise DataAlignmentError(
+            "[run_phase_2_2_loan_history] label_eligible_30d must be "
+            "strictly 0/1 with no nulls"
         )
-    else:
-        df_diagnostics = pd.DataFrame(columns=["agent_msisdn", "disbursement_fid"])
+    df["label_eligible_30d"] = eligibility.astype("int8")
+
+    # -- Build the full audit frame from validated, normalized data --
+    # every target loan, CENSORED_* rows included.
+    audit_cols = list(
+        dict.fromkeys(
+            c
+            for c in [
+                "agent_msisdn",
+                "disbursement_fid",
+                "target_loan_uid",
+                "split",
+                "loan_date",
+                "bad_state_3dpd_30d",
+                "bad_state_1dpd_7d",
+                *LABEL_DIAGNOSTIC_COLUMNS,
+            ]
+            if c in df.columns
+        )
+    )
+    df_diagnostics = df[audit_cols].copy()
+
+    # -- Filter to the modelling population --
+    n_before = len(df)
+    df = df.loc[df["label_eligible_30d"].eq(1)].copy()
+    logger.info(
+        "run_phase_2_2_loan_history: dropped %d/%d censored rows "
+        "(label_eligible_30d=0) before label derivation",
+        n_before - len(df),
+        n_before,
+    )
+    if not df["label_eligible_30d"].eq(1).all():
+        raise DataAlignmentError(
+            "[run_phase_2_2_loan_history] censored rows remained after "
+            "label eligibility filtering"
+        )
 
     # -- Label --
     # df is already exclusively owned by this function (copied from
@@ -390,6 +529,16 @@ def run_phase_2_2_loan_history_pd_features(
     # of compute_bad_flags_loan_level(), which would re-copy the input again
     # only to protect a contract nothing here relies on.
     _apply_bad_flags_loan_level_inplace(df)
+
+    # -- Strip label-diagnostic columns now that filtering is done --
+    present_diagnostics = [c for c in LABEL_DIAGNOSTIC_COLUMNS if c in df.columns]
+    df = df.drop(columns=present_diagnostics)
+    logger.info(
+        "run_phase_2_2_loan_history: stripped %d label-diagnostic column(s) from the "
+        "modelling frame (retained separately in df_diagnostics): %s",
+        len(present_diagnostics),
+        present_diagnostics,
+    )
 
     # -- Thin-file classification --
     _apply_thin_file_flag_inplace(df, cfg)

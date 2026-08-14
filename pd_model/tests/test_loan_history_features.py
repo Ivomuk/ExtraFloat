@@ -23,13 +23,27 @@ def _loan_df(n: int = 100) -> pd.DataFrame:
     rng = np.random.default_rng(0)
     n_train = n // 2
     split = ["train"] * n_train + ["validation"] * (n - n_train)
+
+    bad_state_3dpd_30d = rng.integers(0, 2, n)
+    # confirmed_good_30d can only be 1 where bad_state_3dpd_30d is 0 --
+    # mirrors the SQL's confirmed_good_30d definition (bad_state_3dpd_30d=0
+    # is one of its own conjuncts).
+    confirmed_good_30d = np.where(bad_state_3dpd_30d == 1, 0, rng.integers(0, 2, n))
+    label_eligible_30d = ((bad_state_3dpd_30d == 1) | (confirmed_good_30d == 1)).astype(int)
+    label_eligibility_reason_30d = np.where(
+        bad_state_3dpd_30d == 1,
+        "KNOWN_BAD",
+        np.where(confirmed_good_30d == 1, "CONFIRMED_GOOD_HORIZON", "CENSORED_SPARSE_FOLLOW_UP"),
+    )
+
     return pd.DataFrame(
         {
             "msisdn": [f"256{i:07d}" for i in range(n)],
             "disbursement_fid": [f"D{i:06d}" for i in range(n)],
+            "target_loan_uid": [f"L{i:06d}" for i in range(n)],
             "split": split,
             "loan_date": pd.to_datetime("2025-09-30"),
-            "bad_state_3dpd_30d": rng.integers(0, 2, n),
+            "bad_state_3dpd_30d": bad_state_3dpd_30d,
             "bad_state_1dpd_7d": rng.integers(0, 2, n),
             "observed_prior_loan_count": rng.integers(0, 10, n),
             "prior_loan_count_180d": rng.integers(0, 10, n),
@@ -43,10 +57,25 @@ def _loan_df(n: int = 100) -> pd.DataFrame:
             "terminal_state_observed_30d": rng.integers(0, 2, n),
             "outcome_state_row_count_30d": rng.integers(0, 30, n),
             "outcome_observed_date_count_30d": rng.integers(0, 30, n),
+            "post_disbursement_observed_date_count_7d": rng.integers(0, 7, n),
             "post_disbursement_observed_date_count_30d": rng.integers(0, 30, n),
-            "sufficient_follow_up_30d": rng.integers(0, 2, n),
             "first_outcome_state_date": pd.to_datetime("2025-10-01"),
             "last_outcome_state_date": pd.to_datetime("2025-10-28"),
+            "observed_closure_date_30d": pd.NaT,
+            "closure_observation_state_date_30d": pd.NaT,
+            "required_observation_end_date_30d": pd.to_datetime("2025-10-30"),
+            "expected_observed_date_count_30d": rng.integers(1, 31, n),
+            "observed_date_count_to_required_end_30d": rng.integers(0, 31, n),
+            "last_state_date_to_required_end_30d": pd.to_datetime("2025-10-28"),
+            "follow_up_coverage_ratio_30d": rng.uniform(0, 1, n).round(4),
+            "meets_coverage_ratio_30d": rng.integers(0, 2, n),
+            "near_horizon_observation_30d": rng.integers(0, 2, n),
+            "confirmed_good_30d": confirmed_good_30d,
+            "has_post_disbursement_state_30d": rng.integers(0, 2, n),
+            "fails_coverage_ratio_30d": rng.integers(0, 2, n),
+            "fails_near_horizon_30d": rng.integers(0, 2, n),
+            "label_eligible_30d": label_eligible_30d,
+            "label_eligibility_reason_30d": label_eligibility_reason_30d,
         }
     )
 
@@ -205,10 +234,29 @@ class TestRunPhase22LoanHistoryPdFeatures:
         assert "agent_msisdn" in df_out.columns
         assert "msisdn" not in df_out.columns
 
-    def test_row_count_preserved(self):
+    def test_output_row_count_matches_eligible_rows_only(self):
+        """The SQL export is unfiltered -- censored rows must be dropped
+        here, in Python, before label derivation. Filtering happens on
+        label_eligible_30d, not on row count preservation."""
         df = _loan_df()
+        n_eligible = int(df["label_eligible_30d"].eq(1).sum())
+        assert 0 < n_eligible < len(df), "fixture must contain both eligible and censored rows"
         df_out, _diag = run_phase_2_2_loan_history_pd_features(df)
-        assert len(df_out) == len(df)
+        assert len(df_out) == n_eligible
+
+    def test_diagnostics_row_count_matches_full_unfiltered_input(self):
+        """df_diagnostics is the full audit export -- every target loan,
+        CENSORED_* rows included -- built before eligibility filtering."""
+        df = _loan_df()
+        _df_out, df_diag = run_phase_2_2_loan_history_pd_features(df)
+        assert len(df_diag) == len(df)
+
+    def test_censored_rows_present_in_diagnostics_but_not_output(self):
+        df = _loan_df()
+        censored_fids = set(df.loc[df["label_eligible_30d"].eq(0), "disbursement_fid"])
+        df_out, df_diag = run_phase_2_2_loan_history_pd_features(df)
+        assert censored_fids.issubset(set(df_diag["disbursement_fid"]))
+        assert censored_fids.isdisjoint(set(df_out["disbursement_fid"]))
 
     def test_bad_state_and_thin_file_flag_present(self):
         df_out, _diag = run_phase_2_2_loan_history_pd_features(_loan_df())
@@ -216,7 +264,7 @@ class TestRunPhase22LoanHistoryPdFeatures:
         assert "thin_file_flag" in df_out.columns
 
     def test_label_diagnostics_stripped_from_feature_frame(self):
-        """The 9 label-diagnostic columns must never reach the feature-eligible
+        """Label-diagnostic columns must never reach the feature-eligible
         frame -- they are future-derived and would leak the label."""
         df_out, _diag = run_phase_2_2_loan_history_pd_features(_loan_df())
         for col in LABEL_DIAGNOSTIC_COLUMNS:
@@ -231,6 +279,17 @@ class TestRunPhase22LoanHistoryPdFeatures:
             assert col in df_diag.columns
         assert len(df_diag) == len(df)
 
+    def test_label_eligible_matches_known_bad_or_confirmed_good_identity(self):
+        """label_eligible_30d == (bad_state_3dpd_30d | confirmed_good_30d)
+        for every row of the full audit frame -- pins the eligibility
+        identity the SQL and Python layers must agree on."""
+        df = _loan_df()
+        _df_out, df_diag = run_phase_2_2_loan_history_pd_features(df)
+        expected = (
+            df_diag["bad_state_3dpd_30d"].astype(int) | df_diag["confirmed_good_30d"].astype(int)
+        )
+        assert (df_diag["label_eligible_30d"].astype(int) == expected).all()
+
     def test_secondary_label_not_stripped(self):
         """bad_state_1dpd_7d is a monitoring signal, not a diagnostic -- it
         stays in the returned frame (blacklist keeps it out of features,
@@ -243,13 +302,71 @@ class TestRunPhase22LoanHistoryPdFeatures:
         with pytest.raises(ValueError, match="disbursement_fid"):
             run_phase_2_2_loan_history_pd_features(df)
 
-    def test_works_without_diagnostics_present(self):
-        """Diagnostics are optional inputs -- an already-stripped file must
-        still work, returning an empty (but correctly keyed) diagnostics frame."""
-        df = _loan_df().drop(columns=list(LABEL_DIAGNOSTIC_COLUMNS))
+    def test_works_without_optional_diagnostics_present(self):
+        """Only label_eligible_30d and follow_up_coverage_ratio_30d are
+        required (needed for filtering); every other diagnostic column is
+        an optional input -- an export missing them must still work."""
+        optional_diagnostics = [
+            c for c in LABEL_DIAGNOSTIC_COLUMNS if c not in ("label_eligible_30d", "follow_up_coverage_ratio_30d")
+        ]
+        df = _loan_df().drop(columns=optional_diagnostics)
+        n_eligible = int(df["label_eligible_30d"].eq(1).sum())
         df_out, df_diag = run_phase_2_2_loan_history_pd_features(df)
-        assert len(df_out) == len(df)
-        assert list(df_diag.columns) == ["agent_msisdn", "disbursement_fid"]
+        assert len(df_out) == n_eligible
+        assert len(df_diag) == len(df)
+
+    def test_raises_on_duplicate_disbursement_fid(self):
+        df = _loan_df()
+        df = pd.concat([df, df.iloc[[0]]], ignore_index=True)
+        with pytest.raises(DataAlignmentError, match="duplicated disbursement_fid"):
+            run_phase_2_2_loan_history_pd_features(df)
+
+    def test_raises_on_non_numeric_coverage_ratio(self):
+        df = _loan_df()
+        df["follow_up_coverage_ratio_30d"] = df["follow_up_coverage_ratio_30d"].astype(object)
+        df.loc[0, "follow_up_coverage_ratio_30d"] = "not-a-number"
+        with pytest.raises(DataAlignmentError, match="non-numeric follow_up_coverage_ratio_30d"):
+            run_phase_2_2_loan_history_pd_features(df)
+
+    def test_raises_on_null_coverage_ratio(self):
+        """A genuinely null ratio (distinct from an unparseable string) must
+        also hard-fail -- the SQL only produces NULL for
+        CENSORED_INVALID_OBSERVATION_WINDOW, itself a build-blocking
+        integrity failure, never for an ordinary unobserved-but-valid loan."""
+        df = _loan_df()
+        df.loc[0, "follow_up_coverage_ratio_30d"] = np.nan
+        with pytest.raises(DataAlignmentError, match="null follow_up_coverage_ratio_30d"):
+            run_phase_2_2_loan_history_pd_features(df)
+
+    def test_raises_on_out_of_range_coverage_ratio(self):
+        df = _loan_df()
+        df.loc[0, "follow_up_coverage_ratio_30d"] = 1.5
+        with pytest.raises(DataAlignmentError, match="outside \\[0, 1\\]"):
+            run_phase_2_2_loan_history_pd_features(df)
+
+    def test_raises_on_negative_coverage_ratio(self):
+        df = _loan_df()
+        df.loc[0, "follow_up_coverage_ratio_30d"] = -0.1
+        with pytest.raises(DataAlignmentError, match="outside \\[0, 1\\]"):
+            run_phase_2_2_loan_history_pd_features(df)
+
+    def test_raises_on_non_binary_label_eligible(self):
+        df = _loan_df()
+        df.loc[0, "label_eligible_30d"] = 2
+        with pytest.raises(DataAlignmentError, match="strictly 0/1"):
+            run_phase_2_2_loan_history_pd_features(df)
+
+    def test_coverage_ratio_and_eligibility_normalized_to_numeric_dtype(self):
+        """Validated values are written back onto the frame before
+        df_diagnostics is built -- otherwise a numeric-string-typed column
+        can pass validation but stay object-dtyped, silently breaking a
+        downstream .mean() aggregation (e.g. the audit summary)."""
+        df = _loan_df()
+        df["follow_up_coverage_ratio_30d"] = df["follow_up_coverage_ratio_30d"].astype(str)
+        df_out, df_diag = run_phase_2_2_loan_history_pd_features(df)
+        assert pd.api.types.is_numeric_dtype(df_diag["follow_up_coverage_ratio_30d"])
+        assert pd.api.types.is_integer_dtype(df_diag["label_eligible_30d"])
+        assert "bad_state_1dpd_7d" in df_out.columns  # sanity: pipeline still completed
 
 
 class TestApplySnapshotToTrainingColumnMap:

@@ -140,11 +140,13 @@ PD_FEATURE_BLACKLIST: frozenset[str] = frozenset(
         "bad_state_3dpd_30d",
         "bad_state_1dpd_7d",
         # Label-diagnostic columns -- future-derived, retained by the SQL for
-        # label auditing only (see data/Features_Consult.txt). Only 4 of these
-        # 11 are caught by LEAKAGE_PATTERNS's "outcome" substring below; the
-        # rest (days_aging / rollover / terminal_state / the two
-        # follow-up-observability columns) match no existing pattern and
-        # would otherwise leak straight into the model.
+        # label auditing only (see data/Features_Consult.txt and
+        # pd_model/preprocessing/loan_history_features.py's
+        # LABEL_DIAGNOSTIC_COLUMNS, which this list mirrors). Only a few of
+        # these are caught by LEAKAGE_PATTERNS's "outcome" substring below;
+        # most (days_aging / rollover / terminal_state / the coverage-ratio
+        # and eligibility columns) match no existing pattern and would
+        # otherwise leak straight into the model.
         "max_days_aging_7d",
         "max_days_aging_30d",
         "rollover_observed_7d",
@@ -152,10 +154,25 @@ PD_FEATURE_BLACKLIST: frozenset[str] = frozenset(
         "terminal_state_observed_30d",
         "outcome_state_row_count_30d",
         "outcome_observed_date_count_30d",
+        "post_disbursement_observed_date_count_7d",
         "post_disbursement_observed_date_count_30d",
-        "sufficient_follow_up_30d",
         "first_outcome_state_date",
         "last_outcome_state_date",
+        "observed_closure_date_30d",
+        "closure_observation_state_date_30d",
+        "required_observation_end_date_30d",
+        "expected_observed_date_count_30d",
+        "observed_date_count_to_required_end_30d",
+        "last_state_date_to_required_end_30d",
+        "follow_up_coverage_ratio_30d",
+        "meets_coverage_ratio_30d",
+        "near_horizon_observation_30d",
+        "confirmed_good_30d",
+        "has_post_disbursement_state_30d",
+        "fails_coverage_ratio_30d",
+        "fails_near_horizon_30d",
+        "label_eligible_30d",
+        "label_eligibility_reason_30d",
     }
 )
 
@@ -185,7 +202,7 @@ LEAKAGE_PATTERNS: tuple[str, ...] = (
     "label",
     "target",
     # Defense-in-depth for data/loan_state_query_updated_materialized.txt's
-    # label-diagnostic columns -- the 9 exact names are already in
+    # label-diagnostic columns -- the exact names are already in
     # PD_FEATURE_BLACKLIST; these substrings catch any similarly-named
     # future SQL columns automatically. NOTE: "max_days_aging" (not the
     # broader "days_aging") -- the legitimate feature

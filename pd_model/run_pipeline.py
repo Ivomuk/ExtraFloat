@@ -181,6 +181,15 @@ _UNUSED_LOAN_LEVEL_ID_COLUMNS: tuple[str, ...] = (
     "last_closed_loan_uid",
 )
 
+# Label-observability policy parameters baked into
+# data/loan_state_query_updated_materialized.txt (statement 4's
+# loan_label_coverage_assessment / loan_labels_raw stages) -- not read from
+# there at runtime, just mirrored here for logging/metadata visibility so a
+# future change to either value is visible in the artifact history, not
+# just in a SQL diff review. Keep in sync with the SQL literals by hand.
+_LABEL_COVERAGE_RATIO_THRESHOLD: float = 0.8
+_LABEL_NEAR_HORIZON_MAX_LAG_DAYS: int = 5
+
 # Low-cardinality string columns worth converting to category dtype
 # in-place: collapses millions of repeated string objects down to a
 # handful of category levels + a small integer code per row.
@@ -231,16 +240,52 @@ def run_pipeline(args: argparse.Namespace) -> None:
         logger.info("=== Step 1: Load loan-level training file ===")
         df_loans = pd.read_csv(args.loan_training_file)
         logger.info("Loaded %s: %d rows, %d cols", args.loan_training_file, *df_loans.shape)
+        logger.info(
+            "Label-observability policy: coverage_ratio_threshold=%.2f, "
+            "near_horizon_max_lag_days=%d (mirrors "
+            "data/loan_state_query_updated_materialized.txt statement 4)",
+            _LABEL_COVERAGE_RATIO_THRESHOLD,
+            _LABEL_NEAR_HORIZON_MAX_LAG_DAYS,
+        )
 
-        df_pd, _df_label_diagnostics = run_phase_2_2_loan_history_pd_features(
+        df_pd, df_label_diagnostics = run_phase_2_2_loan_history_pd_features(
             df_loans, cfg=cfg, verbose=True
         )
+
+        # Full audit export -- every target loan, CENSORED_* rows included
+        # (see run_phase_2_2_loan_history_pd_features's docstring). Persist
+        # before freeing, unlike the diagnostics frame this replaces, which
+        # used to be discarded unread immediately below.
+        audit_path = output_dir / "loan_label_observability_audit.csv"
+        df_label_diagnostics.to_csv(audit_path, index=False)
+
+        summary = (
+            df_label_diagnostics.groupby(
+                ["split", "label_eligibility_reason_30d", "label_eligible_30d", "bad_state_3dpd_30d"],
+                dropna=False,
+            )
+            .agg(
+                n=("disbursement_fid", "size"),
+                coverage_ratio_mean=("follow_up_coverage_ratio_30d", "mean"),
+                expected_window_mean=("expected_observed_date_count_30d", "mean"),
+            )
+            .reset_index()
+        )
+        summary_path = output_dir / "loan_label_observability_audit_summary.csv"
+        summary.to_csv(summary_path, index=False)
+        logger.info(
+            "Wrote label observability audit (%d rows) to %s, summary to %s",
+            len(df_label_diagnostics),
+            audit_path,
+            summary_path,
+        )
+
         # df_loans (the full raw CSV, likely one of the largest objects in
         # the run -- unprocessed, full column width, no downcast yet) and
-        # _df_label_diagnostics (never consumed -- retained only for label
-        # auditing, which nothing in this script currently does) are both
-        # dead weight from here on. Free them now rather than after Step 6.
-        del df_loans, _df_label_diagnostics
+        # df_label_diagnostics (persisted above; nothing downstream in this
+        # script consumes it further) are both dead weight from here on.
+        # Free them now rather than after Step 6.
+        del df_loans, df_label_diagnostics
         gc.collect()
 
         # disbursement_fid is the loan-level primary key (unique per loan,
@@ -394,7 +439,7 @@ def run_pipeline(args: argparse.Namespace) -> None:
         # unused) are consumed entirely by run_phase_2_2_repayment_pd_features
         # above and never read again either. Mirrors the loan-level branch's
         # del+gc.collect() for train_snap_df/val_snap_df/snap_df and
-        # df_loans/_df_label_diagnostics.
+        # df_loans/df_label_diagnostics.
         del train_df, val_df, df_repayments, _df_repayments_out
         gc.collect()
 
@@ -911,6 +956,12 @@ def run_pipeline(args: argparse.Namespace) -> None:
         "git_commit": _git_commit(),
         "feature_schema_version": 1,
         "preprocessor_version": 1,
+        # Label-observability policy (loan-level grain only) -- see
+        # _LABEL_COVERAGE_RATIO_THRESHOLD / _LABEL_NEAR_HORIZON_MAX_LAG_DAYS
+        # above; a future change to either is a labelled-population policy
+        # change, visible here rather than only in a SQL diff.
+        "label_coverage_ratio_threshold": _LABEL_COVERAGE_RATIO_THRESHOLD if using_loan_level_grain else None,
+        "label_near_horizon_max_lag_days": _LABEL_NEAR_HORIZON_MAX_LAG_DAYS if using_loan_level_grain else None,
         # Training stats
         "train_rows": len(X_train_raw),
         "val_rows": len(X_val_raw),

@@ -128,10 +128,12 @@ class TestBlacklistCompleteness:
 
 
 class TestLoanLevelDiagnosticsExcluded:
-    """data/loan_state_query_updated_materialized.txt's 11 label-diagnostic
-    columns are future-derived (label leakage) and must never reach the
-    model, regardless of whether pd_model/preprocessing/loan_history_features.py
-    already stripped them upstream -- this is defense-in-depth."""
+    """data/loan_state_query_updated_materialized.txt's label-diagnostic
+    columns (see LABEL_DIAGNOSTIC_COLUMNS -- includes the bounded
+    coverage-ratio / label-eligibility columns) are future-derived (label
+    leakage) and must never reach the model, regardless of whether
+    pd_model/preprocessing/loan_history_features.py already stripped them
+    upstream -- this is defense-in-depth."""
 
     def test_all_diagnostics_excluded_by_some_guard(self):
         for col in LABEL_DIAGNOSTIC_COLUMNS:
@@ -139,13 +141,14 @@ class TestLoanLevelDiagnosticsExcluded:
             assert excluded, f"Label-diagnostic column '{col}' not excluded by any guard"
 
     def test_all_diagnostics_in_blacklist(self):
-        """Only 4 of the 11 are caught by LEAKAGE_PATTERNS's 'outcome' substring
-        (outcome_state_row_count_30d, outcome_observed_date_count_30d,
-        first_outcome_state_date, last_outcome_state_date); the rest
-        (days-aging / rollover / terminal-state /
-        post_disbursement_observed_date_count_30d / sufficient_follow_up_30d)
-        rely on explicit blacklist membership plus the narrower
-        max_days_aging/rollover/terminal_state LEAKAGE_PATTERNS entries."""
+        """Only a few are caught by LEAKAGE_PATTERNS's 'outcome'/'label'
+        substrings (outcome_state_row_count_30d, outcome_observed_date_count_30d,
+        first_outcome_state_date, last_outcome_state_date,
+        label_eligible_30d, label_eligibility_reason_30d); the rest
+        (days-aging / rollover / terminal-state / the coverage-ratio and
+        eligibility-boolean columns) rely on explicit blacklist membership
+        plus the narrower max_days_aging/rollover/terminal_state
+        LEAKAGE_PATTERNS entries."""
         blacklist_low = {c.strip().lower() for c in PD_FEATURE_BLACKLIST}
         for col in LABEL_DIAGNOSTIC_COLUMNS:
             assert col.lower() in blacklist_low, (

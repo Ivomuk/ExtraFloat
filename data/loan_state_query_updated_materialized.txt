@@ -22,7 +22,7 @@
 --   that entire chain, which is the dominant cause of the stage blow-up.
 --
 -- WHAT THIS FILE DOES
---   Splits the single query into four sequential statements. Run them
+--   Splits the single query into five sequential statements. Run them
 --   IN ORDER against the same session/connection:
 --
 --     1. CREATE hive.analytics.tmp_disbursements
@@ -31,18 +31,31 @@
 --        (was: normalized_loan_state, loan_state_ranked, loan_state)
 --     3. CREATE hive.analytics.tmp_target_loans
 --        (was: the same-day bridge chain + target_loans)
---     4. Final SELECT
---        (was: everything downstream of target_loans)
+--     4. CREATE hive.analytics.tmp_loan_label_assessment
+--        (was: target_loan_outcomes, loan_labels_raw, loan_labels,
+--        inlined in statement 4 of the earlier 4-statement version)
+--        UNFILTERED -- one row per tmp_target_loans row, CENSORED_*
+--        rows included, so the full population stays available for
+--        audit. Eligibility filtering happens in the Python
+--        preprocessing layer, not here.
+--     5. Final SELECT
+--        (was: everything downstream of target_loans, still is --
+--        just joins tmp_loan_label_assessment for labels instead of
+--        computing them inline)
 --
---   Statement 4 reads from the three physical tables instead of the
---   original CTEs, so the 7x/7x/5x duplication collapses to a handful
---   of plain table scans.
+--   Statements 4 and 5 both read from physical tables instead of
+--   repeatedly-expanded CTEs, so the 7x/7x/5x duplication collapses to
+--   a handful of plain table scans. Statement 4 also caps how deep the
+--   label-computation CTE chain can inline ahead of statement 5, and
+--   gives the label pre-flight checks (see the validation queries later
+--   in this file) something physical to query standalone.
 --
 -- TARGET SCHEMA
 --   Intermediate tables are written to hive.analytics (tmp_disbursements,
---   tmp_loan_state, tmp_target_loans). This is the same schema the source
---   tables live in; confirm write access before running, and rename these
---   three tables if hive.analytics.tmp_* could collide with anything else.
+--   tmp_loan_state, tmp_target_loans, tmp_loan_label_assessment). This is
+--   the same schema the source tables live in; confirm write access
+--   before running, and rename these four tables if hive.analytics.tmp_*
+--   could collide with anything else.
 --
 -- LOGIC
 --   All business logic (loan matching, labels, features) is unchanged
@@ -51,22 +64,23 @@
 --   two files in sync if the logic changes.
 --
 -- IF STILL OVER THE STAGE LIMIT
---   The next-biggest remaining multiplier in statement 4 is
+--   The next-biggest remaining multiplier in statement 5 is
 --   closed_prior_loans_ranked (3 downstream references) and prior_loans
 --   (2 downstream references, feeding both prior_loans_ranked and
 --   closed_prior_loans_ranked). If needed, materialize
 --   hive.analytics.tmp_target_loans-derived prior_loans as its own physical
---   table the same way as the three tables below.
+--   table the same way as the four tables below.
 --
 -- CLEANUP
---   hive.analytics.tmp_disbursements / tmp_loan_state / tmp_target_loans are
---   persisted physical tables, not session-scoped temp tables. Drop
---   them when done (see the commented block at the end of this file).
+--   hive.analytics.tmp_disbursements / tmp_loan_state / tmp_target_loans /
+--   tmp_loan_label_assessment are persisted physical tables, not
+--   session-scoped temp tables. Drop them when done (see the commented
+--   block at the end of this file).
 -- =====================================================================
 
 
 -- =====================================================================
--- STATEMENT 1 of 4 -- canonical disbursement records
+-- STATEMENT 1 of 5 -- canonical disbursement records
 -- (was: disbursements_ranked, disbursements)
 -- =====================================================================
 
@@ -123,7 +137,7 @@ WHERE source_rn = 1;
 
 
 -- =====================================================================
--- STATEMENT 2 of 4 -- normalized, deduplicated daily state table
+-- STATEMENT 2 of 5 -- normalized, deduplicated daily state table
 -- (was: normalized_loan_state, loan_state_ranked, loan_state)
 -- =====================================================================
 
@@ -240,7 +254,7 @@ WHERE state_day_rn = 1;
 
 
 -- =====================================================================
--- STATEMENT 3 of 4 -- eligible target loans, with the disbursement_fid
+-- STATEMENT 3 of 5 -- eligible target loans, with the disbursement_fid
 -- <-> loan_uid bridge resolved
 -- (was: cohorts, state_data_availability, same_day_*, state_loan_*,
 --       loan_id_bridge, target_loans)
@@ -514,12 +528,17 @@ WHERE b.mapping_is_unambiguous = 1
 
 
 -- =====================================================================
--- STATEMENT 4 of 4 -- final analytical modeling dataset
--- (was: everything from scoring_state_candidates through the final
---       SELECT in loan_state_query_updated.txt)
+-- STATEMENT 4 of 5 -- loan label assessment (outcome, coverage, and
+-- eligibility for every target loan)
+-- (was: target_loan_outcomes, loan_labels_raw, loan_labels, previously
+--       inlined into statement 4 of the earlier 4-statement version)
 --
--- SCORING FEATURES
---   Only information strictly before the target disbursement is used.
+-- UNFILTERED BY DESIGN
+--   One row per hive.analytics.tmp_target_loans row -- CENSORED_* rows
+--   are included, not dropped, so the full population stays available
+--   for audit. Eligibility filtering happens downstream, in the Python
+--   preprocessing layer (pd_model/preprocessing/loan_history_features.py),
+--   not here.
 --
 -- PRIMARY LABEL
 --   bad_state_3dpd_30d = 1 if the mapped target loan, during days 1-30:
@@ -531,6 +550,47 @@ WHERE b.mapping_is_unambiguous = 1
 --     - reaches days_aging >= 1; or
 --     - becomes ANOMALY_OPEN / is_anomaly_open.
 --
+-- LABEL-ELIGIBILITY POLICY (asymmetric censoring, standard for
+-- credit-risk problems with incomplete follow-up)
+--   A "known bad" is trusted regardless of follow-up completeness --
+--   bad_state_3dpd_30d is derived only from state rows strictly after
+--   the loan date, so any bad signal observed at all is real evidence,
+--   incomplete follow-up or not.
+--
+--   A "confirmed good" additionally requires:
+--     - at least one post-disbursement observed date
+--       (observed_date_count_to_required_end_30d > 0);
+--     - a bounded follow-up coverage ratio >= 0.8
+--       (meets_coverage_ratio_30d -- the ratio is defined once, in the
+--       loan_label_coverage_ratio stage below, and every downstream
+--       stage references that single boolean rather than re-deriving
+--       the 0.8 threshold);
+--     - the last observed date within 5 days of the required
+--       observation end (near_horizon_observation_30d) -- otherwise
+--       there is no way to distinguish "confirmed good" from "we
+--       simply stopped observing this loan".
+--
+--   required_observation_end_date_30d shortens the required window to
+--   a genuinely observed closure date when one is seen inside the
+--   30-day horizon (ls.state_date >= ls.closure_date guards against
+--   trusting a backfilled/provisional closure_date before it was
+--   actually observed); otherwise it stays the full
+--   label_horizon_30d_end. This lets a loan that closes early get a
+--   correspondingly shorter, achievable observation requirement instead
+--   of always being held to the full 30-day window.
+--
+--   Every row carries label_eligible_30d (1 iff KNOWN_BAD or
+--   CONFIRMED_GOOD_*) and label_eligibility_reason_30d (one of
+--   KNOWN_BAD / CONFIRMED_GOOD_TERMINAL / CONFIRMED_GOOD_HORIZON /
+--   CENSORED_NO_POST_DISBURSEMENT_STATE / CENSORED_INVALID_OBSERVATION_WINDOW /
+--   CENSORED_SPARSE_FOLLOW_UP / CENSORED_EARLY_LAST_OBSERVATION /
+--   CENSORED_OTHER). CENSORED_INVALID_OBSERVATION_WINDOW is a genuine
+--   data-integrity signal (required_observation_end_date_30d is
+--   constructed to always be strictly after loan_date, so a NULL ratio
+--   here means something upstream is broken) -- see the pre-flight
+--   validation queries later in this file; a nonzero count there is a
+--   build-blocking failure, not ordinary censoring.
+--
 -- ROLLOVER LIMITATION
 --   The first ANOMALY_OPEN state on the mapped loan_uid is detected.
 --   If the transferred debt later continues under a regenerated loan_uid,
@@ -539,6 +599,284 @@ WHERE b.mapping_is_unambiguous = 1
 --   relationship. Therefore, rollover detection should remain part of
 --   the binary label, while post-rollover max aging requires warehouse
 --   validation.
+-- =====================================================================
+
+CREATE TABLE hive.analytics.tmp_loan_label_assessment AS
+WITH target_loan_outcome_base AS (
+    SELECT
+        d.disbursement_fid,
+        d.msisdn,
+        d.split,
+        d.target_loan_uid,
+        d.loan_date,
+        d.label_horizon_7d_end,
+        d.label_horizon_30d_end,
+
+        COUNT(DISTINCT CASE
+            WHEN ls.state_date > d.loan_date
+             AND ls.state_date <= d.label_horizon_7d_end
+            THEN ls.state_date
+        END) AS post_disbursement_observed_date_count_7d,
+
+        COUNT(DISTINCT CASE
+            WHEN ls.state_date > d.loan_date
+             AND ls.state_date <= d.label_horizon_30d_end
+            THEN ls.state_date
+        END) AS post_disbursement_observed_date_count_30d,
+
+        MAX(CASE
+            WHEN ls.state_date > d.loan_date
+             AND ls.state_date <= d.label_horizon_30d_end
+            THEN ls.state_date
+        END) AS last_post_disbursement_state_date_30d,
+
+        COUNT(ls.state_date) AS outcome_state_row_count_30d,
+        COUNT(DISTINCT ls.state_date) AS outcome_observed_date_count_30d,
+        MIN(ls.state_date) AS first_outcome_state_date,
+        MAX(ls.state_date) AS last_outcome_state_date,
+
+        MAX(CASE
+            WHEN ls.state_date > d.loan_date
+             AND ls.state_date <= d.label_horizon_7d_end
+            THEN ls.days_aging
+        END) AS max_days_aging_7d,
+
+        MAX(CASE
+            WHEN ls.state_date > d.loan_date
+             AND ls.state_date <= d.label_horizon_30d_end
+            THEN ls.days_aging
+        END) AS max_days_aging_30d,
+
+        MAX(CASE
+            WHEN ls.state_date > d.loan_date
+             AND ls.state_date <= d.label_horizon_7d_end
+             AND (
+                    ls.loan_status = 'ANOMALY_OPEN'
+                    OR COALESCE(ls.is_anomaly_open, FALSE)
+                 )
+            THEN 1
+            ELSE 0
+        END) AS rollover_observed_7d,
+
+        MAX(CASE
+            WHEN ls.state_date > d.loan_date
+             AND ls.state_date <= d.label_horizon_30d_end
+             AND (
+                    ls.loan_status = 'ANOMALY_OPEN'
+                    OR COALESCE(ls.is_anomaly_open, FALSE)
+                 )
+            THEN 1
+            ELSE 0
+        END) AS rollover_observed_30d,
+
+        MAX(CASE
+            WHEN ls.state_date > d.loan_date
+             AND ls.state_date <= d.label_horizon_30d_end
+             AND (
+                    ls.loan_status IN ('SETTLED', 'CLOSED', 'OVERPAID')
+                 OR (
+                        ls.closure_date IS NOT NULL
+                    AND ls.closure_date <= d.label_horizon_30d_end
+                    )
+                 )
+            THEN 1
+            ELSE 0
+        END) AS terminal_state_observed_30d,
+
+        -- Genuinely observed closure inside the 30-day horizon --
+        -- state_date >= closure_date guards against trusting a
+        -- provisional/backfilled closure_date before it was actually
+        -- recorded as observed.
+        MIN(CASE
+            WHEN ls.state_date > d.loan_date
+             AND ls.state_date <= d.label_horizon_30d_end
+             AND ls.closure_date > d.loan_date
+             AND ls.closure_date <= d.label_horizon_30d_end
+             AND ls.state_date >= ls.closure_date
+            THEN ls.closure_date
+        END) AS observed_closure_date_30d,
+
+        MIN(CASE
+            WHEN ls.state_date > d.loan_date
+             AND ls.state_date <= d.label_horizon_30d_end
+             AND ls.closure_date > d.loan_date
+             AND ls.closure_date <= d.label_horizon_30d_end
+             AND ls.state_date >= ls.closure_date
+            THEN ls.state_date
+        END) AS closure_observation_state_date_30d
+
+    FROM hive.analytics.tmp_target_loans d
+
+    LEFT JOIN hive.analytics.tmp_loan_state ls
+      ON ls.customer_msisdn = d.msisdn
+     AND ls.loan_uid = d.target_loan_uid
+     AND ls.state_date >= d.loan_date
+     AND ls.state_date <= d.label_horizon_30d_end
+
+    GROUP BY
+        d.disbursement_fid,
+        d.msisdn,
+        d.split,
+        d.target_loan_uid,
+        d.loan_date,
+        d.label_horizon_7d_end,
+        d.label_horizon_30d_end
+),
+
+-- required_observation_end_date_30d: the full 30-day horizon, shortened
+-- to a genuinely observed closure date when one occurred inside it.
+target_loan_outcome_window AS (
+    SELECT b.*,
+        COALESCE(b.observed_closure_date_30d, b.label_horizon_30d_end)
+            AS required_observation_end_date_30d
+    FROM target_loan_outcome_base b
+),
+
+-- Observation coverage up to the (possibly shortened) required end.
+-- Explicit column list, not w.*, so a future addition to
+-- target_loan_outcome_base can't silently desync from this GROUP BY.
+target_loan_coverage AS (
+    SELECT
+        w.disbursement_fid, w.msisdn, w.split, w.target_loan_uid, w.loan_date,
+        w.label_horizon_7d_end, w.label_horizon_30d_end,
+        w.max_days_aging_7d, w.max_days_aging_30d,
+        w.rollover_observed_7d, w.rollover_observed_30d,
+        w.terminal_state_observed_30d,
+        w.outcome_state_row_count_30d, w.outcome_observed_date_count_30d,
+        w.post_disbursement_observed_date_count_7d, w.post_disbursement_observed_date_count_30d,
+        w.last_post_disbursement_state_date_30d,
+        w.first_outcome_state_date, w.last_outcome_state_date,
+        w.observed_closure_date_30d, w.closure_observation_state_date_30d,
+        w.required_observation_end_date_30d,
+
+        COUNT(DISTINCT CASE
+            WHEN ls.state_date > w.loan_date
+            THEN ls.state_date
+        END) AS observed_date_count_to_required_end_30d,
+
+        MAX(CASE
+            WHEN ls.state_date > w.loan_date
+            THEN ls.state_date
+        END) AS last_state_date_to_required_end_30d
+
+    FROM target_loan_outcome_window w
+
+    LEFT JOIN hive.analytics.tmp_loan_state ls
+      ON ls.customer_msisdn = w.msisdn
+     AND ls.loan_uid = w.target_loan_uid
+     AND ls.state_date >= w.loan_date
+     AND ls.state_date <= w.required_observation_end_date_30d
+
+    GROUP BY
+        w.disbursement_fid, w.msisdn, w.split, w.target_loan_uid, w.loan_date,
+        w.label_horizon_7d_end, w.label_horizon_30d_end,
+        w.max_days_aging_7d, w.max_days_aging_30d,
+        w.rollover_observed_7d, w.rollover_observed_30d,
+        w.terminal_state_observed_30d,
+        w.outcome_state_row_count_30d, w.outcome_observed_date_count_30d,
+        w.post_disbursement_observed_date_count_7d, w.post_disbursement_observed_date_count_30d,
+        w.last_post_disbursement_state_date_30d,
+        w.first_outcome_state_date, w.last_outcome_state_date,
+        w.observed_closure_date_30d, w.closure_observation_state_date_30d,
+        w.required_observation_end_date_30d
+),
+
+loan_labels_raw AS (
+    SELECT
+        c.*,
+
+        CASE WHEN COALESCE(c.max_days_aging_7d, 0) >= 1 OR c.rollover_observed_7d = 1
+             THEN 1 ELSE 0 END AS bad_state_1dpd_7d,
+        CASE WHEN COALESCE(c.max_days_aging_30d, 0) > 3 OR c.rollover_observed_30d = 1
+             THEN 1 ELSE 0 END AS bad_state_3dpd_30d,
+
+        DATE_DIFF('day', c.loan_date, c.required_observation_end_date_30d)
+            AS expected_observed_date_count_30d,
+
+        -- Maximum allowed endpoint lag of 5 days (inclusive bound
+        -- accepts 6 trailing dates, not literally "within 5 days").
+        CASE WHEN c.observed_date_count_to_required_end_30d > 0
+              AND c.last_state_date_to_required_end_30d >= GREATEST(
+                    DATE_ADD('day', 1, c.loan_date),
+                    DATE_ADD('day', -5, c.required_observation_end_date_30d)
+                  )
+             THEN 1 ELSE 0 END AS near_horizon_observation_30d
+
+    FROM target_loan_coverage c
+),
+
+loan_label_coverage_ratio AS (
+    SELECT r.*,
+        TRY_CAST(r.observed_date_count_to_required_end_30d AS DOUBLE)
+            / NULLIF(r.expected_observed_date_count_30d, 0)
+            AS follow_up_coverage_ratio_30d
+    FROM loan_labels_raw r
+),
+
+-- The ONLY place 0.8 appears. Every downstream stage references
+-- meets_coverage_ratio_30d, never the literal.
+loan_label_coverage_assessment AS (
+    SELECT r.*,
+        CASE WHEN r.follow_up_coverage_ratio_30d >= 0.8
+             THEN 1 ELSE 0 END AS meets_coverage_ratio_30d
+    FROM loan_label_coverage_ratio r
+),
+
+loan_label_confirmation AS (
+    SELECT g.*,
+        CASE WHEN g.bad_state_3dpd_30d = 0
+              AND g.observed_date_count_to_required_end_30d > 0
+              AND g.meets_coverage_ratio_30d = 1
+              AND g.near_horizon_observation_30d = 1
+             THEN 1 ELSE 0 END AS confirmed_good_30d
+    FROM loan_label_coverage_assessment g
+),
+
+-- Unfiltered -- every target loan, CENSORED_* rows included. This
+-- becomes hive.analytics.tmp_loan_label_assessment in full.
+loan_label_assessment AS (
+    SELECT h.*,
+        CASE WHEN h.observed_date_count_to_required_end_30d = 0 THEN 0 ELSE 1 END
+            AS has_post_disbursement_state_30d,
+
+        CASE WHEN h.meets_coverage_ratio_30d = 1 THEN 0 ELSE 1 END
+            AS fails_coverage_ratio_30d,
+
+        CASE WHEN h.near_horizon_observation_30d = 0 THEN 1 ELSE 0 END
+            AS fails_near_horizon_30d,
+
+        CASE WHEN h.bad_state_3dpd_30d = 1 OR h.confirmed_good_30d = 1
+             THEN 1 ELSE 0 END AS label_eligible_30d,
+
+        CASE
+            WHEN h.bad_state_3dpd_30d = 1 THEN 'KNOWN_BAD'
+            WHEN h.confirmed_good_30d = 1 AND h.observed_closure_date_30d IS NOT NULL
+                THEN 'CONFIRMED_GOOD_TERMINAL'
+            WHEN h.confirmed_good_30d = 1 THEN 'CONFIRMED_GOOD_HORIZON'
+            WHEN h.observed_date_count_to_required_end_30d = 0
+                THEN 'CENSORED_NO_POST_DISBURSEMENT_STATE'
+            WHEN h.follow_up_coverage_ratio_30d IS NULL
+                THEN 'CENSORED_INVALID_OBSERVATION_WINDOW'
+            WHEN h.meets_coverage_ratio_30d = 0
+                THEN 'CENSORED_SPARSE_FOLLOW_UP'
+            WHEN h.near_horizon_observation_30d = 0
+                THEN 'CENSORED_EARLY_LAST_OBSERVATION'
+            ELSE 'CENSORED_OTHER'
+        END AS label_eligibility_reason_30d
+    FROM loan_label_confirmation h
+)
+
+SELECT * FROM loan_label_assessment;
+
+
+-- =====================================================================
+-- STATEMENT 5 of 5 -- final analytical modeling dataset
+-- (was: everything from scoring_state_candidates through the final
+--       SELECT in loan_state_query_updated.txt; label computation now
+--       lives in statement 4 above -- this statement just joins it)
+--
+-- SCORING FEATURES
+--   Only information strictly before the target disbursement is used.
 -- =====================================================================
 
 WITH
@@ -1237,228 +1575,13 @@ current_loan_features AS (
 
     LEFT JOIN prior_disbursement_features p
       ON p.target_disbursement_fid = d.disbursement_fid
-),
-
--- ---------------------------------------------------------------------
--- Future outcomes for the mapped target loan_uid
---
--- Matching loan_uid removes ambiguity between two same-day loans.
--- ---------------------------------------------------------------------
-target_loan_outcomes AS (
-    SELECT
-        d.disbursement_fid,
-        d.msisdn,
-        d.split,
-        d.label_horizon_7d_end,
-        d.label_horizon_30d_end,
-
-        COUNT(ls.state_date)
-            AS outcome_state_row_count_30d,
-
-        -- Label-observability signals: outcome_state_row_count_30d above
-        -- (and outcome_observed_date_count_30d below) are day-0-inclusive
-        -- (the join itself starts at ls.state_date >= d.loan_date), so a
-        -- lone day-0 row satisfies "> 0" trivially with zero real
-        -- post-disbursement observation. These two are scoped to
-        -- ls.state_date > d.loan_date, matching every delinquency/
-        -- rollover/terminal-state calculation below, and are what the
-        -- corrected loan_labels eligibility gate actually uses.
-        COUNT(DISTINCT CASE
-            WHEN ls.state_date > d.loan_date
-             AND ls.state_date <= d.label_horizon_7d_end
-            THEN ls.state_date
-        END) AS post_disbursement_observed_date_count_7d,
-
-        COUNT(DISTINCT CASE
-            WHEN ls.state_date > d.loan_date
-             AND ls.state_date <= d.label_horizon_30d_end
-            THEN ls.state_date
-        END) AS post_disbursement_observed_date_count_30d,
-
-        MAX(CASE
-            WHEN ls.state_date > d.loan_date
-             AND ls.state_date <= d.label_horizon_30d_end
-            THEN ls.state_date
-        END) AS last_post_disbursement_state_date_30d,
-
-        COUNT(DISTINCT ls.state_date)
-            AS outcome_observed_date_count_30d,
-
-        MIN(ls.state_date)
-            AS first_outcome_state_date,
-
-        MAX(ls.state_date)
-            AS last_outcome_state_date,
-
-        MAX(
-            CASE
-                WHEN ls.state_date > d.loan_date
-                 AND ls.state_date <= d.label_horizon_7d_end
-                THEN ls.days_aging
-            END
-        ) AS max_days_aging_7d,
-
-        MAX(
-            CASE
-                WHEN ls.state_date > d.loan_date
-                 AND ls.state_date <= d.label_horizon_30d_end
-                THEN ls.days_aging
-            END
-        ) AS max_days_aging_30d,
-
-        MAX(
-            CASE
-                WHEN ls.state_date > d.loan_date
-                 AND ls.state_date <= d.label_horizon_7d_end
-                 AND (
-                        ls.loan_status = 'ANOMALY_OPEN'
-                        OR COALESCE(ls.is_anomaly_open, FALSE)
-                     )
-                THEN 1
-                ELSE 0
-            END
-        ) AS rollover_observed_7d,
-
-        MAX(
-            CASE
-                WHEN ls.state_date > d.loan_date
-                 AND ls.state_date <= d.label_horizon_30d_end
-                 AND (
-                        ls.loan_status = 'ANOMALY_OPEN'
-                        OR COALESCE(ls.is_anomaly_open, FALSE)
-                     )
-                THEN 1
-                ELSE 0
-            END
-        ) AS rollover_observed_30d,
-
-        MAX(
-            CASE
-                WHEN ls.state_date > d.loan_date
-                 AND ls.state_date <= d.label_horizon_30d_end
-                 AND (
-                        ls.loan_status IN (
-                            'SETTLED',
-                            'CLOSED',
-                            'OVERPAID'
-                        )
-                        OR (
-                            ls.closure_date IS NOT NULL
-                            AND ls.closure_date
-                                <= d.label_horizon_30d_end
-                        )
-                     )
-                THEN 1
-                ELSE 0
-            END
-        ) AS terminal_state_observed_30d
-
-    FROM hive.analytics.tmp_target_loans d
-
-    LEFT JOIN hive.analytics.tmp_loan_state ls
-      ON ls.customer_msisdn = d.msisdn
-     AND ls.loan_uid = d.target_loan_uid
-     AND ls.state_date >= d.loan_date
-     AND ls.state_date <= d.label_horizon_30d_end
-
-    GROUP BY
-        d.disbursement_fid,
-        d.msisdn,
-        d.split,
-        d.label_horizon_7d_end,
-        d.label_horizon_30d_end
-),
-
--- ---------------------------------------------------------------------
--- Binary labels
---
--- Label-observability fix: outcome_state_row_count_30d alone is
--- day-0-inclusive, so a target loan with exactly one state row on its
--- disbursement date and nothing for days 1-30 would previously pass
--- "outcome_state_row_count_30d > 0" and be silently admitted as a
--- confirmed-good outcome despite zero real post-disbursement
--- observation. Fixed via the standard asymmetric "known-bad shortcut"
--- for censored-outcome problems: trust any observed bad signal
--- regardless of follow-up completeness (bad_state_3dpd_30d=1 needs no
--- extra evidence -- it's already derived only from ls.state_date >
--- d.loan_date rows), or a definitively resolved terminal state, or
--- (for a "good" label with neither) require the last post-disbursement
--- observation to fall within 5 days of the 30-day horizon end --
--- otherwise there's no way to distinguish "confirmed good" from
--- "we simply stopped observing this loan".
--- ---------------------------------------------------------------------
-loan_labels_raw AS (
-    SELECT
-        disbursement_fid,
-        msisdn,
-        split,
-
-        CASE
-            WHEN COALESCE(max_days_aging_7d, 0) >= 1
-              OR rollover_observed_7d = 1
-            THEN 1
-            ELSE 0
-        END AS bad_state_1dpd_7d,
-
-        CASE
-            WHEN COALESCE(max_days_aging_30d, 0) > 3
-              OR rollover_observed_30d = 1
-            THEN 1
-            ELSE 0
-        END AS bad_state_3dpd_30d,
-
-        max_days_aging_7d,
-        max_days_aging_30d,
-        rollover_observed_7d,
-        rollover_observed_30d,
-        terminal_state_observed_30d,
-
-        outcome_state_row_count_30d,
-        outcome_observed_date_count_30d,
-        post_disbursement_observed_date_count_7d,
-        post_disbursement_observed_date_count_30d,
-        first_outcome_state_date,
-        last_outcome_state_date,
-
-        CASE
-            WHEN post_disbursement_observed_date_count_30d > 0
-             AND last_post_disbursement_state_date_30d
-                    >= DATE_ADD('day', -5, label_horizon_30d_end)
-            THEN 1
-            ELSE 0
-        END AS sufficient_follow_up_30d
-
-    FROM target_loan_outcomes
-),
-
-loan_labels AS (
-    SELECT
-        disbursement_fid,
-        msisdn,
-        split,
-        bad_state_1dpd_7d,
-        bad_state_3dpd_30d,
-        max_days_aging_7d,
-        max_days_aging_30d,
-        rollover_observed_7d,
-        rollover_observed_30d,
-        terminal_state_observed_30d,
-        outcome_state_row_count_30d,
-        outcome_observed_date_count_30d,
-        post_disbursement_observed_date_count_7d,
-        post_disbursement_observed_date_count_30d,
-        first_outcome_state_date,
-        last_outcome_state_date,
-        sufficient_follow_up_30d
-
-    FROM loan_labels_raw
-    WHERE bad_state_3dpd_30d = 1          -- known-bad shortcut
-       OR terminal_state_observed_30d = 1 -- definitively resolved
-       OR sufficient_follow_up_30d = 1    -- enough follow-up to trust "good"
 )
 
 -- ---------------------------------------------------------------------
 -- Final analytical modeling dataset
+--
+-- Labels and label diagnostics come from hive.analytics.tmp_loan_label_assessment
+-- (statement 4 above), joined below -- not computed inline here.
 -- ---------------------------------------------------------------------
 SELECT
     -- Identity, split, and mapping audit
@@ -1622,6 +1745,19 @@ SELECT
     l.bad_state_3dpd_30d,
     l.bad_state_1dpd_7d,
 
+    -- Label eligibility -- filter on label_eligible_30d in the Python
+    -- preprocessing layer; every CENSORED_* row is still present here
+    -- for audit, never drop rows in this SQL export.
+    l.label_eligible_30d,
+    l.label_eligibility_reason_30d,
+    l.confirmed_good_30d,
+    l.meets_coverage_ratio_30d,
+    l.near_horizon_observation_30d,
+    l.follow_up_coverage_ratio_30d,
+    l.has_post_disbursement_state_30d,
+    l.fails_coverage_ratio_30d,
+    l.fails_near_horizon_30d,
+
     -- Future label diagnostics; never use as model predictors
     l.max_days_aging_7d,
     l.max_days_aging_30d,
@@ -1630,14 +1766,20 @@ SELECT
     l.terminal_state_observed_30d,
     l.outcome_state_row_count_30d,
     l.outcome_observed_date_count_30d,
+    l.post_disbursement_observed_date_count_7d,
     l.post_disbursement_observed_date_count_30d,
-    l.sufficient_follow_up_30d,
     l.first_outcome_state_date,
-    l.last_outcome_state_date
+    l.last_outcome_state_date,
+    l.observed_closure_date_30d,
+    l.closure_observation_state_date_30d,
+    l.required_observation_end_date_30d,
+    l.expected_observed_date_count_30d,
+    l.observed_date_count_to_required_end_30d,
+    l.last_state_date_to_required_end_30d
 
 FROM hive.analytics.tmp_target_loans d
 
-JOIN loan_labels l
+JOIN hive.analytics.tmp_loan_label_assessment l
   ON l.disbursement_fid = d.disbursement_fid
  AND l.msisdn = d.msisdn
  AND l.split = d.split
@@ -1665,6 +1807,55 @@ LEFT JOIN current_loan_features c
 
 
 -- =====================================================================
+-- PRE-FLIGHT VALIDATION QUERIES -- run manually before trusting a build.
+-- Every query below is expected to return zero rows / zero counts. A
+-- nonzero result is a build-blocking data-integrity failure, not
+-- ordinary censoring -- investigate before using the export.
+-- =====================================================================
+
+-- Run after statement 2, before statement 3: closure_date must be a
+-- stable per-(customer, loan_uid) fact, not something that changes
+-- across rows. If this returns rows, required_observation_end_date_30d
+-- (statement 4) may be computed from an inconsistent closure_date.
+--
+-- SELECT customer_msisdn, loan_uid, COUNT(DISTINCT closure_date) AS distinct_closure_dates
+-- FROM hive.analytics.tmp_loan_state
+-- WHERE closure_date IS NOT NULL
+-- GROUP BY 1, 2
+-- HAVING COUNT(DISTINCT closure_date) > 1;
+-- Expected: zero rows.
+
+-- Run after statement 4 completes, against the physical table:
+
+-- required_observation_end_date_30d must always fall strictly after
+-- loan_date and no later than the full 30-day horizon.
+-- SELECT COUNT(*) FROM hive.analytics.tmp_loan_label_assessment
+-- WHERE NOT (required_observation_end_date_30d > loan_date
+--        AND required_observation_end_date_30d <= label_horizon_30d_end);
+-- Expected: 0.
+
+-- Observed coverage can never exceed what was expected.
+-- SELECT COUNT(*) FROM hive.analytics.tmp_loan_label_assessment
+-- WHERE observed_date_count_to_required_end_30d > expected_observed_date_count_30d;
+-- Expected: 0.
+
+-- CENSORED_INVALID_OBSERVATION_WINDOW is a genuine data-integrity
+-- signal, not routine censoring -- required_observation_end_date_30d is
+-- constructed to always be strictly after loan_date, so a NULL ratio
+-- here means something upstream (closure-date consistency, loan
+-- mapping, or date bounds) is broken.
+-- SELECT COUNT(*) FROM hive.analytics.tmp_loan_label_assessment
+-- WHERE label_eligibility_reason_30d = 'CENSORED_INVALID_OBSERVATION_WINDOW';
+-- Expected: 0.
+
+-- Each target loan must appear exactly once -- a mismatch means a
+-- target loan was duplicated somewhere upstream of statement 4.
+-- SELECT COUNT(*), COUNT(DISTINCT disbursement_fid)
+-- FROM hive.analytics.tmp_loan_label_assessment;
+-- Expected: the two counts match.
+
+
+-- =====================================================================
 -- OPTIONAL CLEANUP -- run after the final SELECT's results have been
 -- captured elsewhere (e.g. loaded into the training pipeline). Left
 -- commented out since hive.analytics.tmp_target_loans in particular is useful
@@ -1674,3 +1865,4 @@ LEFT JOIN current_loan_features c
 -- DROP TABLE IF EXISTS hive.analytics.tmp_target_loans;
 -- DROP TABLE IF EXISTS hive.analytics.tmp_loan_state;
 -- DROP TABLE IF EXISTS hive.analytics.tmp_disbursements;
+-- DROP TABLE IF EXISTS hive.analytics.tmp_loan_label_assessment;
