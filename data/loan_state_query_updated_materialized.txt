@@ -682,16 +682,18 @@ WITH target_loan_outcome_base AS (
             ELSE 0
         END) AS rollover_observed_30d,
 
+        -- loan_status IN (...) is the sole acceptance path -- a
+        -- standalone closure_date-populated OR-branch existed here
+        -- previously but was removed after a direct data check confirmed
+        -- the source table populates closure_date on genuinely
+        -- non-terminal rows too (observed on ANOMALY_OPEN rows, holding a
+        -- stale/unrelated date while the loan was still open) --
+        -- closure_date alone is not trustworthy evidence of a terminal
+        -- state without loan_status confirming it.
         MAX(CASE
             WHEN ls.state_date > d.loan_date
              AND ls.state_date <= d.label_horizon_30d_end
-             AND (
-                    ls.loan_status IN ('SETTLED', 'CLOSED', 'OVERPAID')
-                 OR (
-                        ls.closure_date IS NOT NULL
-                    AND ls.closure_date <= d.label_horizon_30d_end
-                    )
-                 )
+             AND ls.loan_status IN ('SETTLED', 'CLOSED', 'OVERPAID')
             THEN 1
             ELSE 0
         END) AS terminal_state_observed_30d,
@@ -726,13 +728,21 @@ WITH target_loan_outcome_base AS (
             ELSE 0
         END) AS same_day_settlement_observed_30d,
 
-        -- Genuinely observed closure inside the 30-day horizon --
-        -- state_date >= closure_date guards against trusting a
-        -- provisional/backfilled closure_date before it was actually
-        -- recorded as observed.
+        -- Genuinely observed closure inside the 30-day horizon.
+        -- ls.loan_status IN (...) is required, not merely ls.closure_date
+        -- being populated -- a direct data check confirmed the source
+        -- table sets closure_date on genuinely non-terminal rows too
+        -- (e.g. ANOMALY_OPEN rows carrying a stale/unrelated date while
+        -- the loan was still open), so closure_date alone is not
+        -- reliable evidence the loan actually closed on that date.
+        -- state_date >= closure_date is additional defense-in-depth
+        -- against trusting a provisional/backfilled closure_date before
+        -- it was actually recorded as observed, even on a genuinely
+        -- terminal row.
         MIN(CASE
             WHEN ls.state_date > d.loan_date
              AND ls.state_date <= d.label_horizon_30d_end
+             AND ls.loan_status IN ('SETTLED', 'CLOSED', 'OVERPAID')
              AND ls.closure_date > d.loan_date
              AND ls.closure_date <= d.label_horizon_30d_end
              AND ls.state_date >= ls.closure_date
@@ -742,6 +752,7 @@ WITH target_loan_outcome_base AS (
         MIN(CASE
             WHEN ls.state_date > d.loan_date
              AND ls.state_date <= d.label_horizon_30d_end
+             AND ls.loan_status IN ('SETTLED', 'CLOSED', 'OVERPAID')
              AND ls.closure_date > d.loan_date
              AND ls.closure_date <= d.label_horizon_30d_end
              AND ls.state_date >= ls.closure_date
@@ -1875,13 +1886,25 @@ LEFT JOIN current_loan_features c
 -- =====================================================================
 
 -- Run after statement 2, before statement 3: closure_date must be a
--- stable per-(customer, loan_uid) fact, not something that changes
--- across rows. If this returns rows, required_observation_end_date_30d
--- (statement 4) may be computed from an inconsistent closure_date.
+-- stable fact among a (customer, loan_uid)'s genuinely terminal rows --
+-- scoped to loan_status IN ('SETTLED','CLOSED','OVERPAID'), NOT to every
+-- row regardless of status. An earlier, unscoped version of this check
+-- flagged closure_date as non-unique across ~17% of all loan pairs with
+-- any closure_date value; investigation traced this to the source table
+-- populating closure_date on genuinely non-terminal rows too (confirmed
+-- on ANOMALY_OPEN rows, holding a stale/unrelated date while the loan
+-- was still open) -- not a stability problem among terminal rows
+-- themselves. Statement 4's logic already requires loan_status IN (...)
+-- alongside closure_date (see target_loan_outcome_base), so this check
+-- validates the assumption that logic depends on: that closure_date is
+-- stable once the loan is actually terminal. If this returns rows,
+-- required_observation_end_date_30d (statement 4) may be computed from
+-- an inconsistent closure_date even after that loan_status gate.
 --
 -- SELECT customer_msisdn, loan_uid, COUNT(DISTINCT closure_date) AS distinct_closure_dates
 -- FROM hive.analytics.tmp_loan_state
 -- WHERE closure_date IS NOT NULL
+--   AND loan_status IN ('SETTLED', 'CLOSED', 'OVERPAID')
 -- GROUP BY 1, 2
 -- HAVING COUNT(DISTINCT closure_date) > 1;
 -- Expected: zero rows.

@@ -131,7 +131,7 @@ FROM model_data
 GROUP BY 1;
 terminal_state_observed_30d
 l.terminal_state_observed_30d
-Indicates whether a settled, closed, overpaid, or closure state was observed within the outcome horizon.
+Indicates whether loan_status was observed as SETTLED, CLOSED, or OVERPAID within the outcome horizon. A standalone "closure_date populated" acceptance path existed here previously but was removed: a direct data check confirmed the source table populates closure_date on genuinely non-terminal rows too (observed on ANOMALY_OPEN rows, holding a stale/unrelated date while the loan was still open), so closure_date alone is not trustworthy evidence of a terminal state without loan_status confirming it.
 
 It helps answer:
 
@@ -264,7 +264,7 @@ The columns below implement the asymmetric censoring policy used to derive label
 
 observed_closure_date_30d
 l.observed_closure_date_30d
-The earliest closure_date genuinely observed (state_date >= closure_date, ruling out a backfilled/provisional value) within the 30-day horizon. NULL if no closure was observed in-window.
+The earliest closure_date genuinely observed within the 30-day horizon, requiring both loan_status IN ('SETTLED','CLOSED','OVERPAID') and state_date >= closure_date (ruling out a backfilled/provisional value). The loan_status check is required, not merely closure_date being populated -- a direct data check confirmed the source table sets closure_date on genuinely non-terminal rows too (e.g. ANOMALY_OPEN rows carrying a stale/unrelated date while the loan was still open), so closure_date alone is not reliable evidence the loan actually closed on that date. NULL if no closure was observed in-window.
 
 closure_observation_state_date_30d
 l.closure_observation_state_date_30d
