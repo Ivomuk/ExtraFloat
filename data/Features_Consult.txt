@@ -6,6 +6,7 @@ max_days_aging_30d
 rollover_observed_7d
 rollover_observed_30d
 terminal_state_observed_30d
+same_day_settlement_observed_30d
 outcome_state_row_count_30d
 outcome_observed_date_count_30d
 post_disbursement_observed_date_count_7d
@@ -297,9 +298,16 @@ near_horizon_observation_30d
 l.near_horizon_observation_30d
 1 iff at least one post-disbursement date was observed and the last such date falls within 5 days of required_observation_end_date_30d. Distinguishes "confirmed good" from "we simply stopped observing this loan".
 
+same_day_settlement_observed_30d
+l.same_day_settlement_observed_30d
+1 iff a terminal status (SETTLED/CLOSED/OVERPAID) was observed with a known, near-zero balance (outstanding_ugx IS NOT NULL AND outstanding_ugx <= 0.01) on state_date = loan_date itself (day 0) -- the one date every other post-disbursement column above deliberately excludes. This is a 24-hour agent-float product, so same-day settlement is the expected best outcome, not sparse follow-up: the source table stops emitting rows for a loan_uid the day after it closes, so observed_date_count_to_required_end_30d (gated to state_date > loan_date) is structurally always 0 for such a loan, and it could never reach confirmed_good_30d = 1 via the normal coverage-ratio path without this independent signal. The NULL-balance check fails closed (an unknown balance is never treated as zero).
+
 confirmed_good_30d
 l.confirmed_good_30d
-1 iff bad_state_3dpd_30d = 0 AND observed_date_count_to_required_end_30d > 0 AND meets_coverage_ratio_30d = 1 AND near_horizon_observation_30d = 1. The "good" half of the asymmetric censoring rule -- deliberately stricter than merely "not observed bad".
+1 iff bad_state_3dpd_30d = 0 AND (
+  (observed_date_count_to_required_end_30d > 0 AND meets_coverage_ratio_30d = 1 AND near_horizon_observation_30d = 1)
+  OR same_day_settlement_observed_30d = 1
+). The "good" half of the asymmetric censoring rule -- deliberately stricter than merely "not observed bad" -- with same-day settlement OR'd in as an independent alternative path alongside the normal bounded-coverage-ratio path.
 
 has_post_disbursement_state_30d
 l.has_post_disbursement_state_30d
@@ -319,7 +327,7 @@ l.label_eligible_30d
 
 label_eligibility_reason_30d
 l.label_eligibility_reason_30d
-One of: KNOWN_BAD, CONFIRMED_GOOD_TERMINAL, CONFIRMED_GOOD_HORIZON, CENSORED_NO_POST_DISBURSEMENT_STATE, CENSORED_INVALID_OBSERVATION_WINDOW, CENSORED_SPARSE_FOLLOW_UP, CENSORED_EARLY_LAST_OBSERVATION, CENSORED_OTHER. A prioritized, human-readable explanation of why label_eligible_30d has the value it does -- useful for auditing the censored population's composition (e.g. is exclusion dominated by sparse follow-up or by early-observation cutoff?). CENSORED_INVALID_OBSERVATION_WINDOW should never appear in a healthy build; a nonzero count is a build-blocking data-integrity failure, not routine censoring.
+One of: KNOWN_BAD, CONFIRMED_GOOD_SAME_DAY, CONFIRMED_GOOD_TERMINAL, CONFIRMED_GOOD_HORIZON, CENSORED_NO_POST_DISBURSEMENT_STATE, CENSORED_INVALID_OBSERVATION_WINDOW, CENSORED_SPARSE_FOLLOW_UP, CENSORED_EARLY_LAST_OBSERVATION, CENSORED_OTHER. A prioritized, human-readable explanation of why label_eligible_30d has the value it does -- useful for auditing the censored population's composition (e.g. is exclusion dominated by sparse follow-up or by early-observation cutoff?). CENSORED_INVALID_OBSERVATION_WINDOW should never appear in a healthy build; a nonzero count is a build-blocking data-integrity failure, not routine censoring.
 
 
 FEATURE_COLUMNS = [

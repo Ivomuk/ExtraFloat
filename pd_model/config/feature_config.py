@@ -152,6 +152,7 @@ PD_FEATURE_BLACKLIST: frozenset[str] = frozenset(
         "rollover_observed_7d",
         "rollover_observed_30d",
         "terminal_state_observed_30d",
+        "same_day_settlement_observed_30d",
         "outcome_state_row_count_30d",
         "outcome_observed_date_count_30d",
         "post_disbursement_observed_date_count_7d",

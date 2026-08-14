@@ -55,6 +55,7 @@ def _loan_df(n: int = 100) -> pd.DataFrame:
             "rollover_observed_7d": rng.integers(0, 2, n),
             "rollover_observed_30d": rng.integers(0, 2, n),
             "terminal_state_observed_30d": rng.integers(0, 2, n),
+            "same_day_settlement_observed_30d": rng.integers(0, 2, n),
             "outcome_state_row_count_30d": rng.integers(0, 30, n),
             "outcome_observed_date_count_30d": rng.integers(0, 30, n),
             "post_disbursement_observed_date_count_7d": rng.integers(0, 7, n),
@@ -289,6 +290,41 @@ class TestRunPhase22LoanHistoryPdFeatures:
             df_diag["bad_state_3dpd_30d"].astype(int) | df_diag["confirmed_good_30d"].astype(int)
         )
         assert (df_diag["label_eligible_30d"].astype(int) == expected).all()
+
+    def test_same_day_settlement_survives_filtering_despite_zero_coverage_ratio(self):
+        """A same-day-settled loan fails every normal coverage-ratio signal
+        (zero observed post-disbursement dates by construction) but must
+        still survive the eligibility filter via the independent
+        same_day_settlement_observed_30d path -- proves Python's filter
+        trusts label_eligible_30d rather than re-deriving eligibility from
+        the coverage-ratio diagnostics, which would wrongly look censored."""
+        df = _loan_df()
+        target_fid = "D000000"
+        row = df.index[df["disbursement_fid"].eq(target_fid)][0]
+        df.loc[row, "bad_state_3dpd_30d"] = 0
+        df.loc[row, "observed_date_count_to_required_end_30d"] = 0
+        df.loc[row, "expected_observed_date_count_30d"] = 30
+        df.loc[row, "follow_up_coverage_ratio_30d"] = 0.0
+        df.loc[row, "meets_coverage_ratio_30d"] = 0
+        df.loc[row, "near_horizon_observation_30d"] = 0
+        df.loc[row, "has_post_disbursement_state_30d"] = 0
+        df.loc[row, "fails_coverage_ratio_30d"] = 1
+        df.loc[row, "fails_near_horizon_30d"] = 1
+        df.loc[row, "same_day_settlement_observed_30d"] = 1
+        df.loc[row, "confirmed_good_30d"] = 1
+        df.loc[row, "label_eligible_30d"] = 1
+        df.loc[row, "label_eligibility_reason_30d"] = "CONFIRMED_GOOD_SAME_DAY"
+
+        df_out, df_diag = run_phase_2_2_loan_history_pd_features(df)
+
+        assert target_fid in set(df_out["disbursement_fid"])
+        out_row = df_out.loc[df_out["disbursement_fid"].eq(target_fid)].iloc[0]
+        assert out_row["bad_state"] == 0
+        assert "same_day_settlement_observed_30d" not in df_out.columns
+
+        diag_row = df_diag.loc[df_diag["disbursement_fid"].eq(target_fid)].iloc[0]
+        assert diag_row["label_eligibility_reason_30d"] == "CONFIRMED_GOOD_SAME_DAY"
+        assert diag_row["same_day_settlement_observed_30d"] == 1
 
     def test_secondary_label_not_stripped(self):
         """bad_state_1dpd_7d is a monitoring signal, not a diagnostic -- it

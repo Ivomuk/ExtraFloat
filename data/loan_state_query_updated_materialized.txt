@@ -569,6 +569,18 @@ WHERE b.mapping_is_unambiguous = 1
 --       observation end (near_horizon_observation_30d) -- otherwise
 --       there is no way to distinguish "confirmed good" from "we
 --       simply stopped observing this loan".
+--   OR, independently of all three of the above,
+--   same_day_settlement_observed_30d = 1: a terminal status
+--   (SETTLED/CLOSED/OVERPAID) observed with a known, near-zero balance
+--   (outstanding_ugx IS NOT NULL AND <= 0.01) on state_date = loan_date
+--   itself (day 0). This is a 24-hour agent-float product, so same-day
+--   settlement is the expected best outcome, not sparse follow-up --
+--   without this path, observed_date_count_to_required_end_30d (gated to
+--   state_date > loan_date) is structurally always 0 for such a loan,
+--   since the source table stops emitting rows for a loan_uid the day
+--   after it closes, and the loan could never reach confirmed_good_30d=1
+--   via the normal coverage-ratio path. The NULL balance check fails
+--   closed (an unknown balance is not treated as zero).
 --
 --   required_observation_end_date_30d shortens the required window to
 --   a genuinely observed closure date when one is seen inside the
@@ -581,8 +593,9 @@ WHERE b.mapping_is_unambiguous = 1
 --
 --   Every row carries label_eligible_30d (1 iff KNOWN_BAD or
 --   CONFIRMED_GOOD_*) and label_eligibility_reason_30d (one of
---   KNOWN_BAD / CONFIRMED_GOOD_TERMINAL / CONFIRMED_GOOD_HORIZON /
---   CENSORED_NO_POST_DISBURSEMENT_STATE / CENSORED_INVALID_OBSERVATION_WINDOW /
+--   KNOWN_BAD / CONFIRMED_GOOD_SAME_DAY / CONFIRMED_GOOD_TERMINAL /
+--   CONFIRMED_GOOD_HORIZON / CENSORED_NO_POST_DISBURSEMENT_STATE /
+--   CENSORED_INVALID_OBSERVATION_WINDOW /
 --   CENSORED_SPARSE_FOLLOW_UP / CENSORED_EARLY_LAST_OBSERVATION /
 --   CENSORED_OTHER). CENSORED_INVALID_OBSERVATION_WINDOW is a genuine
 --   data-integrity signal (required_observation_end_date_30d is
@@ -683,6 +696,36 @@ WITH target_loan_outcome_base AS (
             ELSE 0
         END) AS terminal_state_observed_30d,
 
+        -- Day-0-only evidence for a same-day-settled loan. This is a
+        -- 24-hour agent-float product -- same-day settlement is the
+        -- expected best outcome, not sparse follow-up. Deliberately keyed
+        -- off ls.state_date = d.loan_date (day 0 itself), the one date
+        -- every other post-disbursement aggregate in this CTE excludes by
+        -- design. Without this flag, observed_date_count_to_required_end_30d
+        -- (gated to state_date > loan_date) is structurally always 0 for
+        -- such a loan, since the upstream source table stops emitting
+        -- rows for a loan_uid the day after it closes -- confirmed_good_30d
+        -- could then never be reached via the normal coverage-ratio path.
+        -- The outstanding_ugx checks are defense-in-depth against a
+        -- status/balance inconsistency: IS NOT NULL is required (not
+        -- COALESCE'd to 0) because outstanding_ugx is TRY_CAST'd in
+        -- statement 2, so a malformed source value silently becomes NULL
+        -- there -- COALESCE-ing an unknown balance to 0 here would treat
+        -- "we don't know the balance" as "fully repaid" and fail open,
+        -- exactly backwards from the intent. A negative balance (OVERPAID)
+        -- still passes <= 0.01. If either check fails, this flag stays 0
+        -- and the loan falls through to the existing, unaffected
+        -- CENSORED_NO_POST_DISBURSEMENT_STATE bucket rather than being
+        -- misclassified as confirmed-good.
+        MAX(CASE
+            WHEN ls.state_date = d.loan_date
+             AND ls.loan_status IN ('SETTLED', 'CLOSED', 'OVERPAID')
+             AND ls.outstanding_ugx IS NOT NULL
+             AND ls.outstanding_ugx <= 0.01
+            THEN 1
+            ELSE 0
+        END) AS same_day_settlement_observed_30d,
+
         -- Genuinely observed closure inside the 30-day horizon --
         -- state_date >= closure_date guards against trusting a
         -- provisional/backfilled closure_date before it was actually
@@ -741,7 +784,7 @@ target_loan_coverage AS (
         w.label_horizon_7d_end, w.label_horizon_30d_end,
         w.max_days_aging_7d, w.max_days_aging_30d,
         w.rollover_observed_7d, w.rollover_observed_30d,
-        w.terminal_state_observed_30d,
+        w.terminal_state_observed_30d, w.same_day_settlement_observed_30d,
         w.outcome_state_row_count_30d, w.outcome_observed_date_count_30d,
         w.post_disbursement_observed_date_count_7d, w.post_disbursement_observed_date_count_30d,
         w.last_post_disbursement_state_date_30d,
@@ -772,7 +815,7 @@ target_loan_coverage AS (
         w.label_horizon_7d_end, w.label_horizon_30d_end,
         w.max_days_aging_7d, w.max_days_aging_30d,
         w.rollover_observed_7d, w.rollover_observed_30d,
-        w.terminal_state_observed_30d,
+        w.terminal_state_observed_30d, w.same_day_settlement_observed_30d,
         w.outcome_state_row_count_30d, w.outcome_observed_date_count_30d,
         w.post_disbursement_observed_date_count_7d, w.post_disbursement_observed_date_count_30d,
         w.last_post_disbursement_state_date_30d,
@@ -825,9 +868,14 @@ loan_label_coverage_assessment AS (
 loan_label_confirmation AS (
     SELECT g.*,
         CASE WHEN g.bad_state_3dpd_30d = 0
-              AND g.observed_date_count_to_required_end_30d > 0
-              AND g.meets_coverage_ratio_30d = 1
-              AND g.near_horizon_observation_30d = 1
+              AND (
+                    (
+                        g.observed_date_count_to_required_end_30d > 0
+                    AND g.meets_coverage_ratio_30d = 1
+                    AND g.near_horizon_observation_30d = 1
+                    )
+                 OR g.same_day_settlement_observed_30d = 1
+                 )
              THEN 1 ELSE 0 END AS confirmed_good_30d
     FROM loan_label_coverage_assessment g
 ),
@@ -850,6 +898,18 @@ loan_label_assessment AS (
 
         CASE
             WHEN h.bad_state_3dpd_30d = 1 THEN 'KNOWN_BAD'
+            -- Must precede CONFIRMED_GOOD_HORIZON: once
+            -- same_day_settlement_observed_30d is OR'd into
+            -- confirmed_good_30d (stage 7), HORIZON's condition
+            -- (confirmed_good_30d=1 AND closure NULL) becomes a strict
+            -- superset of this branch's condition and would otherwise
+            -- mask it entirely. Position relative to TERMINAL is
+            -- immaterial: observed_closure_date_30d requires
+            -- closure_date > loan_date, so it is always NULL when the
+            -- loan's only evidence is on day 0 -- TERMINAL structurally
+            -- never matches a same-day-only row.
+            WHEN h.confirmed_good_30d = 1 AND h.same_day_settlement_observed_30d = 1
+                THEN 'CONFIRMED_GOOD_SAME_DAY'
             WHEN h.confirmed_good_30d = 1 AND h.observed_closure_date_30d IS NOT NULL
                 THEN 'CONFIRMED_GOOD_TERMINAL'
             WHEN h.confirmed_good_30d = 1 THEN 'CONFIRMED_GOOD_HORIZON'
@@ -1764,6 +1824,7 @@ SELECT
     l.rollover_observed_7d,
     l.rollover_observed_30d,
     l.terminal_state_observed_30d,
+    l.same_day_settlement_observed_30d,
     l.outcome_state_row_count_30d,
     l.outcome_observed_date_count_30d,
     l.post_disbursement_observed_date_count_7d,
@@ -1853,6 +1914,41 @@ LEFT JOIN current_loan_features c
 -- SELECT COUNT(*), COUNT(DISTINCT disbursement_fid)
 -- FROM hive.analytics.tmp_loan_label_assessment;
 -- Expected: the two counts match.
+
+-- Diagnostic only (NOT build-blocking) -- run after statement 2. Count
+-- of day-0 terminal-status rows for the mapped target loan rejected by
+-- same_day_settlement_observed_30d's outstanding-balance cross-check.
+-- Scoped identically to that flag itself (mapped target loan,
+-- state_date = loan_date) so this doesn't count unrelated terminal rows
+-- from other dates or loans. rejected_null_outstanding_rows isolated
+-- from rejected_positive_outstanding_rows so a TRY_CAST parsing failure
+-- stays visible as its own signal rather than folded into "balance still
+-- positive". Investigate if nonzero and growing -- not itself an error.
+-- SELECT
+--     COUNT(*) AS rejected_same_day_terminal_rows,
+--     COUNT_IF(ls.outstanding_ugx IS NULL)
+--         AS rejected_null_outstanding_rows,
+--     COUNT_IF(ls.outstanding_ugx > 0.01)
+--         AS rejected_positive_outstanding_rows
+-- FROM hive.analytics.tmp_target_loans d
+-- JOIN hive.analytics.tmp_loan_state ls
+--   ON ls.customer_msisdn = d.msisdn
+--  AND ls.loan_uid = d.target_loan_uid
+--  AND ls.state_date = d.loan_date
+-- WHERE ls.loan_status IN ('SETTLED', 'CLOSED', 'OVERPAID')
+--   AND (ls.outstanding_ugx IS NULL OR ls.outstanding_ugx > 0.01);
+
+-- Build-blocking -- run after statement 4. same_day_settlement_observed_30d
+-- and observed_closure_date_30d are assumed disjoint (the source table
+-- stops emitting rows for a loan_uid the day after it closes, so a
+-- same-day-only loan can never also have a later observed closure date).
+-- A nonzero result means that assumption no longer holds on this data and
+-- CONFIRMED_GOOD_SAME_DAY vs. CONFIRMED_GOOD_TERMINAL precedence needs
+-- revisiting.
+-- SELECT COUNT(*) FROM hive.analytics.tmp_loan_label_assessment
+-- WHERE same_day_settlement_observed_30d = 1
+--   AND observed_closure_date_30d IS NOT NULL;
+-- Expected: 0.
 
 
 -- =====================================================================
