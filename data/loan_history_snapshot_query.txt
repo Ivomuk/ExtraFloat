@@ -622,13 +622,19 @@ disbursement_history_features AS (
             0
         ) AS disbursed_ugx_180d,
 
+        -- b.snapshot_date is wrapped in MAX() here (constant per msisdn --
+        -- base has exactly one row per msisdn, see the "1. Snapshot date"
+        -- CTE above) purely so Trino accepts it inside this GROUP BY
+        -- b.msisdn aggregate expression; every other reference to
+        -- b.snapshot_date in this CTE is already inside a SUM(CASE ...)
+        -- and needed no such wrapping.
         CASE
             WHEN COUNT(pd.disbursement_fid) > 0
             THEN
                 DATE_DIFF(
                     'month',
                     MIN(pd.loan_date),
-                    b.snapshot_date
+                    MAX(b.snapshot_date)
                 ) + 1
         END AS months_since_first_observed_loan
 
