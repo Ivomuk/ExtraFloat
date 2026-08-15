@@ -199,6 +199,13 @@ latest_state AS (
 -- Closed loans get a separate ranking, exactly as in
 -- loan_state_query_updated.txt, so max_tenure_days_last_5_closed_loans
 -- and the on-time streak walk back through closed loans only.
+-- loan_status IN (...) is required alongside closure_date IS NOT NULL --
+-- confirmed via a direct data check that the source table populates
+-- closure_date on genuinely non-terminal rows too (e.g. ANOMALY_OPEN
+-- rows carrying a stale/unrelated date while the loan was still open),
+-- so closure_date alone is not reliable evidence a loan actually closed
+-- (same finding and fix as loan_state_query_updated_materialized.txt's
+-- closed_prior_loans_ranked).
 closed_loans_ranked AS (
     SELECT
         a.*,
@@ -214,6 +221,7 @@ closed_loans_ranked AS (
 
     FROM agent_loans a
     WHERE a.closure_date IS NOT NULL
+      AND a.loan_status IN ('SETTLED', 'CLOSED', 'OVERPAID')
 ),
 
 -- ---------------------------------------------------------------------
@@ -337,11 +345,18 @@ loan_history_features AS (
 
         COUNT(*) AS observed_loan_count,
 
-        COUNT_IF(closure_date IS NOT NULL) AS closed_loan_count,
+        -- loan_status IN (...) required alongside closure_date IS NOT
+        -- NULL in every "closed loan" condition below -- see
+        -- closed_loans_ranked's comment above for why.
+        COUNT_IF(
+            closure_date IS NOT NULL
+            AND loan_status IN ('SETTLED', 'CLOSED', 'OVERPAID')
+        ) AS closed_loan_count,
 
         AVG(
             CASE
                 WHEN closure_date IS NOT NULL
+                 AND loan_status IN ('SETTLED', 'CLOSED', 'OVERPAID')
                 THEN TRY_CAST(tenure_days AS DOUBLE)
             END
         ) AS avg_tenure_days_closed_loans,
@@ -402,10 +417,13 @@ loan_history_features AS (
 
         -- Closed-loan-only ratio avoids mechanically penalizing an agent
         -- merely because a loan is still open at snapshot time.
+        -- loan_status IN (...) required alongside closure_date IS NOT
+        -- NULL -- see closed_loans_ranked's comment above for why.
         CASE
             WHEN SUM(
                 CASE
                     WHEN closure_date IS NOT NULL
+                     AND loan_status IN ('SETTLED', 'CLOSED', 'OVERPAID')
                     THEN COALESCE(loan_disbursed_ugx, 0)
                     ELSE 0
                 END
@@ -414,6 +432,7 @@ loan_history_features AS (
                 SUM(
                     CASE
                         WHEN closure_date IS NOT NULL
+                         AND loan_status IN ('SETTLED', 'CLOSED', 'OVERPAID')
                         THEN COALESCE(loan_repaid_ugx, 0)
                         ELSE 0
                     END
@@ -422,6 +441,7 @@ loan_history_features AS (
                 SUM(
                     CASE
                         WHEN closure_date IS NOT NULL
+                         AND loan_status IN ('SETTLED', 'CLOSED', 'OVERPAID')
                         THEN COALESCE(loan_disbursed_ugx, 0)
                         ELSE 0
                     END
