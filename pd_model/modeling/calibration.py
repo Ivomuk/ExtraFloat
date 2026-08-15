@@ -411,7 +411,17 @@ def _batched_auc(y_b: np.ndarray, score_b: np.ndarray) -> np.ndarray:
     see test_calibration.py).
     """
     ranks = rankdata(score_b, method="average", axis=1)
-    n_pos = y_b.sum(axis=1)
+    # dtype=np.int64 is required, not incidental -- numpy's .sum() promotes
+    # an integer accumulator only to the platform's native int width, which
+    # is int64 on Linux/Mac but int32 on Windows. n_pos * n_neg (and
+    # n_pos * (n_pos + 1)) silently overflows a 32-bit accumulator once
+    # n_rows reaches the tens of thousands (e.g. n_pos=n_neg=50,000 gives
+    # a true product of 2.5B against an int32 max of ~2.15B), producing a
+    # wrapped, sometimes-negative denominator and wildly wrong AUC/CI
+    # values with no error raised -- confirmed to reproduce exactly this
+    # way on a real bootstrap run. int64 has no realistic overflow risk at
+    # any dataset size this code will see.
+    n_pos = y_b.sum(axis=1, dtype=np.int64)
     n_neg = y_b.shape[1] - n_pos
     sum_pos_ranks = (ranks * y_b).sum(axis=1)
     with np.errstate(invalid="ignore", divide="ignore"):
@@ -482,8 +492,12 @@ def run_bootstrap_comparison(
         ).dropna()
         align_mode = "index_intersection"
 
-    cmp_df["y_xgb"] = cmp_df["y_xgb"].astype(int)
-    cmp_df["y_lgb"] = cmp_df["y_lgb"].astype(int)
+    # int64, not bare int -- pandas' .astype(int) resolves to the platform's
+    # native int width (int32 on Windows, int64 on Linux/Mac). _batched_auc
+    # now forces its own int64 accumulator regardless, but fixing the dtype
+    # at its source here too avoids depending on that alone.
+    cmp_df["y_xgb"] = cmp_df["y_xgb"].astype(np.int64)
+    cmp_df["y_lgb"] = cmp_df["y_lgb"].astype(np.int64)
     y_mismatch = int((cmp_df["y_xgb"] != cmp_df["y_lgb"]).sum())
     cmp_df = cmp_df.drop(columns=["y_lgb"]).rename(columns={"y_xgb": "y"})
 

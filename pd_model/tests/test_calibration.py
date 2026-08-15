@@ -225,6 +225,60 @@ class TestBatchedAucEquivalence:
         assert not np.isnan(actual[1])
         assert np.isnan(actual[2])  # all negative
 
+    def test_matches_sklearn_at_scale_with_int32_input(self):
+        """Regression test for a real production bug: pandas' bare
+        .astype(int) yields int32 on Windows (vs int64 on Linux/Mac,
+        since numpy's integer .sum() only promotes to the platform's
+        native int width). n_pos * n_neg silently overflows a 32-bit
+        accumulator once n_rows reaches the tens of thousands (a real
+        bootstrap run at n=225,940 produced n_pos*n_neg ~9.2B against an
+        int32 max of ~2.15B), giving a wrapped, sometimes-negative
+        denominator and wildly wrong AUC/CI values with no error raised.
+        Explicitly constructs int32 input at overflow-triggering scale so
+        this is caught even on 64-bit Linux CI, where an *unfixed* version
+        of this code would NOT itself reproduce the bug (ambient .sum()
+        promotion happens to land on int64 there already) -- this test
+        instead pins that _batched_auc's own accumulator is explicitly
+        wide (dtype=np.int64), independent of the input's or the
+        platform's native width, and the caller's dtype (see
+        run_bootstrap_comparison's own .astype(int) on y_xgb/y_lgb) never
+        needs to be trusted."""
+        rng = np.random.default_rng(0)
+        n_rows = 100_000
+        y = np.zeros(n_rows, dtype=np.int32)
+        y[: n_rows // 2] = 1
+        rng.shuffle(y)
+        assert int(y.sum()) * int(n_rows - y.sum()) > np.iinfo(np.int32).max, (
+            "fixture must actually exceed int32 max to be a meaningful regression guard"
+        )
+        score = rng.random(n_rows)
+
+        expected = roc_auc_score(y, score)
+        actual = _batched_auc(y.reshape(1, -1), score.reshape(1, -1))[0]
+
+        assert np.isclose(actual, expected, atol=1e-9), (
+            f"_batched_auc={actual} vs sklearn={expected} -- possible int32 overflow regression"
+        )
+
+    def test_int64_accumulator_dtype_is_explicit(self):
+        """Guards against silently reverting the int32-overflow fix by
+        removing the explicit dtype=np.int64 on n_pos's .sum() call --
+        the preceding test alone can't catch that reversion on 64-bit
+        Linux CI, since ambient numpy .sum() promotion already lands on
+        int64 there, masking a bug that only manifests on Windows
+        (where numpy's integer .sum() promotes an accumulator no wider
+        than the platform's native int width, i.e. int32)."""
+        import inspect
+
+        from pd_model.modeling import calibration
+
+        source = inspect.getsource(calibration._batched_auc)
+        assert "dtype=np.int64" in source, (
+            "_batched_auc must explicitly force an int64 accumulator for n_pos -- "
+            "removing this silently reintroduces a Windows-only int32 overflow bug "
+            "that 64-bit Linux CI cannot detect via output-based testing alone"
+        )
+
     def test_bootstrap_comparison_produces_finite_cis(self):
         """End-to-end sanity check that the vectorized loop still produces
         usable CI bounds through the full run_bootstrap_comparison path."""
