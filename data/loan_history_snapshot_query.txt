@@ -84,10 +84,14 @@
 WITH
 
 -- ---------------------------------------------------------------------
--- 1. Snapshot date. Edit this to move the "as of" point.
+-- 1. Snapshot date. Edit this to move the "as of" point -- must be <=
+-- the base tables' actual max state_date (re-check via
+-- SELECT MAX(state_date) FROM hive.analytics.tmp_loan_state, since
+-- source data availability moves forward over time). Last confirmed:
+-- 2026-06-19.
 -- ---------------------------------------------------------------------
 snapshots AS (
-    SELECT CAST(20260731 AS BIGINT) AS snapshot_dt
+    SELECT CAST(20260619 AS BIGINT) AS snapshot_dt
 ),
 
 -- ---------------------------------------------------------------------
