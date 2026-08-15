@@ -303,7 +303,13 @@ def run_credit_risk_pipeline(
 
     repayment_df = None
     if repayment_file is not None:
-        repayment_df = pd.read_csv(repayment_file, sep=None, engine="python")
+        # sep=None + engine="python" (delimiter sniffing) previously caused a
+        # multi-GB memory blowup and effective hang on a stray/unbalanced
+        # quote character in the source file -- the Python engine's sniffer
+        # can misread everything after a lone quote as one giant field.
+        # Comma is this file's actual, confirmed delimiter; the fast C
+        # engine (default when sep is explicit) avoids both problems.
+        repayment_df = pd.read_csv(repayment_file, sep=",")
         logger.info("Repayment file loaded: %d rows", len(repayment_df))
         if snapshot_date is not None:
             if "snapshot_dt" not in repayment_df.columns and "tbl_dt" not in repayment_df.columns:
