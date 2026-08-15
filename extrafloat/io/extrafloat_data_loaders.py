@@ -75,7 +75,12 @@ def _read_csv(path: str | Path) -> pd.DataFrame:
     p = Path(path)
     if not p.exists():
         raise FileNotFoundError(f"ExtraFloat data loader: file not found -- {p.resolve()}")
-    df = pd.read_csv(p, sep=None, engine="python")
+    # sep="," (not sep=None + engine="python") -- delimiter sniffing via the
+    # slow Python engine can misread a stray/unbalanced quote character as
+    # opening a field that never closes, spanning the rest of the file and
+    # causing multi-GB memory growth with no realistic finish time. All
+    # ExtraFloat input files are confirmed comma-delimited.
+    df = pd.read_csv(p, sep=",")
     logger.info("Loaded %s -- %d rows, %d columns", p.name, len(df), len(df.columns))
     return df
 

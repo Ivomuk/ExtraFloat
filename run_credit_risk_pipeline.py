@@ -279,8 +279,13 @@ def run_credit_risk_pipeline(
 
     # -- Stage 1: Load raw data ----------------------------------------------
     logger.info("Stage 1: loading raw data")
-    # Raw read preserves agent_msisdn -- required by PD model Phase 2.1
-    df_agent = pd.read_csv(transaction_file, sep=None, engine="python")
+    # Raw read preserves agent_msisdn -- required by PD model Phase 2.1.
+    # sep="," (not sep=None + engine="python") -- see the repayment_df read
+    # below for why: delimiter sniffing on a stray/unbalanced quote
+    # character can make pandas misread the rest of a file as one giant
+    # field, causing multi-GB memory growth and an effective hang. All
+    # input files here are confirmed comma-delimited.
+    df_agent = pd.read_csv(transaction_file, sep=",")
     # Loader renames agent_msisdn -> msisdn for the engine
     df_txn = load_transaction_capacity_features(transaction_file)
     df_loan = load_loan_summary_recent_features(loan_file)
