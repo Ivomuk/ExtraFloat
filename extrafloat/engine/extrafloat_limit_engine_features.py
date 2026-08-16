@@ -586,8 +586,15 @@ def prepare_transaction_capacity_features(
     _tier_cfg = DEFAULT_CAP_CONFIG.get("agent_tier", {})
     _tier_map = _tier_cfg.get("tiers", {})
     _commission_thresholds = _tier_cfg.get("commission_thresholds", {})
-    # commission = COALESCE(SUM(cash_out_comm_6m + cash_in_comm_6m + voucher_cust_6m
-    #              + payment_cust_6m), 0) — 6-month rolling window from mfs_daily_agent_mart.
+    # commission = COALESCE(SUM(cash_out_comm_6m + cash_in_comm_6m + voucher_comm_6m
+    #              + payment_comm_6m), 0) — 6-month rolling window from mfs_daily_agent_mart.
+    # (Corrected from an earlier version of this comment that read
+    # voucher_cust_6m / payment_cust_6m -- verified against 4 sample rows
+    # from a live extract that the real upstream formula uses the _comm_6m
+    # sibling of each field, not _cust_6m. This is documentation only: the
+    # code below reads the pre-computed commission column directly and
+    # never recomputes it from parts, so the stale comment never affected
+    # actual tier assignments.)
     commission = pd.to_numeric(df.get("commission", 0), errors="coerce").fillna(0)
 
     def _commission_to_multiplier(c):
