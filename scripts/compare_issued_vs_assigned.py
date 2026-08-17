@@ -59,7 +59,7 @@ def main():
     fin = pd.read_csv(fin_path)
     out = pd.read_csv(out_path)
 
-    required_fin_cols = ["instruct_amount", "instruct_amount_to_fro_user_prf", "instruct_to_fro_msisdn"]
+    required_fin_cols = ["instruct_amount", "instruct_from_fro_user_prf", "instruct_to_fro_msisdn"]
     missing_fin = [c for c in required_fin_cols if c not in fin.columns]
     if missing_fin:
         sys.exit(
@@ -93,7 +93,7 @@ def main():
             issued_amount_total=("instruct_amount", "sum"),
             issued_amount_max=("instruct_amount", "max"),
             issued_instruction_count=("instruct_amount", "size"),
-            agent_profile=("instruct_amount_to_fro_user_prf", "first"),
+            agent_profile=("instruct_from_fro_user_prf", "first"),
         )
         .reset_index()
     )
