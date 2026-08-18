@@ -51,6 +51,20 @@ KNOWN_ACCEPTED_DISAGREEMENTS = {
     "master agent bronze class",
 }
 
+# Unclassified profiles with a genuinely ambiguous behavioral signal
+# (real but modest activity, well below the confirmed-retail baseline),
+# deliberately left unclassified pending a business decision rather than
+# guessed at -- population is tiny enough (189 agents combined, 0.04% of
+# the file) that it's not worth blocking the review gate on. Still
+# excluded by default via the unclassified safety net either way; this
+# only silences the recurring flag. Move to RETAIL_PROFILES or
+# NON_RETAIL_PROFILES in apply_retail_agent_filter.py once business
+# confirms, and remove from here.
+KNOWN_PENDING_UNCLASSIFIED = {
+    "mobile money dsd agent profile",
+    "merchant master agent hierarchy account",
+}
+
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -114,6 +128,9 @@ def main():
         if sig == "insufficient_data":
             return ""
         if cat == "unclassified":
+            key = _normalize_profile_text(row[args.profile_col])
+            if key in KNOWN_PENDING_UNCLASSIFIED:
+                return "acknowledged (pending): ambiguous, tiny population, awaiting business confirmation"
             return (
                 "SUGGEST non-retail (behaves like the confirmed non-retail profiles)"
                 if sig == "mostly_zero"
