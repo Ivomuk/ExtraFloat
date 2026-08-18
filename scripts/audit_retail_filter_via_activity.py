@@ -35,7 +35,21 @@ from pathlib import Path
 import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from apply_retail_agent_filter import classify_agent_profile  # noqa: E402
+from apply_retail_agent_filter import classify_agent_profile, _normalize_profile_text  # noqa: E402
+
+# Profiles where "REVIEW: classified {rebalancer/derisk} but shows real
+# customer activity" is expected, permanent behavior, already confirmed
+# with business -- not a new finding each run. Excluded from n_review (so
+# the exit-code gate a .bat file checks isn't perpetually tripped by the
+# same known cases) but still shown in the table with their own flag, so
+# they stay visible rather than silently disappearing.
+KNOWN_ACCEPTED_DISAGREEMENTS = {
+    "agent derisk class",
+    "super agent branch account",
+    "super agent master account",
+    "master agent silver class",
+    "master agent bronze class",
+}
 
 
 def main():
@@ -108,13 +122,22 @@ def main():
         if cat == "retail" and sig == "mostly_zero":
             return "REVIEW: classified retail but behaves non-customer-facing"
         if cat in ("non_retail", "rebalancer", "derisk") and sig == "has_real_activity":
+            key = _normalize_profile_text(row[args.profile_col])
+            if key in KNOWN_ACCEPTED_DISAGREEMENTS:
+                return f"acknowledged (expected): classified {cat}, known to show some real activity"
             return f"REVIEW: classified {cat} but shows real customer activity"
         return "consistent"
 
     profile_tbl["audit_flag"] = profile_tbl.apply(_flag, axis=1)
-    profile_tbl["_flag_priority"] = profile_tbl["audit_flag"].apply(
-        lambda v: 0 if v not in ("", "consistent") else 1
-    )
+
+    def _flag_priority(v: str) -> int:
+        if v.startswith("REVIEW") or v.startswith("SUGGEST"):
+            return 0
+        if v.startswith("acknowledged"):
+            return 1
+        return 2  # "" or "consistent"
+
+    profile_tbl["_flag_priority"] = profile_tbl["audit_flag"].apply(_flag_priority)
     profile_tbl = profile_tbl.sort_values(
         by=["_flag_priority", "n"], ascending=[True, False]
     ).drop(columns=["_flag_priority"])
@@ -124,13 +147,21 @@ def main():
           f"profiles with fewer than {args.min_profile_n} agents are not judged.\n")
     print(profile_tbl.to_string(index=False))
 
-    n_review = int((~profile_tbl["audit_flag"].isin(["", "consistent"])).sum())
     n_suggest = int(profile_tbl["audit_flag"].str.startswith("SUGGEST", na=False).sum())
     n_disagree = int(profile_tbl["audit_flag"].str.startswith("REVIEW", na=False).sum())
-    print(f"\n{n_review} profiles flagged in total: {n_disagree} disagree with the current "
-          f"classification (worth investigating), {n_suggest} are unclassified with a "
-          f"behavioral suggestion (worth confirming with business, then adding to the "
-          f"appropriate list in apply_retail_agent_filter.py).")
+    n_acknowledged = int(profile_tbl["audit_flag"].str.startswith("acknowledged", na=False).sum())
+    # Gate on genuinely new findings only -- "acknowledged" disagreements
+    # are expected, permanent, already-confirmed business behavior, so
+    # they don't count toward n_review (the exit-code-2 gate below).
+    n_review = n_suggest + n_disagree
+    print(f"\n{n_review} profile(s) need review: {n_disagree} disagree with the current "
+          f"classification, {n_suggest} are unclassified with a behavioral suggestion "
+          f"(worth confirming with business, then adding to the appropriate list in "
+          f"apply_retail_agent_filter.py).")
+    if n_acknowledged:
+        print(f"{n_acknowledged} additional profile(s) show a known, already-acknowledged "
+              f"disagreement (see 'acknowledged (expected)' rows above) -- not counted "
+              f"toward the review gate.")
 
     profile_tbl.to_csv(args.out, index=False)
     print(f"\nFull per-profile audit written to: {args.out}")
