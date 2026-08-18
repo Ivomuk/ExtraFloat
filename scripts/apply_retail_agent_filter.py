@@ -171,6 +171,8 @@ def main():
                      help="Keep Agent Derisk Class as retail (default: excluded, pending business confirmation)")
     ap.add_argument("--out-retail", default="retail_agents_filtered.csv")
     ap.add_argument("--out-excluded", default="retail_agents_excluded.csv")
+    ap.add_argument("--out-excluded-with-commission", default="retail_agents_excluded_with_commission.csv",
+                     help="Excluded agents who still show meaningful recomputed commission -- worth a second look")
     args = ap.parse_args()
 
     txn_path = Path(args.transaction_file)
@@ -226,7 +228,58 @@ def main():
         for val in unclassified[args.profile_col].drop_duplicates():
             print(f"  {repr(val)}  ->  normalized: {repr(_normalize_profile_text(val))}")
 
-    retail_df = df[df["_is_retail"]].drop(columns=["_retail_category", "_is_retail"])
+    # -- Commission validation: excluded profiles (non_retail/rebalancer/
+    #    derisk/unclassified) shouldn't be earning retail commission, since
+    #    they're not supposed to be doing end-customer transactions. Compute
+    #    commission from parts (the formula verified against real sample
+    #    rows earlier this session) at every window and check whether that
+    #    holds -- and specifically surface any excluded agent who DOES show
+    #    meaningful commission, since that's either a misclassification or
+    #    a genuinely mixed-role agent worth a second look. This validates
+    #    the profile-based filter; it does not change what gets excluded. --
+    windows = ["1m", "3m", "6m"]
+    comm_parts = ["cash_out_comm", "cash_in_comm", "voucher_comm", "payment_comm"]
+    have_commission_cols = all(f"{p}_{w}" in df.columns for w in windows for p in comm_parts)
+    if have_commission_cols:
+        for w in windows:
+            cols = [f"{p}_{w}" for p in comm_parts]
+            df[f"commission_{w}"] = sum(pd.to_numeric(df[c], errors="coerce").fillna(0) for c in cols)
+
+        print("\n=== Recomputed commission by retail_category (validates the profile filter) ===")
+        print(
+            df.groupby("_retail_category")[["commission_1m", "commission_3m", "commission_6m"]]
+            .agg(["mean", "median"])
+            .round(1)
+            .to_string()
+        )
+
+        # Same "meaningfully active" reference used throughout this session:
+        # population median 1-month commission (~6,801 UGX) x 6.
+        substantial_floor = 6_801.0 * 6
+        excluded_with_commission = df[
+            (~df["_is_retail"]) & (df["commission_6m"] >= substantial_floor)
+        ]
+        n_ewc = len(excluded_with_commission)
+        n_excluded_total = int((~df["_is_retail"]).sum())
+        print(
+            f"\nExcluded agents with commission_6m >= {substantial_floor:,.0f} despite not being "
+            f"retail-classified: {n_ewc:,} of {n_excluded_total:,} excluded agents "
+            f"({n_ewc/max(1,n_excluded_total):.1%}) -- possible misclassification or mixed-role "
+            f"agents; worth reviewing individually."
+        )
+        if n_ewc > 0:
+            print(
+                excluded_with_commission["_retail_category"].value_counts()
+                .rename("n").to_frame().to_string()
+            )
+            excluded_with_commission.to_csv(args.out_excluded_with_commission, index=False)
+            print(f"Written to: {args.out_excluded_with_commission}")
+    else:
+        print("\nNOTE: commission component columns (cash_out_comm_1m/3m/6m etc.) not all "
+              "present -- skipping the commission validation check.")
+
+    drop_cols = ["_retail_category", "_is_retail"]
+    retail_df = df[df["_is_retail"]].drop(columns=drop_cols)
     excluded_df = df[~df["_is_retail"]]
 
     print(f"\nRetail population (kept): {len(retail_df):,} ({len(retail_df)/n_total:.1%})")
