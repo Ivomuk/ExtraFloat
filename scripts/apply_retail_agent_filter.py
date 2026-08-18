@@ -109,7 +109,6 @@ NON_RETAIL_PROFILES = {
     "no end user transactions allowed",
     "direct sales",
     "merchant service centers",
-    "merchant master agent hierarchy account",
     "super agent escrow master account",
     "super agent escrow branch account",
     "super agent branch handler",
@@ -124,7 +123,7 @@ NON_RETAIL_PROFILES = {
     "dealer branch dsd agent profile",
     "dsd bronze agent profile",
     "dsd silver agent profile",
-    "mobile money dsd agent profile",
+    "dsd gold agent profile",
     "service provider agency profile",
     "open api agent cashin cashout profile",
 }
