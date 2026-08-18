@@ -135,6 +135,14 @@ def main():
     profile_tbl.to_csv(args.out, index=False)
     print(f"\nFull per-profile audit written to: {args.out}")
 
+    # Exit code lets a .bat file chain into apply_retail_agent_filter.py
+    # only when there's nothing to review: 0 = clean, 2 = flags found
+    # (distinct from 1, which argparse/sys.exit(str) already use for a
+    # genuine script error like a missing file).
+    if n_review > 0:
+        print(f"\nExiting with code 2 ({n_review} flag(s) found) -- review before proceeding.")
+        sys.exit(2)
+
 
 if __name__ == "__main__":
     main()
