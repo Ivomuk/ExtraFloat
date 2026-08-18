@@ -69,20 +69,32 @@ from pathlib import Path
 import pandas as pd
 
 _WHITESPACE_RE = re.compile(r"\s+")
+# Real export values carry an "MTNU" network/brand prefix ahead of the
+# actual profile name (e.g. "MTNU Agent Silver Class") -- confirmed
+# against the real data, not the invisible-character issue this
+# normalizer was originally built for. Matched after lowercasing, with
+# any separator (space, hyphen, underscore, or none at all) between the
+# prefix and the real name, since the exact separator format wasn't
+# specified.
+_MTNU_PREFIX_RE = re.compile(r"^mtnu[\s\-_]*")
 
 
 def _normalize_profile_text(s) -> str:
     """Defensive normalization for real-world export text: NFKC-normalizes
     Unicode compatibility variants, strips BOM/zero-width-space markers
-    that a plain .strip() won't catch, and collapses ANY internal
-    whitespace run (including non-breaking spaces, tabs) to a single
-    space -- not just the edges. A profile string that looks identical
-    when printed can still fail a plain .strip().lower() equality check
-    if it carries invisible characters a terminal doesn't render."""
+    that a plain .strip() won't catch, collapses ANY internal whitespace
+    run (including non-breaking spaces, tabs) to a single space -- not
+    just the edges -- and strips a leading "MTNU" brand prefix. A profile
+    string that looks identical when printed can still fail a plain
+    .strip().lower() equality check if it carries invisible characters a
+    terminal doesn't render, or a prefix that isn't part of the actual
+    profile name being matched against."""
     text = unicodedata.normalize("NFKC", str(s))
     text = text.replace("\ufeff", "").replace("\u200b", "")
     text = _WHITESPACE_RE.sub(" ", text)
-    return text.strip().lower()
+    text = text.strip().lower()
+    text = _MTNU_PREFIX_RE.sub("", text)
+    return text.strip()
 
 RETAIL_PROFILES = {
     "agent bronze class",
