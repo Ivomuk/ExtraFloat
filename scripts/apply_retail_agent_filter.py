@@ -61,10 +61,28 @@ once business confirms they should count as retail.
 """
 
 import argparse
+import re
 import sys
+import unicodedata
 from pathlib import Path
 
 import pandas as pd
+
+_WHITESPACE_RE = re.compile(r"\s+")
+
+
+def _normalize_profile_text(s) -> str:
+    """Defensive normalization for real-world export text: NFKC-normalizes
+    Unicode compatibility variants, strips BOM/zero-width-space markers
+    that a plain .strip() won't catch, and collapses ANY internal
+    whitespace run (including non-breaking spaces, tabs) to a single
+    space -- not just the edges. A profile string that looks identical
+    when printed can still fail a plain .strip().lower() equality check
+    if it carries invisible characters a terminal doesn't render."""
+    text = unicodedata.normalize("NFKC", str(s))
+    text = text.replace("\ufeff", "").replace("\u200b", "")
+    text = _WHITESPACE_RE.sub(" ", text)
+    return text.strip().lower()
 
 RETAIL_PROFILES = {
     "agent bronze class",
@@ -117,7 +135,7 @@ DERISK_PROFILES = {
 
 def classify_agent_profile(profile: str, include_rebalancers: bool, include_derisk: bool) -> str:
     """Returns one of: retail, non_retail, rebalancer, derisk, unclassified."""
-    key = str(profile).strip().lower()
+    key = _normalize_profile_text(profile)
     if key in RETAIL_PROFILES:
         return "retail"
     if key in NON_RETAIL_PROFILES:
@@ -159,7 +177,11 @@ def main():
     if not txn_path.exists():
         sys.exit(f"ERROR: transaction file not found: {txn_path}")
 
-    df = pd.read_csv(txn_path, sep=",")
+    # encoding="utf-8-sig" strips a leading BOM automatically if present
+    # (handles a BOM on the header row); the per-value normalizer below
+    # additionally handles a BOM/zero-width-space embedded inside a data
+    # value itself, which utf-8-sig alone would not catch.
+    df = pd.read_csv(txn_path, sep=",", encoding="utf-8-sig")
     if args.profile_col not in df.columns:
         sys.exit(f"ERROR: '{args.profile_col}' column not found. Found: {list(df.columns)[:30]}")
 
@@ -193,6 +215,16 @@ def main():
         print(unclassified[args.profile_col].value_counts().to_string())
         print("Review these and add them to RETAIL_PROFILES / NON_RETAIL_PROFILES / "
               "REBALANCER_PROFILES / DERISK_PROFILES in this script as appropriate.")
+
+        # If a value here LOOKS like a known profile (e.g. "Agent Silver
+        # Class") but still didn't match after normalization, repr() will
+        # reveal the exact hidden character(s) a terminal doesn't render
+        # (e.g. '\xa0' non-breaking space, '﻿' BOM, '​' zero-
+        # width space) so the normalizer or the known-profile lists can be
+        # corrected precisely instead of guessed at again.
+        print("\nRaw repr() of each distinct unclassified value (reveals hidden characters):")
+        for val in unclassified[args.profile_col].drop_duplicates():
+            print(f"  {repr(val)}  ->  normalized: {repr(_normalize_profile_text(val))}")
 
     retail_df = df[df["_is_retail"]].drop(columns=["_retail_category", "_is_retail"])
     excluded_df = df[~df["_is_retail"]]
