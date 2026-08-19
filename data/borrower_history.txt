@@ -60,9 +60,9 @@ WITH snapshots AS (
 -- reproducibility reason as as_of_load_ts, use a frozen literal, not
 -- CURRENT_TIMESTAMP, when replaying a historical snapshot.
 SELECT
-cast(20260531 AS bigint) AS snapshot_dt,
-cast('2026-06-01 00:00:00.000' AS timestamp) AS as_of_load_ts,
-cast('2026-06-01 00:00:00.000' AS timestamp) AS snapshot_ts
+cast(20260731 AS bigint) AS snapshot_dt,
+cast('2026-08-01 00:00:00.000' AS timestamp) AS as_of_load_ts,
+cast('2026-08-01 00:00:00.000' AS timestamp) AS snapshot_ts
 ),
 loan_level AS (
 -- ── Begin: loan-level query sourced from the momo_loan_book_tracker tables ──

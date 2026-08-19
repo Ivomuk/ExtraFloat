@@ -21,9 +21,9 @@
 -- Substitute before running:
 --   :validation_schema  -- a database you have CREATE VIEW rights in (a
 --                            scratch/sandbox schema, not production)
---   :snapshot_dt         -- e.g. 20260531 -- MUST match the borrower_history.txt
+--   :snapshot_dt         -- e.g. 20260731 -- MUST match the borrower_history.txt
 --                            run being validated
---   :as_of_load_ts       -- e.g. TIMESTAMP '2026-06-01 00:00:00.000' -- MUST
+--   :as_of_load_ts       -- e.g. TIMESTAMP '2026-08-01 00:00:00.000' -- MUST
 --                            match the borrower_history.txt run being validated
 -- ============================================================================
 --
