@@ -1,57 +1,175 @@
 -- ============================================================================
--- borrower_credit_limit_aggregated.txt
+-- borrower_history.txt
 -- ============================================================================
 -- Produces the BORROWER-LEVEL dataset expected by
 -- prepare_borrower_limit_features() / load_borrower_limit_features()
--- (one row per phonenumber),
+-- (one row per phonenumber).
 --
--- Self-contained: wraps the entire loan-level query from
--- data/borrower_lifecycle_features.sql (UNCHANGED — kept as the base query) as the
--- loan_level CTE, then aggregates it up to the borrower level.
+-- Sourced from the MoMo loan-book tracker tables (replaces the old
+-- devdata.xtrafloat_daily_trans transaction log):
+--   analytics.momo_loan_book_tracker_disbursements_daily  -- one row per
+--     disbursement, keyed by disbursement_fid.
+--   analytics.momo_loan_book_tracker_repayments_daily     -- one row per
+--     repayment (atomic transactions). Carries no disbursement_fid, so each
+--     repayment is attributed to whichever loan was open for that customer
+--     at the time of payment -- see repay_attributed below. This is a proxy
+--     for the exact requestid match the old transaction log provided.
+--   analytics.momo_loan_book_tracker_loan_state_daily     -- daily snapshot
+--     of loan state, keyed by disbursement_fid. Used to (a) exclude
+--     ANOMALY_OPEN loans -- system errors, not real borrower behavior -- from
+--     the loan-level population entirely, and (b) enrich the output with
+--     authoritative lifecycle/charge fields for the borrower's latest loan.
+--
+-- Self-contained: the loan_level CTE below replaces the old transaction-log
+-- sourcing. Everything from loan_core onward is unchanged from the previous
+-- version of this file -- none of those intermediate fields (total_penalty,
+-- total_reimbursed, loan_status, repayment_bucket, outstanding_balance)
+-- reach the final output; only requestid/phonenumber/event_ts/amount/
+-- txn_type feed them, and those five fields are reproduced exactly by the
+-- new base/dedup/classified section.
 -- ============================================================================
 WITH snapshots AS (
 SELECT cast(20260531 AS bigint) AS snapshot_dt
 ),
 loan_level AS (
--- ── Begin: loan-level query from borrower_lifecycle_features.sql (unchanged) ──
-WITH base AS (
+-- ── Begin: loan-level query sourced from the momo_loan_book_tracker tables ──
+WITH disb_raw AS (
 SELECT
-transactionid,
-regexp_replace(trim(cast(phonenumber AS varchar)), '[^0-9]', '') AS phonenumber,
-cast(requestid AS varchar) AS requestid,
-lower(trim(tranname)) AS tranname,
-try_cast(original_timestamp_enrich AS timestamp) AS event_ts,
-cast(amount AS double) AS raw_amount
-FROM devdata.xtrafloat_daily_trans
-WHERE try_cast(original_timestamp_enrich AS timestamp) IS NOT NULL
-AND requestid IS NOT NULL
-AND phonenumber IS NOT NULL
-AND date(try_cast(original_timestamp_enrich AS timestamp)) <= date_parse(cast((SELECT snapshot_dt FROM snapshots) AS varchar), '%Y%m%d')
+disbursement_fid,
+regexp_replace(trim(cast(customer_msisdn AS varchar)), '[^0-9]', '') AS phonenumber,
+try_cast(disbursement_ts AS timestamp) AS event_ts,
+cast(disbursement_amount_ugx AS double) AS raw_amount,
+inserted_ts
+FROM analytics.momo_loan_book_tracker_disbursements_daily
+WHERE try_cast(disbursement_ts AS timestamp) IS NOT NULL
+AND disbursement_fid IS NOT NULL
+AND customer_msisdn IS NOT NULL
+AND date(try_cast(disbursement_ts AS timestamp)) <= date_parse(cast((SELECT snapshot_dt FROM snapshots) AS varchar), '%Y%m%d')
 ),
-dedup AS (
+disb_dedup AS (
 SELECT *
 FROM (
-SELECT b.*,
+SELECT d.*,
 ROW_NUMBER() OVER (
-PARTITION BY transactionid
-ORDER BY event_ts DESC
+PARTITION BY disbursement_fid
+ORDER BY inserted_ts DESC
 ) rn
-FROM base b
+FROM disb_raw d
 )
 WHERE rn = 1
 ),
+disb_windows AS (
+-- Per-customer disbursement timeline; next_disbursement_ts bounds the
+-- window a repayment can be attributed to this loan (see repay_attributed).
+SELECT
+disbursement_fid,
+phonenumber,
+event_ts AS disbursement_ts,
+raw_amount AS disbursed_amount,
+LEAD(event_ts) OVER (
+PARTITION BY phonenumber ORDER BY event_ts, disbursement_fid
+) AS next_disbursement_ts
+FROM disb_dedup
+),
+repay_raw AS (
+SELECT
+repayment_fid,
+regexp_replace(trim(cast(customer_msisdn AS varchar)), '[^0-9]', '') AS phonenumber,
+try_cast(repayment_ts AS timestamp) AS event_ts,
+cast(repayment_amount_ugx AS double) AS raw_amount,
+inserted_ts
+FROM analytics.momo_loan_book_tracker_repayments_daily
+WHERE try_cast(repayment_ts AS timestamp) IS NOT NULL
+AND repayment_fid IS NOT NULL
+AND customer_msisdn IS NOT NULL
+AND date(try_cast(repayment_ts AS timestamp)) <= date_parse(cast((SELECT snapshot_dt FROM snapshots) AS varchar), '%Y%m%d')
+),
+repay_dedup AS (
+SELECT *
+FROM (
+SELECT r.*,
+ROW_NUMBER() OVER (
+PARTITION BY repayment_fid
+ORDER BY inserted_ts DESC
+) rn
+FROM repay_raw r
+)
+WHERE rn = 1
+),
+repay_attributed AS (
+-- Attribute each repayment to the most recent prior disbursement for that
+-- customer, bounded by the next disbursement (if any). Repayments with no
+-- matching prior disbursement in the query window are dropped (INNER JOIN).
+SELECT
+w.disbursement_fid AS requestid,
+w.phonenumber,
+r.event_ts,
+r.raw_amount
+FROM repay_dedup r
+JOIN disb_windows w
+ON r.phonenumber = w.phonenumber
+AND r.event_ts >= w.disbursement_ts
+AND (w.next_disbursement_ts IS NULL OR r.event_ts < w.next_disbursement_ts)
+),
+loan_state_loads_dedup AS (
+-- loan_state_daily is a daily snapshot; dedup re-ingested rows for the
+-- same (disbursement_fid, date_key) before picking the as-of snapshot.
+SELECT *
+FROM (
+SELECT lsd.*,
+ROW_NUMBER() OVER (
+PARTITION BY disbursement_fid, date_key
+ORDER BY inserted_ts DESC
+) rn
+FROM analytics.momo_loan_book_tracker_loan_state_daily lsd
+WHERE disbursement_fid IS NOT NULL
+AND date_key <= (SELECT snapshot_dt FROM snapshots)
+)
+WHERE rn = 1
+),
+loan_state_snapshot AS (
+-- One row per disbursement_fid: its latest known state at/before the
+-- snapshot cutoff. A loan still open at the cutoff yields its latest
+-- state; a loan already closed yields its final closing-day row (rows
+-- stop appearing in loan_state_daily once a loan closes), which is
+-- exactly "state as of the snapshot" either way.
+SELECT *
+FROM (
+SELECT lsld.*,
+ROW_NUMBER() OVER (
+PARTITION BY disbursement_fid
+ORDER BY date_key DESC
+) rn2
+FROM loan_state_loads_dedup lsld
+)
+WHERE rn2 = 1
+),
+loan_state_anomalies AS (
+-- ANOMALY_OPEN = system error, not real borrower behavior. Excluded from
+-- the loan-level population entirely (see classified below) so a data
+-- glitch can't masquerade as a borrower default in the risk features.
+SELECT disbursement_fid
+FROM loan_state_snapshot
+WHERE loan_status = 'ANOMALY_OPEN' OR is_anomaly_open = true
+),
 classified AS (
 SELECT
-d.*,
-CASE
-WHEN tranname = 'xtrafloat dispatch' THEN 'disbursement'
-WHEN tranname IN ('xtrafloat payment','recovery payment') THEN 'recovery'
-WHEN tranname LIKE '%reimb%' THEN 'reimbursement'
-WHEN tranname = 'xtrafloat penalty' THEN 'penalty'
-ELSE 'other'
-END AS txn_type,
-abs(raw_amount) AS amount
-FROM dedup d
+w.disbursement_fid AS requestid,
+w.phonenumber,
+w.disbursement_ts AS event_ts,
+abs(w.disbursed_amount) AS amount,
+'disbursement' AS txn_type
+FROM disb_windows w
+WHERE w.disbursement_fid NOT IN (SELECT disbursement_fid FROM loan_state_anomalies)
+UNION ALL
+SELECT
+ra.requestid,
+ra.phonenumber,
+ra.event_ts,
+abs(ra.raw_amount) AS amount,
+'recovery' AS txn_type
+FROM repay_attributed ra
+WHERE ra.requestid NOT IN (SELECT disbursement_fid FROM loan_state_anomalies)
 ),
 loan_core AS (
 SELECT
@@ -434,9 +552,25 @@ ELSE 0
 END AS loan_above_prior_max_flag
 FROM streaks_final bh
 )
-SELECT *
-FROM exposure_features
--- ── End: loan-level query from borrower_lifecycle_features.sql ──────────────────
+-- Tag each surviving loan with its loan_state_daily snapshot (ls_*
+-- columns), used below for the borrower-level has_pre_window_history flag
+-- and for the latest-loan lifecycle/charge enrichment columns.
+SELECT
+ef.*,
+ls.loan_status AS ls_loan_status,
+ls.aging_bucket AS ls_aging_bucket,
+ls.days_aging AS ls_days_aging,
+ls.is_active_loan AS ls_is_active_loan,
+ls.has_pre_window_history AS ls_has_pre_window_history,
+ls.interest_and_penalty_ugx AS ls_interest_and_penalty_ugx,
+ls.expected_total_charge_ugx AS ls_expected_total_charge_ugx,
+ls.charge_variance_ugx AS ls_charge_variance_ugx,
+ls.charge_variance_pct AS ls_charge_variance_pct,
+ls.is_charge_anomaly AS ls_is_charge_anomaly
+FROM exposure_features ef
+LEFT JOIN loan_state_snapshot ls
+ON ef.requestid = ls.disbursement_fid
+-- ── End: loan-level query sourced from the momo_loan_book_tracker tables ────
 ),
 
 -- ============================================================================
@@ -460,7 +594,11 @@ AVG(severe_default_48h_flag) AS lifetime_severe_default_48h_rate,
 AVG(zero_recovery_flag) AS lifetime_zero_recovery_rate,
 AVG(hours_to_principal_cure) AS lifetime_avg_hours_to_principal_cure,
 MAX(hours_to_principal_cure) AS lifetime_worst_hours_to_principal_cure,
-STDDEV(hours_to_principal_cure) AS lifetime_cure_time_volatility
+STDDEV(hours_to_principal_cure) AS lifetime_cure_time_volatility,
+-- Borrower already had a loan before the data feed started (2026-01-01) on
+-- ANY of their loans -- true if this borrower's own lifetime stats above
+-- are left-censored (undercounted) rather than reflecting their full history.
+bool_or(ls_has_pre_window_history) AS has_pre_window_history
 FROM loan_level
 GROUP BY phonenumber
 ),
@@ -498,6 +636,16 @@ max_prior_loan_size,
 loan_size_vs_avg_ratio,
 loan_size_vs_max_ratio,
 loan_above_prior_max_flag,
+-- Authoritative loan_state_daily read for this borrower's latest loan.
+ls_loan_status AS latest_loan_status,
+ls_aging_bucket AS latest_aging_bucket,
+ls_days_aging AS latest_days_aging,
+ls_is_active_loan AS latest_is_active_loan,
+ls_interest_and_penalty_ugx AS latest_interest_and_penalty_ugx,
+ls_expected_total_charge_ugx AS latest_expected_total_charge_ugx,
+ls_charge_variance_ugx AS latest_charge_variance_ugx,
+ls_charge_variance_pct AS latest_charge_variance_pct,
+ls_is_charge_anomaly AS latest_is_charge_anomaly,
 ROW_NUMBER() OVER (
 PARTITION BY phonenumber
 ORDER BY disbursement_ts DESC, requestid DESC
@@ -505,8 +653,9 @@ ORDER BY disbursement_ts DESC, requestid DESC
 FROM loan_level
 )
 -- ============================================================================
--- Final projection — borrower-level dataset, 41 columns matching
--- data/load_borrower_limit_features() (column names and order).
+-- Final projection — borrower-level dataset. The original 41 columns keep
+-- their exact names/order (still matching load_borrower_limit_features());
+-- new columns are appended at the end.
 -- ============================================================================
 SELECT
 a.phonenumber,
@@ -549,7 +698,18 @@ b.avg_prior_loan_size,
 b.max_prior_loan_size,
 b.loan_size_vs_avg_ratio,
 b.loan_size_vs_max_ratio,
-b.loan_above_prior_max_flag
+b.loan_above_prior_max_flag,
+-- New columns (additive) --
+a.has_pre_window_history,
+b.latest_loan_status,
+b.latest_aging_bucket,
+b.latest_days_aging,
+b.latest_is_active_loan,
+b.latest_interest_and_penalty_ugx,
+b.latest_expected_total_charge_ugx,
+b.latest_charge_variance_ugx,
+b.latest_charge_variance_pct,
+b.latest_is_charge_anomaly
 FROM borrower_lifetime_aggregates a
 INNER JOIN (
 SELECT * FROM latest_loan_snapshot WHERE rn = 1
