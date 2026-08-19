@@ -188,13 +188,19 @@ WHERE d.disbursement_fid NOT IN (SELECT disbursement_fid FROM :validation_schema
 -- single queryable target for the GATE 1 final-output checks below, without
 -- pasting the 700+ line query into this file a second time and letting the
 -- two copies drift.
--- ACTION REQUIRED: replace the placeholder line below with the full,
--- current contents of data/borrower_history.txt (paste the whole file in
--- place of "-- <PASTE data/borrower_history.txt HERE>"). Do not maintain a
--- second copy of that query's text anywhere else in this file.
-CREATE OR REPLACE VIEW :validation_schema.vw_bh_output AS
--- <PASTE data/borrower_history.txt HERE>
-;
+-- ACTION REQUIRED: do NOT hand-paste data/borrower_history.txt here --
+-- manual assembly risks validating a different revision than what's
+-- actually checked in. Instead run:
+--   python scripts/build_vw_bh_output.py <validation_schema> > vw_bh_output.sql
+-- and execute the generated vw_bh_output.sql (it wraps the exact checked-in
+-- file contents in the CREATE VIEW statement below and stamps the git
+-- commit SHA of data/borrower_history.txt as a comment -- record that SHA
+-- in GATE 6). This statement is a structural placeholder only, showing
+-- what the generated file's shape looks like -- it is NOT meant to be run
+-- as written.
+-- CREATE OR REPLACE VIEW :validation_schema.vw_bh_output AS
+-- <generated from data/borrower_history.txt by scripts/build_vw_bh_output.py>
+-- ;
 
 
 -- ============================================================================
@@ -238,48 +244,87 @@ SUM(CASE WHEN ABS(lifetime_on_time_24h_rate + lifetime_default_24h_rate - 1.0) >
 SUM(CASE WHEN ABS(lifetime_on_time_26h_rate + lifetime_default_26h_rate - 1.0) > 0.001 THEN 1 ELSE 0 END) AS bad_26h_complement_identity,
 -- for the latest loan specifically, num_prior_loans must equal total_loans - 1
 -- (it's the last loan in the same ordering total_loans counts over)
-SUM(CASE WHEN num_prior_loans != total_loans - 1 THEN 1 ELSE 0 END) AS bad_num_prior_loans_identity
+SUM(CASE WHEN num_prior_loans != total_loans - 1 THEN 1 ELSE 0 END) AS bad_num_prior_loans_identity,
+-- NULL RATES: quantify, don't silently let NOT BETWEEN/ABS(...)>x pass NULL
+-- rows uncounted (both evaluate to unknown/false for NULL inputs, so the
+-- SUM(CASE...) checks above never flag them). A NULL lifetime_*_rate here
+-- means exactly "this borrower has zero MATURE loans for that horizon" --
+-- AVG() over zero non-null rows is NULL, there's no other way to get one.
+SUM(CASE WHEN lifetime_on_time_24h_rate IS NULL THEN 1 ELSE 0 END) AS n_null_on_time_24h_rate,
+SUM(CASE WHEN lifetime_default_24h_rate IS NULL THEN 1 ELSE 0 END) AS n_null_default_24h_rate,
+SUM(CASE WHEN lifetime_on_time_26h_rate IS NULL THEN 1 ELSE 0 END) AS n_null_on_time_26h_rate,
+SUM(CASE WHEN lifetime_default_26h_rate IS NULL THEN 1 ELSE 0 END) AS n_null_default_26h_rate,
+SUM(CASE WHEN lifetime_severe_default_48h_rate IS NULL THEN 1 ELSE 0 END) AS n_null_severe_default_48h_rate,
+SUM(CASE WHEN lifetime_zero_recovery_rate IS NULL THEN 1 ELSE 0 END) AS n_null_zero_recovery_rate,
+-- ASYMMETRIC NULL: a complementary pair should be NULL together or not at
+-- all (same maturity gate feeds both). If this is ever nonzero, the two
+-- flags' maturity gates have drifted apart from each other.
+SUM(CASE WHEN (lifetime_on_time_24h_rate IS NULL) != (lifetime_default_24h_rate IS NULL) THEN 1 ELSE 0 END) AS bad_24h_asymmetric_null,
+SUM(CASE WHEN (lifetime_on_time_26h_rate IS NULL) != (lifetime_default_26h_rate IS NULL) THEN 1 ELSE 0 END) AS bad_26h_asymmetric_null,
+-- latest loan has no matching loan_state_daily row at all (the LEFT JOIN in
+-- loan_level found nothing) -- distinct from "matched but state fields are
+-- legitimately blank"; every latest_* enrichment column would read NULL.
+SUM(CASE WHEN latest_loan_status IS NULL THEN 1 ELSE 0 END) AS n_latest_loan_missing_state_snapshot
 FROM :validation_schema.vw_bh_output;
 -- RESULT:
--- INTERPRETATION: every column here should be 0. Any nonzero count is a
--- concrete, named defect to investigate before this rewrite can be trusted
--- -- these are structural invariants of borrower_history.txt's own logic,
--- not thresholds open to interpretation.
+-- INTERPRETATION: bad_* columns should all be 0 -- concrete defects, not
+-- thresholds open to interpretation. n_null_* and n_latest_loan_missing_
+-- state_snapshot are expected to be nonzero in normal operation (recent
+-- unseasoned loans, loans not yet reflected in a loan_state_daily load) --
+-- report the counts so reviewers know the scale, rather than treating a
+-- passing range/identity check as "nothing to see here."
 
--- 1c. Column contract: exact presence of the 41 legacy columns (order is not
--- independently verifiable from information_schema, which does not
--- guarantee ordinal stability across all engines -- treat this as a set
--- check; verify order by reading the view/query definition directly).
+-- 1c. Column contract: exact set equality against the 51 documented columns
+-- (41 legacy + 10 enrichment) -- both directions. An earlier version of
+-- this check only used NOT IN, which can only ever detect unexpected
+-- extras: a genuinely missing column plus a genuinely unexpected extra
+-- would leave the count at 51 and pass silently. This version does a real
+-- two-way anti-join against an explicit expected-columns list.
+-- Order is not independently verifiable from information_schema, which
+-- does not guarantee ordinal stability across all engines -- verify order
+-- by reading the view/query definition directly if consumers rely on it.
+WITH expected(column_name) AS (
+VALUES
+('phonenumber'),('total_loans'),('first_loan_ts'),('latest_loan_ts'),('total_disbursed_amount'),
+('avg_loan_size_lifetime'),('max_loan_size_lifetime'),('lifetime_on_time_24h_rate'),
+('lifetime_on_time_26h_rate'),('lifetime_default_24h_rate'),('lifetime_default_26h_rate'),
+('lifetime_severe_default_48h_rate'),('lifetime_zero_recovery_rate'),
+('lifetime_avg_hours_to_principal_cure'),('lifetime_worst_hours_to_principal_cure'),
+('lifetime_cure_time_volatility'),('latest_requestid'),('latest_disbursement_ts'),
+('latest_disbursed_amount'),('num_prior_loans'),('prior_on_time_24h_rate'),
+('avg_prior_hours_to_cure'),('worst_prior_hours_to_cure'),('cure_time_volatility'),
+('recent_3_on_time_rate'),('recent_3_avg_cure_time'),('lifetime_prior_default_24h_rate'),
+('recent_5_default_24h_rate'),('cure_time_trend'),('borrower_trend'),('borrower_profile_type'),
+('loans_last_50_loans'),('defaults_last_50_loans'),('default_rate_last_50_loans'),
+('prior_on_time_streak'),('prior_default_streak'),('avg_prior_loan_size'),('max_prior_loan_size'),
+('loan_size_vs_avg_ratio'),('loan_size_vs_max_ratio'),('loan_above_prior_max_flag'),
+-- additive enrichment columns
+('has_pre_window_history'),('latest_loan_status'),('latest_aging_bucket'),('latest_days_aging'),
+('latest_is_active_loan'),('latest_interest_and_penalty_ugx'),('latest_expected_total_charge_ugx'),
+('latest_charge_variance_ugx'),('latest_charge_variance_pct'),('latest_is_charge_anomaly')
+),
+actual AS (
 SELECT column_name
 FROM information_schema.columns
 WHERE table_schema = ':validation_schema_as_quoted_string'  -- substitute the schema name here AS A QUOTED STRING, e.g. 'sandbox' -- unlike every :validation_schema.object_name reference elsewhere in this file, this one is a string comparison, not an identifier prefix, and needs quotes
 AND table_name = 'vw_bh_output'
-AND column_name NOT IN (
-'phonenumber','total_loans','first_loan_ts','latest_loan_ts','total_disbursed_amount',
-'avg_loan_size_lifetime','max_loan_size_lifetime','lifetime_on_time_24h_rate',
-'lifetime_on_time_26h_rate','lifetime_default_24h_rate','lifetime_default_26h_rate',
-'lifetime_severe_default_48h_rate','lifetime_zero_recovery_rate',
-'lifetime_avg_hours_to_principal_cure','lifetime_worst_hours_to_principal_cure',
-'lifetime_cure_time_volatility','latest_requestid','latest_disbursement_ts',
-'latest_disbursed_amount','num_prior_loans','prior_on_time_24h_rate',
-'avg_prior_hours_to_cure','worst_prior_hours_to_cure','cure_time_volatility',
-'recent_3_on_time_rate','recent_3_avg_cure_time','lifetime_prior_default_24h_rate',
-'recent_5_default_24h_rate','cure_time_trend','borrower_trend','borrower_profile_type',
-'loans_last_50_loans','defaults_last_50_loans','default_rate_last_50_loans',
-'prior_on_time_streak','prior_default_streak','avg_prior_loan_size','max_prior_loan_size',
-'loan_size_vs_avg_ratio','loan_size_vs_max_ratio','loan_above_prior_max_flag',
--- additive enrichment columns
-'has_pre_window_history','latest_loan_status','latest_aging_bucket','latest_days_aging',
-'latest_is_active_loan','latest_interest_and_penalty_ugx','latest_expected_total_charge_ugx',
-'latest_charge_variance_ugx','latest_charge_variance_pct','latest_is_charge_anomaly'
-);
+)
+SELECT 'MISSING (documented but not present in vw_bh_output)' AS issue, e.column_name
+FROM expected e
+LEFT JOIN actual a ON a.column_name = e.column_name
+WHERE a.column_name IS NULL
+UNION ALL
+SELECT 'UNEXPECTED (present but not documented)', a.column_name
+FROM actual a
+LEFT JOIN expected e ON e.column_name = a.column_name
+WHERE e.column_name IS NULL;
 -- RESULT:
--- INTERPRETATION: this query should return ZERO rows. Any row returned is an
--- unexpected column not in BORROWER_LIMIT_REQUIRED_COLUMNS or the documented
--- enrichment set -- means the SELECT list drifted from what's documented. If
--- a legacy or enrichment column above is instead MISSING from vw_bh_output
--- entirely, this query won't catch that (it only flags extras) -- cross-check
--- the count of matched names separately: expect exactly 51.
+-- INTERPRETATION: this query should return ZERO rows. Any MISSING row is a
+-- required column absent from the output -- a genuine contract break. Any
+-- UNEXPECTED row is an undocumented column that drifted into the SELECT
+-- list. Both directions are checked independently, so a missing column and
+-- an extra column can't cancel out into a false pass the way a bare count
+-- comparison could.
 
 
 -- ============================================================================
@@ -424,10 +469,20 @@ SELECT
 -- proxy, not a direct measurement, since neither table exposes an explicit
 -- "loan closed" event to test true concurrency against.
 
--- B2. Reconciliation against loan_state_daily's authoritative repaid total,
--- with state-only/disbursement-only loans reported separately (not folded
--- into the rate via COALESCE), and value-weighted + principal-relative
--- error alongside the count-based rate.
+-- B2 is a BLOCKING gate for production go/no-go, not an informational
+-- diagnostic -- treat a failing threshold here as reason to hold the
+-- rewrite, the same as B3 below.
+--
+-- Reported TWICE, clearly labeled, because they answer different
+-- questions: B2a reconciles every deduplicated disbursement regardless of
+-- ANOMALY_OPEN status (a general source-quality signal); B2b restricts to
+-- vw_bh_surviving_loans, the exact population that actually feeds
+-- borrower_history.txt's output. A few anomalous loans in B2a could worsen
+-- (or mask) the reconciliation number for loans production doesn't even
+-- use -- B2b is the one that gates production; B2a is context.
+
+-- B2a. Reconciliation over ALL deduplicated disbursements (source-quality
+-- signal, includes ANOMALY_OPEN loans -- NOT the production population).
 WITH attributed AS (
 SELECT w.disbursement_fid, r.repayment_amount
 FROM :validation_schema.vw_bh_repay_dedup r
@@ -462,6 +517,7 @@ FULL OUTER JOIN :validation_schema.vw_bh_loan_state_snapshot lsl
 ON lsl.disbursement_fid = pla.disbursement_fid
 )
 SELECT
+'ALL_DEDUPED_LOANS (context, not the production population)' AS population,
 COUNT(*) AS n_total,
 SUM(state_only) AS n_state_only,
 SUM(disbursement_only) AS n_disbursement_only,
@@ -470,8 +526,68 @@ SUM(CASE WHEN state_only = 0 AND disbursement_only = 0
 AND ABS(attributed_repaid_raw - lifetime_repaid_ugx) <= 1 THEN 1 ELSE 0 END) AS n_exact_match_raw,
 SUM(CASE WHEN state_only = 0 AND disbursement_only = 0
 AND ABS(attributed_repaid_abs - lifetime_repaid_ugx) <= 1 THEN 1 ELSE 0 END) AS n_exact_match_abs,
--- value-weighted: total matched-loan lifetime_repaid_ugx vs. how much of
--- it is within tolerance
+SUM(CASE WHEN state_only = 0 AND disbursement_only = 0 THEN lifetime_repaid_ugx ELSE 0 END) AS total_matched_lifetime_repaid_ugx,
+SUM(CASE WHEN state_only = 0 AND disbursement_only = 0
+AND ABS(attributed_repaid_abs - lifetime_repaid_ugx) <= 1 THEN lifetime_repaid_ugx ELSE 0 END) AS matched_within_tolerance_ugx,
+approx_percentile(
+CASE WHEN state_only = 0 AND disbursement_only = 0
+THEN ABS(attributed_repaid_raw - lifetime_repaid_ugx) END, 0.95) AS p95_abs_diff_raw_ugx,
+approx_percentile(
+CASE WHEN state_only = 0 AND disbursement_only = 0
+THEN ABS(attributed_repaid_abs - lifetime_repaid_ugx) END, 0.95) AS p95_abs_diff_abs_ugx,
+approx_percentile(
+CASE WHEN state_only = 0 AND disbursement_only = 0
+THEN disbursed_amount END, 0.5) AS median_matched_principal_ugx
+FROM joined;
+
+-- B2b. Same reconciliation, restricted to vw_bh_surviving_loans -- THIS IS
+-- THE RESULT THAT GATES PRODUCTION (matches the population borrower_
+-- history.txt actually builds loan_final from).
+WITH attributed AS (
+SELECT w.disbursement_fid, r.repayment_amount
+FROM :validation_schema.vw_bh_repay_dedup r
+JOIN :validation_schema.vw_bh_disb_windows w
+ON r.phonenumber = w.phonenumber
+AND r.repayment_ts >= w.disbursement_ts
+AND (w.next_disbursement_ts IS NULL OR r.repayment_ts < w.next_disbursement_ts)
+WHERE w.disbursement_fid IN (SELECT disbursement_fid FROM :validation_schema.vw_bh_surviving_loans)
+),
+per_loan_attributed AS (
+SELECT
+w.disbursement_fid,
+w.disbursed_amount,
+COALESCE(SUM(a.repayment_amount), 0) AS attributed_repaid_raw,
+COALESCE(SUM(ABS(a.repayment_amount)), 0) AS attributed_repaid_abs
+FROM :validation_schema.vw_bh_surviving_loans w
+LEFT JOIN attributed a ON a.disbursement_fid = w.disbursement_fid
+GROUP BY w.disbursement_fid, w.disbursed_amount
+),
+joined AS (
+SELECT
+COALESCE(pla.disbursement_fid, lsl.disbursement_fid) AS disbursement_fid,
+pla.disbursed_amount,
+pla.attributed_repaid_raw,
+pla.attributed_repaid_abs,
+lsl.lifetime_repaid_ugx,
+CASE WHEN pla.disbursement_fid IS NULL THEN 1 ELSE 0 END AS state_only,
+CASE WHEN lsl.disbursement_fid IS NULL THEN 1 ELSE 0 END AS disbursement_only
+FROM per_loan_attributed pla
+FULL OUTER JOIN (
+SELECT lsl.* FROM :validation_schema.vw_bh_loan_state_snapshot lsl
+JOIN :validation_schema.vw_bh_surviving_loans sl ON sl.disbursement_fid = lsl.disbursement_fid
+) lsl
+ON lsl.disbursement_fid = pla.disbursement_fid
+)
+SELECT
+'PRODUCTION_SURVIVING_LOANS (gates production go/no-go)' AS population,
+COUNT(*) AS n_total,
+SUM(state_only) AS n_state_only,
+SUM(disbursement_only) AS n_disbursement_only,
+SUM(CASE WHEN state_only = 0 AND disbursement_only = 0 THEN 1 ELSE 0 END) AS n_matched,
+SUM(CASE WHEN state_only = 0 AND disbursement_only = 0
+AND ABS(attributed_repaid_raw - lifetime_repaid_ugx) <= 1 THEN 1 ELSE 0 END) AS n_exact_match_raw,
+SUM(CASE WHEN state_only = 0 AND disbursement_only = 0
+AND ABS(attributed_repaid_abs - lifetime_repaid_ugx) <= 1 THEN 1 ELSE 0 END) AS n_exact_match_abs,
 SUM(CASE WHEN state_only = 0 AND disbursement_only = 0 THEN lifetime_repaid_ugx ELSE 0 END) AS total_matched_lifetime_repaid_ugx,
 SUM(CASE WHEN state_only = 0 AND disbursement_only = 0
 AND ABS(attributed_repaid_abs - lifetime_repaid_ugx) <= 1 THEN lifetime_repaid_ugx ELSE 0 END) AS matched_within_tolerance_ugx,
@@ -500,11 +616,17 @@ FROM joined;
 -- numbers produced it. CAVEAT: a mismatch on either basis is still ambiguous
 -- between (1) the time-window heuristic misattributing payments, or (2)
 -- repayment_amount being gross-of-charges (see Section A's caveat). B3
--- below isolates cause (2) by removing cause (1) entirely -- read B2 and B3
+-- below isolates cause (2) by removing cause (1) entirely -- read B2b and B3
 -- together. Comparing n_exact_match_raw against n_exact_match_abs also
 -- answers Section B0's question: if raw matches much better than abs,
 -- negative rows are real adjustments ABS() is wrongly inflating.
+-- Use B2b (not B2a) against the acceptance thresholds -- it's the
+-- population that actually determines what ships.
 
+-- B3 is a BLOCKING gate for production go/no-go, same as B2 -- a failing
+-- result here means the cure-timing logic's core assumption (atomic
+-- repayment amounts are principal-only) is wrong, not just "worth noting."
+--
 -- B3. Isolate amount semantics from attribution error: single-loan borrowers
 -- only, restricted to matched, closed, charged loans with no left-censoring
 -- and no boundary ambiguity -- a stricter eligibility set than earlier
@@ -587,6 +709,33 @@ JOIN atomic_repaid ar ON ar.disbursement_fid = e.disbursement_fid;
 -- cumulative gross cash crossing disbursed_amount does not prove principal
 -- itself has been repaid. A correct fix needs the tracker's actual
 -- allocation waterfall, not just a different threshold.
+
+-- B4. Same-timestamp disbursement ordering: borrower_history.txt orders a
+-- borrower's loans by `disbursement_ts, requestid` to determine prior-loan
+-- windows and which loan is "latest" (reversed for latest-loan selection).
+-- That's deterministic as long as disbursement_fid/requestid sorts
+-- consistently, but it assumes requestid ordering is a meaningful
+-- tie-breaker when two disbursements share an identical disbursement_ts --
+-- not necessarily true (e.g. if both were backfilled in the same batch
+-- with fid assigned by an unrelated process). Count how often this
+-- actually happens before trusting that assumption.
+SELECT
+COUNT(*) AS borrowers_with_same_timestamp_tie,
+SUM(n_tied) AS total_tied_disbursements
+FROM (
+SELECT phonenumber, disbursement_ts, COUNT(*) AS n_tied
+FROM :validation_schema.vw_bh_disb_dedup
+GROUP BY phonenumber, disbursement_ts
+HAVING COUNT(*) > 1
+);
+-- RESULT:
+-- INTERPRETATION: borrowers_with_same_timestamp_tie should be small/zero.
+-- If it's material, num_prior_loans, prior_on_time_24h_rate, and which loan
+-- gets called "latest" for those borrowers depend on requestid ordering
+-- alone -- confirm with the data owner whether disbursement_fid/requestid
+-- is contractually guaranteed to reflect true creation order, or find a
+-- genuine sequence/timestamp-with-higher-precision field to order by
+-- instead.
 
 
 -- ============================================================================
@@ -794,15 +943,23 @@ HAVING COUNT(*) > 1
 -- validation PLAN, not validation EVIDENCE, until results are recorded.
 --
 --   Execution date:            ____________________
+--   borrower_history.txt git SHA: ________________ (from scripts/build_vw_bh_output.py's
+--                                  output comment -- proves which revision was actually validated)
 --   snapshot_dt used:          ____________________
 --   as_of_load_ts used:        ____________________
+--   snapshot_ts used:          ____________________
 --   Query engine/version:      ____________________ (e.g. Athena engine v3)
 --   GATE 1 grain violations:   ____________________
 --   GATE 1 range violations:   ____________________
+--   GATE 1 null-rate counts:   ____________________ (n_null_* columns, and whether they're explained by recent unseasoned loans)
+--   GATE 1 column contract:    ____________________ (missing / unexpected columns, if any)
 --   Section A conclusion:      ____________________ (principal-only / gross / unclear)
+--   B0 negative repayment share: __________________
 --   B1 coverage (count/value): ____________________
---   B2 reconciliation rate:    ____________________ (count / value)
+--   B2a reconciliation (all loans): _______________
+--   B2b reconciliation (production-surviving loans -- the gating result): ___
 --   B3 conclusion:             ____________________
+--   B4 same-timestamp ties:    ____________________
 --   Section C impact:          ____________________
 --   Section D pct_left_censored: __________________
 --   Section E bridge verdict:  ____________________ (safe key / not safe / partial)

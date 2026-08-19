@@ -313,6 +313,14 @@ c.recovery_6h,
 c.recovery_12h,
 c.recovery_24h,
 c.recovery_26h,
+-- KNOWN LIMITATION (not fixed -- these don't reach the final borrower
+-- output today): none of the checkpoint/outstanding fields below are
+-- capped at principal, so an overpaid loan can produce pct_recovered_24h
+-- > 1, negative unpaid_amount_24h/remaining_after_24h, and negative
+-- outstanding_balance. If any of these intermediate fields are ever
+-- selected into the final output or reused elsewhere, derive a
+-- principal-allocation measure capped to [0, disbursed_amount] first
+-- rather than using the raw cash totals directly.
 c.recovery_24h / NULLIF(l.disbursed_amount,0) AS pct_recovered_24h,
 (l.disbursed_amount - c.recovery_24h) AS unpaid_amount_24h,
 (l.disbursed_amount - c.recovery_24h) / NULLIF(l.disbursed_amount,0) AS pct_unpaid_24h,
@@ -356,7 +364,15 @@ WHEN m.principal_cure_ts IS NULL
 OR m.principal_cure_ts > l.disbursement_ts + INTERVAL '48' HOUR
 THEN 1 ELSE 0
 END AS severe_default_48h_flag,
-CASE WHEN total_cure_cashflow = 0 THEN 1 ELSE 0 END AS zero_recovery_flag,
+-- Maturity-gated at the same 24h horizon as on_time_24h_flag/default_24h_flag
+-- -- a loan disbursed shortly before snapshot_ts has trivially recovered $0
+-- so far; without this gate lifetime_zero_recovery_rate would deteriorate
+-- for a borrower purely because their latest loan hasn't had time to pay
+-- yet, not because of any real non-payment behavior.
+CASE
+WHEN (SELECT snapshot_ts FROM snapshots) < l.disbursement_ts + INTERVAL '24' HOUR THEN NULL
+WHEN total_cure_cashflow = 0 THEN 1 ELSE 0
+END AS zero_recovery_flag,
 rt.first_recovery_ts,
 rt.last_recovery_ts,
 date(rt.first_recovery_ts) AS first_recovery_date,
