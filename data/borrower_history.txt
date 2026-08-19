@@ -21,13 +21,14 @@
 --     authoritative lifecycle/charge fields for the borrower's latest loan.
 --
 -- EXECUTION: this file is NOT a single runnable statement -- it is split by
--- the ##BORROWER_HISTORY_CHECKPOINT## marker below into two SQL statements
--- (a CREATE TABLE ... AS SELECT materializing the per-loan-grain pipeline,
--- then a CREATE OR REPLACE VIEW building the borrower-level output from it),
--- because the unsplit query exceeds the warehouse's query-plan stage-count
--- ceiling. Use scripts/build_vw_bh_output.py <schema> to generate both
--- statements with the checkpoint table name and schema substituted in --
--- see the comment at the checkpoint marker for why. Do not hand-paste this
+-- the ##BORROWER_HISTORY_CHECKPOINT_1##/_2## markers below into three SQL
+-- statements (two CREATE TABLE ... AS SELECT checkpoints materializing the
+-- per-loan-grain pipeline in two stages, then a CREATE OR REPLACE VIEW
+-- building the borrower-level output from the second checkpoint), because
+-- the unsplit query exceeds the warehouse's query-plan stage-count ceiling.
+-- Use scripts/build_vw_bh_output.py <schema> to generate all three
+-- statements with the checkpoint table names and schema substituted in --
+-- see the comments at each checkpoint marker for why. Do not hand-paste this
 -- file as one query.
 --
 -- Self-contained: the per-loan-grain pipeline below (through the checkpoint
@@ -429,7 +430,26 @@ WHEN total_cure_cashflow >= l.disbursed_amount + l.total_penalty
 AND l.total_penalty > 0
 THEN 'closed_with_penalty'
 ELSE 'unknown'
-END AS loan_status
+END AS loan_status,
+-- Authoritative loan_state_daily read, attached here (per-loan grain, right
+-- after loan_final) rather than at the very end after the borrower-level
+-- window-function cascade -- these ls_* columns are pure pass-through for
+-- everything between here and the final output (nothing in
+-- borrower_history_base/streaks/exposure_features reads or filters on them),
+-- so joining earlier vs. later produces identical final values per row,
+-- keyed only by requestid = disbursement_fid either way. Joining here lets
+-- the ##BORROWER_HISTORY_CHECKPOINT_1## materialization below carry these
+-- columns forward without a second read of loan_state_snapshot downstream.
+ls.loan_status AS ls_loan_status,
+ls.aging_bucket AS ls_aging_bucket,
+ls.days_aging AS ls_days_aging,
+ls.is_active_loan AS ls_is_active_loan,
+ls.has_pre_window_history AS ls_has_pre_window_history,
+ls.interest_and_penalty_ugx AS ls_interest_and_penalty_ugx,
+ls.expected_total_charge_ugx AS ls_expected_total_charge_ugx,
+ls.charge_variance_ugx AS ls_charge_variance_ugx,
+ls.charge_variance_pct AS ls_charge_variance_pct,
+ls.is_charge_anomaly AS ls_is_charge_anomaly
 FROM loan_core l
 LEFT JOIN milestones m
 ON l.requestid = m.requestid
@@ -440,9 +460,28 @@ AND l.phonenumber = c.phonenumber
 LEFT JOIN recovery_times rt
 ON l.requestid = rt.requestid
 AND l.phonenumber = rt.phonenumber
-),
+LEFT JOIN loan_state_snapshot ls
+ON l.requestid = ls.disbursement_fid
+)
+SELECT * FROM loan_final
+-- ##BORROWER_HISTORY_CHECKPOINT_1##
+-- ============================================================================
+-- MATERIALIZATION CHECKPOINT 1 -- everything above this marker (per-loan
+-- grain: dedup, attribution, cure timing, on-time/default flags, loan_state
+-- enrichment) is materialized as a physical table before the borrower-level
+-- window-function cascade below runs. Even after CHECKPOINT_2 (further down)
+-- removed the double-planning of this whole subtree, a single statement
+-- covering everything through exposure_features still hit 142 stages (cap:
+-- 100) -- borrower_history_base alone has 11 window functions in one CTE,
+-- and the cascade through exposure_features has ~27 more. Splitting here
+-- (a clean boundary: nothing below reads or filters on ls_* columns, so
+-- attaching them to loan_final here instead of at the old end-of-pipeline
+-- join point changes nothing about the final result) resets the stage count
+-- again. See scripts/build_vw_bh_output.py for how the resulting three
+-- statements get assembled.
+-- ============================================================================
 -- FIXED BORROWER HISTORY
-borrower_history_base AS (
+WITH borrower_history_base AS (
 SELECT
 lf.*,
 COUNT(*) OVER (
@@ -506,7 +545,7 @@ ORDER BY disbursement_ts, requestid
 ROWS BETWEEN 6 PRECEDING AND 4 PRECEDING
 )
 ) AS cure_time_trend
-FROM loan_final lf
+FROM {{CHECKPOINT_TABLE_1}} lf
 ),
 borrower_history AS (
 SELECT
@@ -657,41 +696,33 @@ ELSE 0
 END AS loan_above_prior_max_flag
 FROM streaks_final bh
 )
--- Tag each surviving loan with its loan_state_daily snapshot (ls_*
--- columns), used below for the borrower-level has_pre_window_history flag
--- and for the latest-loan lifecycle/charge enrichment columns.
-SELECT
-ef.*,
-ls.loan_status AS ls_loan_status,
-ls.aging_bucket AS ls_aging_bucket,
-ls.days_aging AS ls_days_aging,
-ls.is_active_loan AS ls_is_active_loan,
-ls.has_pre_window_history AS ls_has_pre_window_history,
-ls.interest_and_penalty_ugx AS ls_interest_and_penalty_ugx,
-ls.expected_total_charge_ugx AS ls_expected_total_charge_ugx,
-ls.charge_variance_ugx AS ls_charge_variance_ugx,
-ls.charge_variance_pct AS ls_charge_variance_pct,
-ls.is_charge_anomaly AS ls_is_charge_anomaly
-FROM exposure_features ef
-LEFT JOIN loan_state_snapshot ls
-ON ef.requestid = ls.disbursement_fid
+-- ls_* columns (loan_status/aging_bucket/days_aging/is_active_loan/
+-- has_pre_window_history/interest_and_penalty_ugx/expected_total_charge_ugx/
+-- charge_variance_ugx/charge_variance_pct/is_charge_anomaly, all prefixed
+-- ls_) are already present here via pass-through from loan_final, which
+-- joined loan_state_snapshot once at CHECKPOINT_1 above -- no second join
+-- needed.
+SELECT * FROM exposure_features
 -- ── End: loan-level query sourced from the momo_loan_book_tracker tables ────
 
--- ##BORROWER_HISTORY_CHECKPOINT##
+-- ##BORROWER_HISTORY_CHECKPOINT_2##
 -- ============================================================================
--- MATERIALIZATION CHECKPOINT -- scripts/build_vw_bh_output.py splits the file
--- at the marker line above into two SQL statements: a CREATE TABLE ... AS
--- SELECT for everything above (the full per-loan-grain pipeline, formerly
--- the single CTE `loan_level`), and a CREATE OR REPLACE VIEW for everything
--- below. This exists because a single unbroken query here exceeds the
--- warehouse's stage-count ceiling (100 max; ~280 observed) -- the planner
--- gives each window function/CTE boundary its own exchange, and the former
--- `loan_level` CTE (~25 nested CTEs, ~36 window functions) was being planned
--- TWICE, once for each of the two CTEs below that read from it. Materializing
--- it once as a physical table and having both read FROM that table instead
--- resets the stage count for everything downstream, with no change to the
--- actual computation. Do not hand-run this file as one paste any more --
--- use scripts/build_vw_bh_output.py to generate the two statements.
+-- MATERIALIZATION CHECKPOINT 2 -- scripts/build_vw_bh_output.py splits the
+-- file at both ##BORROWER_HISTORY_CHECKPOINT_1##/_2## markers into three SQL
+-- statements: two CREATE TABLE ... AS SELECT (one per checkpoint) and a
+-- final CREATE OR REPLACE VIEW for vw_bh_output, each reading from the prior
+-- checkpoint table instead of re-deriving it inline. This exists because a
+-- single unbroken query here exceeds the warehouse's stage-count ceiling
+-- (100 max) -- the planner gives each window function/CTE boundary its own
+-- exchange. The former single `loan_level` CTE (~25 nested CTEs, ~36 window
+-- functions) was both being planned TWICE (referenced by both CTEs below --
+-- CHECKPOINT_2 fixed that, 280 -> 142 stages) AND was still too deep as one
+-- statement even planned once (142 stages) -- borrower_history_base alone
+-- has 11 window functions in a single CTE, with ~27 more through
+-- exposure_features. CHECKPOINT_1 (further up, right after loan_final)
+-- splits that single traversal in two. No change to the actual computation
+-- from either split. Do not hand-run this file as one paste -- use
+-- scripts/build_vw_bh_output.py to generate the three statements.
 -- ============================================================================
 
 -- ============================================================================
@@ -739,7 +770,7 @@ STDDEV(hours_to_principal_cure) AS lifetime_cure_time_volatility,
 -- ANY of their loans -- true if this borrower's own lifetime stats above
 -- are left-censored (undercounted) rather than reflecting their full history.
 bool_or(ls_has_pre_window_history) AS has_pre_window_history
-FROM {{CHECKPOINT_TABLE}}
+FROM {{CHECKPOINT_TABLE_2}}
 GROUP BY phonenumber
 ),
 -- ============================================================================
@@ -790,7 +821,7 @@ ROW_NUMBER() OVER (
 PARTITION BY phonenumber
 ORDER BY disbursement_ts DESC, requestid DESC
 ) AS rn
-FROM {{CHECKPOINT_TABLE}}
+FROM {{CHECKPOINT_TABLE_2}}
 )
 -- ============================================================================
 -- Final projection — borrower-level dataset. The original 41 columns keep

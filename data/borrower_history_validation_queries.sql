@@ -192,22 +192,29 @@ WHERE d.disbursement_fid NOT IN (SELECT disbursement_fid FROM :validation_schema
 -- manual assembly risks validating a different revision than what's
 -- actually checked in. Instead run:
 --   python scripts/build_vw_bh_output.py <validation_schema> > vw_bh_output.sql
--- and execute the generated vw_bh_output.sql. It contains THREE statements,
+-- and execute the generated vw_bh_output.sql. It contains FIVE statements,
 -- in order: DROP TABLE IF EXISTS + CREATE TABLE ... AS SELECT for a
--- <validation_schema>.tbl_bh_loan_level checkpoint table (borrower_history.txt
--- is split at its ##BORROWER_HISTORY_CHECKPOINT## marker because the query
--- exceeds the warehouse's stage-count ceiling as one statement -- see that
--- marker's comment for why), then CREATE OR REPLACE VIEW for vw_bh_output
--- itself, built from that checkpoint table. It stamps the git commit SHA of
--- data/borrower_history.txt as a comment -- record that SHA in GATE 6. The
--- statements below are a structural placeholder only, showing what the
+-- <validation_schema>.tbl_bh_loan_final checkpoint (per-loan grain), then
+-- the same for a <validation_schema>.tbl_bh_loan_level checkpoint (built
+-- from tbl_bh_loan_final, adds the borrower-level window-function cascade),
+-- then CREATE OR REPLACE VIEW for vw_bh_output itself (built from
+-- tbl_bh_loan_level). borrower_history.txt is split at its
+-- ##BORROWER_HISTORY_CHECKPOINT_1##/_2## markers because the query exceeds
+-- the warehouse's stage-count ceiling as one statement -- see those
+-- markers' comments for why. The generated file stamps the git commit SHA
+-- of data/borrower_history.txt as a comment -- record that SHA in GATE 6.
+-- The statements below are a structural placeholder only, showing what the
 -- generated file's shape looks like -- they are NOT meant to be run as written.
+-- DROP TABLE IF EXISTS :validation_schema.tbl_bh_loan_final;
+-- CREATE TABLE :validation_schema.tbl_bh_loan_final AS
+-- <generated from data/borrower_history.txt Part A1 by scripts/build_vw_bh_output.py>
+-- ;
 -- DROP TABLE IF EXISTS :validation_schema.tbl_bh_loan_level;
 -- CREATE TABLE :validation_schema.tbl_bh_loan_level AS
--- <generated from data/borrower_history.txt Part A by scripts/build_vw_bh_output.py>
+-- <generated from data/borrower_history.txt Part A2 by scripts/build_vw_bh_output.py>
 -- ;
 -- CREATE OR REPLACE VIEW :validation_schema.vw_bh_output AS
--- <generated from data/borrower_history.txt Part B by scripts/build_vw_bh_output.py>
+-- <generated from data/borrower_history.txt Part A3 by scripts/build_vw_bh_output.py>
 -- ;
 
 
@@ -1159,6 +1166,7 @@ HAVING COUNT(*) > 1
 -- ============================================================================
 -- DROP VIEW IF EXISTS :validation_schema.vw_bh_output;
 -- DROP TABLE IF EXISTS :validation_schema.tbl_bh_loan_level;
+-- DROP TABLE IF EXISTS :validation_schema.tbl_bh_loan_final;
 -- DROP VIEW IF EXISTS :validation_schema.vw_bh_surviving_loans;
 -- DROP VIEW IF EXISTS :validation_schema.vw_bh_loan_state_anomalies;
 -- DROP VIEW IF EXISTS :validation_schema.vw_bh_loan_state_snapshot;

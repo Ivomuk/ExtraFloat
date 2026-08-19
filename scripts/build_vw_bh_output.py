@@ -1,17 +1,20 @@
 """
-Assembles the two SQL statements used by
+Assembles the four SQL statements used by
 data/borrower_history_validation_queries.sql's GATE 1 final-output checks,
 from the checked-in data/borrower_history.txt -- so validation always runs
 against the exact production query, not a manually pasted (and potentially
 stale or hand-edited) copy.
 
-borrower_history.txt is split by its ##BORROWER_HISTORY_CHECKPOINT## marker
-into two statements instead of one, because the unsplit query exceeds the
-warehouse's query-plan stage-count ceiling (100 max; ~280 observed). Part A
-(everything before the marker) is materialized as a physical checkpoint
-table; Part B (everything after) is the final CREATE OR REPLACE VIEW, built
-from that checkpoint table instead of re-deriving it inline. See the comment
-at the marker in borrower_history.txt for the full rationale.
+borrower_history.txt is split by its ##BORROWER_HISTORY_CHECKPOINT_1##/_2##
+markers into three statements instead of one, because the unsplit query
+exceeds the warehouse's query-plan stage-count ceiling (100 max; ~280
+observed unsplit, ~142 observed after only one split). Part A1 (everything
+before marker 1: dedup, attribution, cure timing, loan-level flags) and
+Part A2 (between marker 1 and marker 2: the borrower-level window-function
+cascade) are each materialized as physical checkpoint tables in turn; Part A3
+(everything after marker 2) is the final CREATE OR REPLACE VIEW, built from
+the second checkpoint table instead of re-deriving anything inline. See the
+comments at each marker in borrower_history.txt for the full rationale.
 
 Stamps the git commit SHA of data/borrower_history.txt into the output as a
 comment, and warns if the working tree has uncommitted changes to it -- both
@@ -20,9 +23,11 @@ validated.
 
 Usage:
     python scripts/build_vw_bh_output.py <validation_schema> > vw_bh_output.sql
-    # then run vw_bh_output.sql in Athena/Trino -- it contains three
-    # statements in order: DROP TABLE IF EXISTS + CREATE TABLE ... AS SELECT
-    # for the checkpoint, then CREATE OR REPLACE VIEW for vw_bh_output.
+    # then run vw_bh_output.sql in Athena/Trino -- it contains five
+    # statements in order: DROP TABLE/CREATE TABLE ... AS SELECT for
+    # checkpoint 1, DROP TABLE/CREATE TABLE ... AS SELECT for checkpoint 2
+    # (built from checkpoint 1), then CREATE OR REPLACE VIEW for
+    # vw_bh_output (built from checkpoint 2).
 """
 
 import re
@@ -33,15 +38,19 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SRC = REPO_ROOT / "data" / "borrower_history.txt"
 
-CHECKPOINT_MARKER = "-- ##BORROWER_HISTORY_CHECKPOINT##"
-CHECKPOINT_TABLE_NAME = "tbl_bh_loan_level"
-CHECKPOINT_PLACEHOLDER = "{{CHECKPOINT_TABLE}}"
+CHECKPOINT_MARKER_1 = "-- ##BORROWER_HISTORY_CHECKPOINT_1##"
+CHECKPOINT_MARKER_2 = "-- ##BORROWER_HISTORY_CHECKPOINT_2##"
+CHECKPOINT_TABLE_NAME_1 = "tbl_bh_loan_final"
+CHECKPOINT_TABLE_NAME_2 = "tbl_bh_loan_level"
+CHECKPOINT_PLACEHOLDER_1 = "{{CHECKPOINT_TABLE_1}}"
+CHECKPOINT_PLACEHOLDER_2 = "{{CHECKPOINT_TABLE_2}}"
 
 # Athena/Trino unquoted identifier: letters/digits/underscore, not starting
 # with a digit. schema is interpolated directly into `CREATE TABLE
-# {schema}.tbl_bh_loan_level` / `CREATE OR REPLACE VIEW {schema}.vw_bh_output`
-# below -- reject anything else rather than emit malformed or unintended SQL
-# from a typo'd or pasted-wrong argument.
+# {schema}.tbl_bh_loan_final` / `{schema}.tbl_bh_loan_level` /
+# `CREATE OR REPLACE VIEW {schema}.vw_bh_output` below -- reject anything
+# else rather than emit malformed or unintended SQL from a typo'd or
+# pasted-wrong argument.
 _VALID_SCHEMA = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 # Matches the three literals in borrower_history.txt's `snapshots` CTE, e.g.
@@ -64,6 +73,35 @@ def _git(*args: str) -> str:
         return ""
 
 
+def _split_once(body: str, marker: str, label: str) -> tuple[str, str]:
+    # Fail closed on each checkpoint split: a missing or duplicated marker
+    # means the file's shape changed in a way this script no longer
+    # understands, and silently guessing which split to use (or skipping the
+    # split) could emit SQL that either won't run or silently validates the
+    # wrong thing.
+    count = body.count(marker)
+    if count != 1:
+        sys.exit(
+            f"ERROR: found {count} occurrences of the {label} marker "
+            f"({marker!r}) in data/borrower_history.txt, expected exactly 1. "
+            "Either the file's checkpoint split changed shape (update the "
+            "marker constant in this script) or the marker is "
+            "missing/duplicated -- refusing to guess how to split the file."
+        )
+    before, after = body.split(marker, 1)
+    return before, after
+
+
+def _require_placeholder(part: str, placeholder: str, label: str) -> None:
+    if placeholder not in part:
+        sys.exit(
+            f"ERROR: {placeholder!r} not found anywhere in {label} of "
+            "data/borrower_history.txt -- it should reference the checkpoint "
+            "table by this placeholder. Refusing to generate SQL that would "
+            "still reference the old inline CTE."
+        )
+
+
 def main() -> None:
     if len(sys.argv) != 2:
         sys.exit(f"Usage: python {Path(__file__).name} <validation_schema>")
@@ -84,32 +122,16 @@ def main() -> None:
 
     body = SRC.read_text()
 
-    # Fail closed on the checkpoint split, same reasoning as the snapshot-
-    # parameter check below: a missing or duplicated marker means the file's
-    # shape changed in a way this script no longer understands, and silently
-    # guessing which split to use (or skipping the split) could emit SQL
-    # that either won't run or silently validates the wrong thing.
-    marker_count = body.count(CHECKPOINT_MARKER)
-    if marker_count != 1:
-        sys.exit(
-            f"ERROR: found {marker_count} occurrences of the checkpoint marker "
-            f"({CHECKPOINT_MARKER!r}) in data/borrower_history.txt, expected "
-            "exactly 1. Either the file's checkpoint split changed shape "
-            "(update CHECKPOINT_MARKER in this script) or the marker is "
-            "missing/duplicated -- refusing to guess how to split the file."
-        )
-    part_a, part_b = body.split(CHECKPOINT_MARKER, 1)
+    part_a1, rest = _split_once(body, CHECKPOINT_MARKER_1, "checkpoint 1")
+    part_a2, part_a3 = _split_once(rest, CHECKPOINT_MARKER_2, "checkpoint 2")
 
-    placeholder_count = part_b.count(CHECKPOINT_PLACEHOLDER)
-    if placeholder_count == 0:
-        sys.exit(
-            f"ERROR: {CHECKPOINT_PLACEHOLDER!r} not found anywhere after the "
-            "checkpoint marker in data/borrower_history.txt -- Part B should "
-            "reference the checkpoint table by this placeholder. Refusing to "
-            "generate SQL that would still reference the old inline CTE."
-        )
-    checkpoint_table = f"{schema}.{CHECKPOINT_TABLE_NAME}"
-    part_b = part_b.replace(CHECKPOINT_PLACEHOLDER, checkpoint_table)
+    checkpoint_table_1 = f"{schema}.{CHECKPOINT_TABLE_NAME_1}"
+    checkpoint_table_2 = f"{schema}.{CHECKPOINT_TABLE_NAME_2}"
+
+    _require_placeholder(part_a2, CHECKPOINT_PLACEHOLDER_1, "Part A2 (between checkpoint 1 and checkpoint 2)")
+    _require_placeholder(part_a3, CHECKPOINT_PLACEHOLDER_2, "Part A3 (after checkpoint 2)")
+    part_a2 = part_a2.replace(CHECKPOINT_PLACEHOLDER_1, checkpoint_table_1)
+    part_a3 = part_a3.replace(CHECKPOINT_PLACEHOLDER_2, checkpoint_table_2)
 
     # Extract the literal snapshot_dt/as_of_load_ts/snapshot_ts baked into
     # THIS file, so whoever runs the validation queries copies the exact
@@ -157,15 +179,21 @@ def main() -> None:
     for name in ("snapshot_dt", "as_of_load_ts", "snapshot_ts"):
         print(f"--   {name}: {params[name]}")
     print("--")
-    print(f"-- Runs as three statements: the checkpoint table ({checkpoint_table})")
-    print("-- is dropped and rebuilt first, then vw_bh_output is (re)created from it.")
-    print(f"DROP TABLE IF EXISTS {checkpoint_table};")
-    print(f"CREATE TABLE {checkpoint_table} AS")
-    print(part_a.rstrip())
+    print("-- Runs as five statements: checkpoint 1 is dropped and rebuilt first,")
+    print("-- then checkpoint 2 (built from checkpoint 1), then vw_bh_output")
+    print("-- (built from checkpoint 2).")
+    print(f"DROP TABLE IF EXISTS {checkpoint_table_1};")
+    print(f"CREATE TABLE {checkpoint_table_1} AS")
+    print(part_a1.rstrip())
+    print(";")
+    print()
+    print(f"DROP TABLE IF EXISTS {checkpoint_table_2};")
+    print(f"CREATE TABLE {checkpoint_table_2} AS")
+    print(part_a2.rstrip())
     print(";")
     print()
     print(f"CREATE OR REPLACE VIEW {schema}.vw_bh_output AS")
-    print(part_b.rstrip())
+    print(part_a3.rstrip())
     print(";")
 
 
