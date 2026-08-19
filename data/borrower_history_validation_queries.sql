@@ -192,14 +192,22 @@ WHERE d.disbursement_fid NOT IN (SELECT disbursement_fid FROM :validation_schema
 -- manual assembly risks validating a different revision than what's
 -- actually checked in. Instead run:
 --   python scripts/build_vw_bh_output.py <validation_schema> > vw_bh_output.sql
--- and execute the generated vw_bh_output.sql (it wraps the exact checked-in
--- file contents in the CREATE VIEW statement below and stamps the git
--- commit SHA of data/borrower_history.txt as a comment -- record that SHA
--- in GATE 6). This statement is a structural placeholder only, showing
--- what the generated file's shape looks like -- it is NOT meant to be run
--- as written.
+-- and execute the generated vw_bh_output.sql. It contains THREE statements,
+-- in order: DROP TABLE IF EXISTS + CREATE TABLE ... AS SELECT for a
+-- <validation_schema>.tbl_bh_loan_level checkpoint table (borrower_history.txt
+-- is split at its ##BORROWER_HISTORY_CHECKPOINT## marker because the query
+-- exceeds the warehouse's stage-count ceiling as one statement -- see that
+-- marker's comment for why), then CREATE OR REPLACE VIEW for vw_bh_output
+-- itself, built from that checkpoint table. It stamps the git commit SHA of
+-- data/borrower_history.txt as a comment -- record that SHA in GATE 6. The
+-- statements below are a structural placeholder only, showing what the
+-- generated file's shape looks like -- they are NOT meant to be run as written.
+-- DROP TABLE IF EXISTS :validation_schema.tbl_bh_loan_level;
+-- CREATE TABLE :validation_schema.tbl_bh_loan_level AS
+-- <generated from data/borrower_history.txt Part A by scripts/build_vw_bh_output.py>
+-- ;
 -- CREATE OR REPLACE VIEW :validation_schema.vw_bh_output AS
--- <generated from data/borrower_history.txt by scripts/build_vw_bh_output.py>
+-- <generated from data/borrower_history.txt Part B by scripts/build_vw_bh_output.py>
 -- ;
 
 
@@ -1150,6 +1158,7 @@ HAVING COUNT(*) > 1
 -- with names in.
 -- ============================================================================
 -- DROP VIEW IF EXISTS :validation_schema.vw_bh_output;
+-- DROP TABLE IF EXISTS :validation_schema.tbl_bh_loan_level;
 -- DROP VIEW IF EXISTS :validation_schema.vw_bh_surviving_loans;
 -- DROP VIEW IF EXISTS :validation_schema.vw_bh_loan_state_anomalies;
 -- DROP VIEW IF EXISTS :validation_schema.vw_bh_loan_state_snapshot;
