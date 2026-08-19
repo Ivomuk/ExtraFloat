@@ -588,7 +588,26 @@ ON ef.requestid = ls.disbursement_fid
 
 -- ============================================================================
 -- Bucket 1 — Lifetime aggregates: one row per phonenumber, computed across
--- ALL of the borrower's loans via GROUP BY.
+-- ALL of the borrower's loans via GROUP BY -- including the outcome of the
+-- borrower's most recent (latest) loan.
+--
+-- INTENDED USE / LEAKAGE CAVEAT: this output feeds
+-- prepare_borrower_limit_features() -> the caps/tier credit-LIMIT engine
+-- (extrafloat/engine/run_extrafloat_limit_engine.py), which makes a
+-- forward-looking decision -- "what limit for this borrower's NEXT loan" --
+-- using everything currently known about them. Including the latest loan's
+-- already-resolved outcome in these lifetime rates is correct for that use:
+-- a live risk snapshot should reflect the most recent completed loan, not
+-- pretend it hasn't happened yet.
+-- This is NOT the same table the PD (probability-of-default) model trains
+-- on -- that model uses its own loan-grain source
+-- (data/loan_state_query_updated_materialized.txt, one row per target loan)
+-- with its own dedicated label-eligibility/leakage-guard machinery (see
+-- pd_model/preprocessing/loan_history_features.py). Do NOT repurpose this
+-- borrower-level table to backtest or train a model whose target is the
+-- latest loan's own outcome -- lifetime_on_time_24h_rate etc. already
+-- contain that outcome, which would be leakage in that context even though
+-- it is by-design correct for live limit-engine scoring.
 -- ============================================================================
 borrower_lifetime_aggregates AS (
 SELECT
