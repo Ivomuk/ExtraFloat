@@ -21,12 +21,23 @@
 --     authoritative lifecycle/charge fields for the borrower's latest loan.
 --
 -- Self-contained: the loan_level CTE below replaces the old transaction-log
--- sourcing. Everything from loan_core onward is unchanged from the previous
--- version of this file -- none of those intermediate fields (total_penalty,
--- total_reimbursed, loan_status, repayment_bucket, outstanding_balance)
--- reach the final output; only requestid/phonenumber/event_ts/amount/
--- txn_type feed them, and those five fields are reproduced exactly by the
--- new base/dedup/classified section.
+-- sourcing. loan_core through exposure_features is otherwise unchanged from
+-- the previous version of this file -- none of the intermediate fields
+-- (total_penalty, total_reimbursed, loan_status, repayment_bucket,
+-- outstanding_balance) reach the final output; only requestid/phonenumber/
+-- event_ts/amount/txn_type feed them, and those five fields are reproduced
+-- exactly by the base/dedup/classified section. The one deliberate behavior
+-- change: on_time_24h_flag/on_time_26h_flag/default_24h_flag/
+-- default_26h_flag/severe_default_48h_flag in loan_final are now
+-- maturity-gated (NULL until the loan has actually had 24h/26h/48h to
+-- cure, per snapshot_ts below) rather than treating an unseasoned loan as a
+-- default -- inherited unchanged from the original query until this fix.
+-- default_rate_last_50_loans in `streaks` was adjusted accordingly (see
+-- mature_loans_last_50 in recent_loan_windows). The streak-group/
+-- streak-current logic elsewhere in `streaks`/`streaks_final` needed no
+-- change -- verified that NULL flags already propagate through those SUM/
+-- CASE expressions as a correct no-op (an unseasoned loan neither breaks
+-- nor extends a streak).
 -- ============================================================================
 WITH snapshots AS (
 -- as_of_load_ts bounds inserted_ts across all three source tables so that a
@@ -37,9 +48,21 @@ WITH snapshots AS (
 -- of the run you want to reproduce (e.g. the max inserted_ts observed when
 -- the original extract was produced); use CURRENT_TIMESTAMP only when you
 -- deliberately want the freshest reprocessed data instead of a frozen replay.
+--
+-- snapshot_ts is the business observation time used to decide whether a
+-- loan has had enough time to actually earn an on-time/default label (see
+-- on_time_24h_flag etc. in loan_final below) -- a loan disbursed shortly
+-- before snapshot_ts hasn't had its 24h/26h/48h grace period elapse yet, so
+-- it isn't a default, it's simply not observable yet. Distinct from
+-- as_of_load_ts (which bounds what data has loaded, not what time "now" is
+-- for maturity purposes), though the two commonly coincide in practice. Set
+-- it on or after the end of snapshot_dt's calendar day; for the same
+-- reproducibility reason as as_of_load_ts, use a frozen literal, not
+-- CURRENT_TIMESTAMP, when replaying a historical snapshot.
 SELECT
 cast(20260531 AS bigint) AS snapshot_dt,
-cast('2026-06-01 00:00:00.000' AS timestamp) AS as_of_load_ts
+cast('2026-06-01 00:00:00.000' AS timestamp) AS as_of_load_ts,
+cast('2026-06-01 00:00:00.000' AS timestamp) AS snapshot_ts
 ),
 loan_level AS (
 -- ── Begin: loan-level query sourced from the momo_loan_book_tracker tables ──
@@ -295,9 +318,21 @@ c.recovery_24h / NULLIF(l.disbursed_amount,0) AS pct_recovered_24h,
 (l.disbursed_amount - c.recovery_24h) / NULLIF(l.disbursed_amount,0) AS pct_unpaid_24h,
 (l.disbursed_amount - c.recovery_26h) AS unpaid_amount_26h,
 (l.disbursed_amount - c.recovery_26h) / NULLIF(l.disbursed_amount,0) AS pct_unpaid_26h,
-CASE WHEN m.principal_cure_ts <= l.disbursement_ts + INTERVAL '24' HOUR THEN 1 ELSE 0 END AS on_time_24h_flag,
-CASE WHEN m.principal_cure_ts <= l.disbursement_ts + INTERVAL '26' HOUR THEN 1 ELSE 0 END AS on_time_26h_flag,
-CASE WHEN m.principal_cure_ts IS NULL OR m.principal_cure_ts > l.disbursement_ts + INTERVAL '26' HOUR THEN 1 ELSE 0 END AS default_26h_flag,
+-- Maturity-gated: NULL until the loan has actually had this many hours to
+-- cure, so an unseasoned loan reads as "not yet observable" rather than a
+-- default. See the snapshot_ts comment in the snapshots CTE above.
+CASE
+WHEN (SELECT snapshot_ts FROM snapshots) < l.disbursement_ts + INTERVAL '24' HOUR THEN NULL
+WHEN m.principal_cure_ts <= l.disbursement_ts + INTERVAL '24' HOUR THEN 1 ELSE 0
+END AS on_time_24h_flag,
+CASE
+WHEN (SELECT snapshot_ts FROM snapshots) < l.disbursement_ts + INTERVAL '26' HOUR THEN NULL
+WHEN m.principal_cure_ts <= l.disbursement_ts + INTERVAL '26' HOUR THEN 1 ELSE 0
+END AS on_time_26h_flag,
+CASE
+WHEN (SELECT snapshot_ts FROM snapshots) < l.disbursement_ts + INTERVAL '26' HOUR THEN NULL
+WHEN m.principal_cure_ts IS NULL OR m.principal_cure_ts > l.disbursement_ts + INTERVAL '26' HOUR THEN 1 ELSE 0
+END AS default_26h_flag,
 CASE
 WHEN total_cure_cashflow = 0 THEN 'no_recovery'
 WHEN m.principal_cure_ts IS NULL THEN 'partial_only'
@@ -310,8 +345,13 @@ c.recovery_6h / NULLIF(l.disbursed_amount,0) AS pct_recovered_6h,
 c.recovery_12h / NULLIF(l.disbursed_amount,0) AS pct_recovered_12h,
 (l.disbursed_amount - c.recovery_24h) AS remaining_after_24h,
 (total_cure_cashflow - c.recovery_24h) AS recovery_after_24h,
-CASE WHEN c.recovery_24h < l.disbursed_amount THEN 1 ELSE 0 END AS default_24h_flag,
+-- Maturity-gated -- see on_time_24h_flag above.
 CASE
+WHEN (SELECT snapshot_ts FROM snapshots) < l.disbursement_ts + INTERVAL '24' HOUR THEN NULL
+WHEN c.recovery_24h < l.disbursed_amount THEN 1 ELSE 0
+END AS default_24h_flag,
+CASE
+WHEN (SELECT snapshot_ts FROM snapshots) < l.disbursement_ts + INTERVAL '48' HOUR THEN NULL
 WHEN m.principal_cure_ts IS NULL
 OR m.principal_cure_ts > l.disbursement_ts + INTERVAL '48' HOUR
 THEN 1 ELSE 0
@@ -470,6 +510,17 @@ ROWS BETWEEN 50 PRECEDING AND 1 PRECEDING
 ),
 0
 ) AS defaults_last_50_loans,
+-- COUNT() of a nullable column (not COUNT(*)) skips NULLs, so this is the
+-- number of prior loans in the window with a KNOWN 24h outcome -- the
+-- correct denominator for default_rate_last_50_loans in `streaks` below.
+-- loans_last_50_loans counts ALL prior loans (an activity measure) and
+-- would understate the rate if divided into defaults_last_50_loans, which
+-- (via SUM's own NULL-skipping) only counts mature ones.
+COUNT(default_24h_flag) OVER (
+PARTITION BY phonenumber
+ORDER BY disbursement_ts, requestid
+ROWS BETWEEN 50 PRECEDING AND 1 PRECEDING
+) AS mature_loans_last_50,
 -- streak reset groups
 SUM(CASE WHEN on_time_24h_flag = 0 THEN 1 ELSE 0 END) OVER (
 PARTITION BY phonenumber
@@ -486,10 +537,12 @@ FROM borrower_history_final bhf
 streaks AS (
 SELECT
 rlw.*,
--- safe default rate
+-- safe default rate -- denominator is mature_loans_last_50 (loans with a
+-- known 24h outcome), not loans_last_50_loans (all loans including
+-- unseasoned ones), so an immature tail loan can't dilute the rate.
 CASE
-WHEN loans_last_50_loans >= 5
-THEN defaults_last_50_loans * 1.0 / loans_last_50_loans
+WHEN mature_loans_last_50 >= 5
+THEN defaults_last_50_loans * 1.0 / mature_loans_last_50
 ELSE NULL
 END AS default_rate_last_50_loans,
 -- streak counters
