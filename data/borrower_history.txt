@@ -29,7 +29,17 @@
 -- new base/dedup/classified section.
 -- ============================================================================
 WITH snapshots AS (
-SELECT cast(20260531 AS bigint) AS snapshot_dt
+-- as_of_load_ts bounds inserted_ts across all three source tables so that a
+-- rerun of this exact snapshot is reproducible: dedup previously took only
+-- "latest inserted_ts" with no upper bound, so a late backfill/correction
+-- landing after the original run could silently change a re-run of "the
+-- same" historical snapshot. Set as_of_load_ts to the inserted_ts ceiling
+-- of the run you want to reproduce (e.g. the max inserted_ts observed when
+-- the original extract was produced); use CURRENT_TIMESTAMP only when you
+-- deliberately want the freshest reprocessed data instead of a frozen replay.
+SELECT
+cast(20260531 AS bigint) AS snapshot_dt,
+cast('2026-06-01 00:00:00.000' AS timestamp) AS as_of_load_ts
 ),
 loan_level AS (
 -- ── Begin: loan-level query sourced from the momo_loan_book_tracker tables ──
@@ -45,6 +55,7 @@ WHERE try_cast(disbursement_ts AS timestamp) IS NOT NULL
 AND disbursement_fid IS NOT NULL
 AND customer_msisdn IS NOT NULL
 AND date(try_cast(disbursement_ts AS timestamp)) <= date_parse(cast((SELECT snapshot_dt FROM snapshots) AS varchar), '%Y%m%d')
+AND inserted_ts <= (SELECT as_of_load_ts FROM snapshots)
 ),
 disb_dedup AS (
 SELECT *
@@ -83,6 +94,7 @@ WHERE try_cast(repayment_ts AS timestamp) IS NOT NULL
 AND repayment_fid IS NOT NULL
 AND customer_msisdn IS NOT NULL
 AND date(try_cast(repayment_ts AS timestamp)) <= date_parse(cast((SELECT snapshot_dt FROM snapshots) AS varchar), '%Y%m%d')
+AND inserted_ts <= (SELECT as_of_load_ts FROM snapshots)
 ),
 repay_dedup AS (
 SELECT *
@@ -124,6 +136,7 @@ ORDER BY inserted_ts DESC
 FROM analytics.momo_loan_book_tracker_loan_state_daily lsd
 WHERE disbursement_fid IS NOT NULL
 AND date_key <= (SELECT snapshot_dt FROM snapshots)
+AND inserted_ts <= (SELECT as_of_load_ts FROM snapshots)
 )
 WHERE rn = 1
 ),
