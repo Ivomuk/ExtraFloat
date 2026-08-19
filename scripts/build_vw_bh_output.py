@@ -15,12 +15,19 @@ Usage:
     # then run vw_bh_output.sql in Athena/Trino
 """
 
+import re
 import subprocess
 import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SRC = REPO_ROOT / "data" / "borrower_history.txt"
+
+# Athena/Trino unquoted identifier: letters/digits/underscore, not starting
+# with a digit. schema is interpolated directly into `CREATE OR REPLACE VIEW
+# {schema}.vw_bh_output AS` below -- reject anything else rather than emit
+# malformed or unintended SQL from a typo'd or pasted-wrong argument.
+_VALID_SCHEMA = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 def _git(*args: str) -> str:
@@ -37,6 +44,12 @@ def main() -> None:
     if len(sys.argv) != 2:
         sys.exit(f"Usage: python {Path(__file__).name} <validation_schema>")
     schema = sys.argv[1]
+    if not _VALID_SCHEMA.match(schema):
+        sys.exit(
+            f"ERROR: '{schema}' is not a valid unquoted SQL identifier "
+            "(letters/digits/underscore, not starting with a digit). "
+            "Refusing to interpolate it into a CREATE VIEW statement."
+        )
 
     if not SRC.exists():
         sys.exit(f"ERROR: {SRC} not found")

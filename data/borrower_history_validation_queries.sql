@@ -224,48 +224,61 @@ FROM :validation_schema.vw_bh_output;
 -- assumes one row per borrower; a violation here means something upstream
 -- (dedup, join fan-out) is broken.
 
--- 1b. Range and logical-identity checks.
+-- 1b. Range and logical-identity checks. Joins vw_bh_output back to
+-- vw_bh_loan_state_snapshot on latest_requestid so the missing-snapshot
+-- check (below) can tell "no match" apart from "matched, status null" --
+-- everything else here reads only from vw_bh_output (aliased o; note
+-- has_pre_window_history exists on BOTH views with different meanings --
+-- borrower-level on o, per-loan on ls -- so every column reference below
+-- is deliberately prefixed to avoid ambiguity once the join is present).
 SELECT
-SUM(CASE WHEN lifetime_on_time_24h_rate NOT BETWEEN 0 AND 1 THEN 1 ELSE 0 END) AS bad_on_time_24h_rate,
-SUM(CASE WHEN lifetime_default_24h_rate NOT BETWEEN 0 AND 1 THEN 1 ELSE 0 END) AS bad_default_24h_rate,
-SUM(CASE WHEN lifetime_on_time_26h_rate NOT BETWEEN 0 AND 1 THEN 1 ELSE 0 END) AS bad_on_time_26h_rate,
-SUM(CASE WHEN lifetime_default_26h_rate NOT BETWEEN 0 AND 1 THEN 1 ELSE 0 END) AS bad_default_26h_rate,
-SUM(CASE WHEN lifetime_severe_default_48h_rate NOT BETWEEN 0 AND 1 THEN 1 ELSE 0 END) AS bad_severe_default_48h_rate,
-SUM(CASE WHEN lifetime_zero_recovery_rate NOT BETWEEN 0 AND 1 THEN 1 ELSE 0 END) AS bad_zero_recovery_rate,
-SUM(CASE WHEN total_loans < 1 THEN 1 ELSE 0 END) AS bad_total_loans,
-SUM(CASE WHEN num_prior_loans < 0 THEN 1 ELSE 0 END) AS bad_num_prior_loans,
-SUM(CASE WHEN first_loan_ts > latest_loan_ts THEN 1 ELSE 0 END) AS bad_first_vs_latest_ts,
+SUM(CASE WHEN o.lifetime_on_time_24h_rate NOT BETWEEN 0 AND 1 THEN 1 ELSE 0 END) AS bad_on_time_24h_rate,
+SUM(CASE WHEN o.lifetime_default_24h_rate NOT BETWEEN 0 AND 1 THEN 1 ELSE 0 END) AS bad_default_24h_rate,
+SUM(CASE WHEN o.lifetime_on_time_26h_rate NOT BETWEEN 0 AND 1 THEN 1 ELSE 0 END) AS bad_on_time_26h_rate,
+SUM(CASE WHEN o.lifetime_default_26h_rate NOT BETWEEN 0 AND 1 THEN 1 ELSE 0 END) AS bad_default_26h_rate,
+SUM(CASE WHEN o.lifetime_severe_default_48h_rate NOT BETWEEN 0 AND 1 THEN 1 ELSE 0 END) AS bad_severe_default_48h_rate,
+SUM(CASE WHEN o.lifetime_zero_recovery_rate NOT BETWEEN 0 AND 1 THEN 1 ELSE 0 END) AS bad_zero_recovery_rate,
+SUM(CASE WHEN o.total_loans < 1 THEN 1 ELSE 0 END) AS bad_total_loans,
+SUM(CASE WHEN o.num_prior_loans < 0 THEN 1 ELSE 0 END) AS bad_num_prior_loans,
+SUM(CASE WHEN o.first_loan_ts > o.latest_loan_ts THEN 1 ELSE 0 END) AS bad_first_vs_latest_ts,
 -- on_time_24h_flag and default_24h_flag are exact complements per loan
 -- (see loan_final in borrower_history.txt), so their lifetime rates should
 -- sum to exactly 1 for every borrower with qualifying loans -- same for the
 -- 26h pair. A violation means the two derivations of the same threshold
 -- (timestamp comparison vs. checkpoint FILTER) have drifted apart.
-SUM(CASE WHEN ABS(lifetime_on_time_24h_rate + lifetime_default_24h_rate - 1.0) > 0.001 THEN 1 ELSE 0 END) AS bad_24h_complement_identity,
-SUM(CASE WHEN ABS(lifetime_on_time_26h_rate + lifetime_default_26h_rate - 1.0) > 0.001 THEN 1 ELSE 0 END) AS bad_26h_complement_identity,
+SUM(CASE WHEN ABS(o.lifetime_on_time_24h_rate + o.lifetime_default_24h_rate - 1.0) > 0.001 THEN 1 ELSE 0 END) AS bad_24h_complement_identity,
+SUM(CASE WHEN ABS(o.lifetime_on_time_26h_rate + o.lifetime_default_26h_rate - 1.0) > 0.001 THEN 1 ELSE 0 END) AS bad_26h_complement_identity,
 -- for the latest loan specifically, num_prior_loans must equal total_loans - 1
 -- (it's the last loan in the same ordering total_loans counts over)
-SUM(CASE WHEN num_prior_loans != total_loans - 1 THEN 1 ELSE 0 END) AS bad_num_prior_loans_identity,
+SUM(CASE WHEN o.num_prior_loans != o.total_loans - 1 THEN 1 ELSE 0 END) AS bad_num_prior_loans_identity,
 -- NULL RATES: quantify, don't silently let NOT BETWEEN/ABS(...)>x pass NULL
 -- rows uncounted (both evaluate to unknown/false for NULL inputs, so the
 -- SUM(CASE...) checks above never flag them). A NULL lifetime_*_rate here
 -- means exactly "this borrower has zero MATURE loans for that horizon" --
 -- AVG() over zero non-null rows is NULL, there's no other way to get one.
-SUM(CASE WHEN lifetime_on_time_24h_rate IS NULL THEN 1 ELSE 0 END) AS n_null_on_time_24h_rate,
-SUM(CASE WHEN lifetime_default_24h_rate IS NULL THEN 1 ELSE 0 END) AS n_null_default_24h_rate,
-SUM(CASE WHEN lifetime_on_time_26h_rate IS NULL THEN 1 ELSE 0 END) AS n_null_on_time_26h_rate,
-SUM(CASE WHEN lifetime_default_26h_rate IS NULL THEN 1 ELSE 0 END) AS n_null_default_26h_rate,
-SUM(CASE WHEN lifetime_severe_default_48h_rate IS NULL THEN 1 ELSE 0 END) AS n_null_severe_default_48h_rate,
-SUM(CASE WHEN lifetime_zero_recovery_rate IS NULL THEN 1 ELSE 0 END) AS n_null_zero_recovery_rate,
+SUM(CASE WHEN o.lifetime_on_time_24h_rate IS NULL THEN 1 ELSE 0 END) AS n_null_on_time_24h_rate,
+SUM(CASE WHEN o.lifetime_default_24h_rate IS NULL THEN 1 ELSE 0 END) AS n_null_default_24h_rate,
+SUM(CASE WHEN o.lifetime_on_time_26h_rate IS NULL THEN 1 ELSE 0 END) AS n_null_on_time_26h_rate,
+SUM(CASE WHEN o.lifetime_default_26h_rate IS NULL THEN 1 ELSE 0 END) AS n_null_default_26h_rate,
+SUM(CASE WHEN o.lifetime_severe_default_48h_rate IS NULL THEN 1 ELSE 0 END) AS n_null_severe_default_48h_rate,
+SUM(CASE WHEN o.lifetime_zero_recovery_rate IS NULL THEN 1 ELSE 0 END) AS n_null_zero_recovery_rate,
 -- ASYMMETRIC NULL: a complementary pair should be NULL together or not at
 -- all (same maturity gate feeds both). If this is ever nonzero, the two
 -- flags' maturity gates have drifted apart from each other.
-SUM(CASE WHEN (lifetime_on_time_24h_rate IS NULL) != (lifetime_default_24h_rate IS NULL) THEN 1 ELSE 0 END) AS bad_24h_asymmetric_null,
-SUM(CASE WHEN (lifetime_on_time_26h_rate IS NULL) != (lifetime_default_26h_rate IS NULL) THEN 1 ELSE 0 END) AS bad_26h_asymmetric_null,
--- latest loan has no matching loan_state_daily row at all (the LEFT JOIN in
--- loan_level found nothing) -- distinct from "matched but state fields are
--- legitimately blank"; every latest_* enrichment column would read NULL.
-SUM(CASE WHEN latest_loan_status IS NULL THEN 1 ELSE 0 END) AS n_latest_loan_missing_state_snapshot
-FROM :validation_schema.vw_bh_output;
+SUM(CASE WHEN (o.lifetime_on_time_24h_rate IS NULL) != (o.lifetime_default_24h_rate IS NULL) THEN 1 ELSE 0 END) AS bad_24h_asymmetric_null,
+SUM(CASE WHEN (o.lifetime_on_time_26h_rate IS NULL) != (o.lifetime_default_26h_rate IS NULL) THEN 1 ELSE 0 END) AS bad_26h_asymmetric_null,
+-- CORRECTION to an earlier version of this check: `latest_loan_status IS
+-- NULL` cannot actually distinguish "no snapshot row matched" from "a
+-- snapshot row matched but its own loan_status happens to be null" -- both
+-- produce the same NULL in vw_bh_output, since latest_loan_status is just
+-- the raw (nullable) ls.loan_status carried through the LEFT JOIN in
+-- loan_level. ls.disbursement_fid IS NULL from the explicit join above is
+-- the only way to tell these apart -- it's NULL if and only if the join
+-- found nothing, regardless of what a matched row's own fields contain.
+SUM(CASE WHEN ls.disbursement_fid IS NULL THEN 1 ELSE 0 END) AS n_latest_loan_missing_state_snapshot,
+SUM(CASE WHEN ls.disbursement_fid IS NOT NULL AND o.latest_loan_status IS NULL THEN 1 ELSE 0 END) AS n_latest_loan_matched_but_status_null
+FROM :validation_schema.vw_bh_output o
+LEFT JOIN :validation_schema.vw_bh_loan_state_snapshot ls ON ls.disbursement_fid = o.latest_requestid;
 -- RESULT:
 -- INTERPRETATION: bad_* columns should all be 0 -- concrete defects, not
 -- thresholds open to interpretation. n_null_* and n_latest_loan_missing_
