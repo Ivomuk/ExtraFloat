@@ -1,88 +1,19 @@
--- ============================================================================
--- loan_summary_query.txt
--- ============================================================================
--- Produces agent-level recent-activity capacity features (trailing 1M/3M/6M
--- and monthly M1-M6 dispatch/repayment/penalty volumes and values), one row
--- per msisdn, consumed by prepare_loan_summary_recent_features() /
--- LOAN_SUMMARY_REQUIRED_COLUMNS (extrafloat_limit_engine_features.py),
--- feeding the credit-limit engine's recent usage cap.
---
--- Sourced from the MoMo loan-book tracker tables (replaces the old
--- devdata.account_holder_dump agent roster + devdata.xtrafloat_daily_trans
--- transaction log -- same three tables data/borrower_history.txt was
--- already migrated onto):
---   analytics.momo_loan_book_tracker_disbursements_daily
---   analytics.momo_loan_book_tracker_repayments_daily
---
--- POPULATION CHANGE: account_holder_dump was a daily-snapshot MoMo-agent
--- roster (`tbl_dt = snapshot_dt AND account_type = 'MOBILE MONEY' AND
--- lower(profile) LIKE '%agent%'`) -- "registered agents as of that specific
--- day," independent of loan activity. The population below is instead
--- "every distinct customer_msisdn with a disbursement on or before
--- snapshot_dt" -- matching borrower_history.txt's population logic exactly.
--- This is a deliberate, not incidental, semantic change: XtraFloat's loan
--- product lends specifically to MoMo agents needing working-capital float,
--- so every borrower in the loan-book tracker tables already IS an agent by
--- construction (confirmed via data/loan_state_query_updated.txt, which
--- settled on the same no-roster population). The roster's independence
--- from loan activity is not reproduced -- an agent who never took a loan
--- never appeared in the old output either (LEFT JOIN features still needs
--- SOME row in `base`, and disbursement-based population is a superset of
--- "agents who could have recent-activity features to report").
---
--- PENALTY DERIVATION CHANGE: the old table had a distinct 'XtraFloat
--- Penalty' transaction type; the new repayments table does not. Per
--- explicit business rule (1% of principal charged as a penalty if a loan
--- isn't repaid within 24h, another 1% if still unpaid at 48h, nothing
--- further after that), penalty_events below synthesizes up to two penalty
--- EVENTS per loan at disbursement_ts+24h/+48h whenever principal wasn't
--- cured by that point -- reusing the same disbursement/repayment dedup +
--- time-window repayment-attribution heuristic already established and
--- validated in borrower_history.txt (loan_final's on_time_24h_flag /
--- severe_default_48h_flag), rather than a second, possibly-divergent
--- methodology. penalties_1M/3M/6M are counts, not amounts -- no penalty
--- value/amount columns or M1-M6 monthly penalty breakdown exist in this
--- query's output, so amount is irrelevant for these synthetic events.
---
--- SIGN CONVENTION: the original query negated repayment amounts
--- (`-1 * amount`), confirming devdata.xtrafloat_daily_trans stored
--- repayments as negative debits. Whether
--- momo_loan_book_tracker_repayments_daily.repayment_amount_ugx uses the
--- same convention is an open question already flagged (unresolved) in
--- borrower_history_validation_queries.sql's Section B0 diagnostic --
--- this file uses abs() like borrower_history.txt settled on, rather than
--- assuming a sign flip is still needed. Re-check both files together if
--- that question is ever resolved.
---
--- EXECUTION: as_of_load_ts bounds inserted_ts across both source tables,
--- same reproducibility rationale as borrower_history.txt's snapshots CTE --
--- use a frozen literal, not CURRENT_TIMESTAMP, when replaying a historical
--- snapshot. This file has no query-plan stage-count concerns observed at
--- design time (no wide borrower-level window-function cascade like
--- borrower_history.txt), but if a warehouse run hits the same "Number of
--- stages exceeds the allowed maximum" error, the natural split point is
--- materializing `loan_cure` as a checkpoint table before `t_pull`.
--- ============================================================================
 SELECT *
 from
 (
 with snapshots as (
-select
-cast(20260731 as bigint) as snapshot_dt,
-cast('2026-08-20 00:00:00.000' as timestamp) as as_of_load_ts
+select cast(20260531 as bigint) as snapshot_dt
 ),
 base as (
 select
 b0.msisdn,
 s.snapshot_dt
 from (
-select distinct
-regexp_replace(trim(cast(customer_msisdn as varchar)), '[^0-9]', '') as msisdn
-from analytics.momo_loan_book_tracker_disbursements_daily
-where try_cast(disbursement_ts as timestamp) is not null
-and customer_msisdn is not null
-and date(try_cast(disbursement_ts as timestamp)) <= date_parse(cast((select snapshot_dt from snapshots) as varchar), '%Y%m%d')
-and inserted_ts <= (select as_of_load_ts from snapshots)
+select distinct msisdn
+from devdata.account_holder_dump
+where tbl_dt = (select snapshot_dt from snapshots)
+and account_type = 'MOBILE MONEY'
+and lower(profile) like '%agent%'
 ) b0
 cross join snapshots s
 ),
@@ -101,184 +32,22 @@ try_cast(date_format(date_add('day', -150, date_parse(cast(b.snapshot_dt as varc
 try_cast(date_format(date_add('day', -180, date_parse(cast(b.snapshot_dt as varchar), '%Y%m%d')), '%Y%m%d') as bigint) as dt_d180
 from base b
 ),
--- ── Begin: per-loan dedup + cure-timing pipeline (mirrors borrower_history.txt) ──
-disb_raw as (
-select
-disbursement_fid,
-regexp_replace(trim(cast(customer_msisdn as varchar)), '[^0-9]', '') as phonenumber,
-try_cast(disbursement_ts as timestamp) as disbursement_ts,
-cast(disbursement_amount_ugx as double) as disbursed_amount,
-inserted_ts
-from analytics.momo_loan_book_tracker_disbursements_daily
-where try_cast(disbursement_ts as timestamp) is not null
-and disbursement_fid is not null
-and customer_msisdn is not null
-and date(try_cast(disbursement_ts as timestamp)) <= date_parse(cast((select snapshot_dt from snapshots) as varchar), '%Y%m%d')
-and inserted_ts <= (select as_of_load_ts from snapshots)
-),
-disb_dedup as (
-select * from (
-select d.*,
-row_number() over (
-partition by disbursement_fid
-order by inserted_ts desc
-) as rn
-from disb_raw d
-)
-where rn = 1
-),
-disb_windows as (
--- Per-customer disbursement timeline; next_disbursement_ts bounds the
--- window a repayment can be attributed to this loan (see repay_attributed).
-select
-disbursement_fid,
-phonenumber,
-disbursement_ts,
-disbursed_amount,
-lead(disbursement_ts) over (
-partition by phonenumber order by disbursement_ts, disbursement_fid
-) as next_disbursement_ts
-from disb_dedup
-),
-repay_raw as (
-select
-repayment_fid,
-regexp_replace(trim(cast(customer_msisdn as varchar)), '[^0-9]', '') as phonenumber,
-try_cast(repayment_ts as timestamp) as repayment_ts,
-cast(repayment_amount_ugx as double) as repayment_amount,
-inserted_ts
-from analytics.momo_loan_book_tracker_repayments_daily
-where try_cast(repayment_ts as timestamp) is not null
-and repayment_fid is not null
-and customer_msisdn is not null
-and date(try_cast(repayment_ts as timestamp)) <= date_parse(cast((select snapshot_dt from snapshots) as varchar), '%Y%m%d')
-and inserted_ts <= (select as_of_load_ts from snapshots)
-),
-repay_dedup as (
-select * from (
-select r.*,
-row_number() over (
-partition by repayment_fid
-order by inserted_ts desc
-) as rn
-from repay_raw r
-)
-where rn = 1
-),
-repay_attributed as (
--- Attribute each repayment to the most recent prior disbursement for that
--- customer, bounded by the next disbursement (if any) -- same heuristic as
--- borrower_history.txt's repay_attributed; a proxy for an exact loan-key
--- match, since repayments carry no disbursement_fid of their own.
-select
-w.disbursement_fid,
-w.phonenumber,
-r.repayment_ts,
-abs(r.repayment_amount) as repayment_amount
-from repay_dedup r
-join disb_windows w
-on r.phonenumber = w.phonenumber
-and r.repayment_ts >= w.disbursement_ts
-and (w.next_disbursement_ts is null or r.repayment_ts < w.next_disbursement_ts)
-),
-loan_cure as (
--- principal_cure_ts: first attributed-repayment timestamp at which
--- cumulative repayment reaches the disbursed principal. NULL if never
--- reached within the snapshot window.
-select
-w.disbursement_fid,
-w.phonenumber,
-w.disbursement_ts,
-w.disbursed_amount,
-min(case when cum.cumulative_repaid >= w.disbursed_amount then cum.repayment_ts end) as principal_cure_ts
-from disb_windows w
-left join (
-select
-disbursement_fid,
-repayment_ts,
-sum(repayment_amount) over (
-partition by disbursement_fid order by repayment_ts
-) as cumulative_repaid
-from repay_attributed
-) cum
-on cum.disbursement_fid = w.disbursement_fid
-group by w.disbursement_fid, w.phonenumber, w.disbursement_ts, w.disbursed_amount
-),
-penalty_events as (
--- Up to 2 synthetic penalty events per loan: one at +24h if not cured by
--- then, one at +48h if still not cured by then. No penalty amount is
--- computed -- penalties_1M/3M/6M below are event COUNTS, not sums.
-select
-'P-' || cast(disbursement_fid as varchar) || '-24h' as penalty_id,
-phonenumber,
-disbursement_ts + interval '24' hour as penalty_ts
-from loan_cure
-where principal_cure_ts is null or principal_cure_ts > disbursement_ts + interval '24' hour
-union all
-select
-'P-' || cast(disbursement_fid as varchar) || '-48h' as penalty_id,
-phonenumber,
-disbursement_ts + interval '48' hour as penalty_ts
-from loan_cure
-where principal_cure_ts is null or principal_cure_ts > disbursement_ts + interval '48' hour
-),
--- ── End: per-loan dedup + cure-timing pipeline ──
 t_pull as (
--- Raw dispatch/payment/penalty events for each (msisdn, snapshot_dt),
--- bounded to the trailing 180-day window -- same shape/columns as the
--- original t_pull (tbl_dt, tranname, telecomid, amount) so t_by_txn/
--- features below need no changes. telecomid is substituted 1:1 by
--- disbursement_fid/repayment_fid/penalty_id, each prefixed by source
--- (D-/R-/P-) so IDs from different tables can never collide within the
--- same telecomid grouping in t_by_txn.
 select
 w.msisdn,
 w.snapshot_dt,
-cast(date_format(d.disbursement_ts, '%Y%m%d') as bigint) as tbl_dt,
-'XtraFloat Dispatch' as tranname,
-'D-' || cast(d.disbursement_fid as varchar) as telecomid,
-d.disbursed_amount as amount,
+t.tbl_dt,
+t.tranname,
+t.telecomid,
+t.amount,
 w.dt_m6, w.dt_m3, w.dt_m1,
 w.dt_d30, w.dt_d60, w.dt_d90, w.dt_d120, w.dt_d150, w.dt_d180
 from win w
-join disb_dedup d
-on d.phonenumber = w.msisdn
-and cast(date_format(d.disbursement_ts, '%Y%m%d') as bigint) > w.dt_d180
-and cast(date_format(d.disbursement_ts, '%Y%m%d') as bigint) <= w.snapshot_dt
-
-union all
-
-select
-w.msisdn,
-w.snapshot_dt,
-cast(date_format(r.repayment_ts, '%Y%m%d') as bigint) as tbl_dt,
-'XtraFloat Payment' as tranname,
-'R-' || cast(r.repayment_fid as varchar) as telecomid,
-r.repayment_amount as amount,
-w.dt_m6, w.dt_m3, w.dt_m1,
-w.dt_d30, w.dt_d60, w.dt_d90, w.dt_d120, w.dt_d150, w.dt_d180
-from win w
-join repay_dedup r
-on r.phonenumber = w.msisdn
-and cast(date_format(r.repayment_ts, '%Y%m%d') as bigint) > w.dt_d180
-and cast(date_format(r.repayment_ts, '%Y%m%d') as bigint) <= w.snapshot_dt
-
-union all
-
-select
-w.msisdn,
-w.snapshot_dt,
-cast(date_format(p.penalty_ts, '%Y%m%d') as bigint) as tbl_dt,
-'XtraFloat Penalty' as tranname,
-p.penalty_id as telecomid,
-cast(null as double) as amount,
-w.dt_m6, w.dt_m3, w.dt_m1,
-w.dt_d30, w.dt_d60, w.dt_d90, w.dt_d120, w.dt_d150, w.dt_d180
-from win w
-join penalty_events p
-on p.phonenumber = w.msisdn
-and cast(date_format(p.penalty_ts, '%Y%m%d') as bigint) > w.dt_d180
-and cast(date_format(p.penalty_ts, '%Y%m%d') as bigint) <= w.snapshot_dt
+left join devdata.xtrafloat_daily_trans t
+on t.phonenumber = w.msisdn
+and t.tbl_dt > w.dt_d180
+and t.tbl_dt <= w.snapshot_dt
+and t.tranname in ('XtraFloat Dispatch', 'XtraFloat Payment', 'XtraFloat Penalty')
 ),
 t_by_txn as (
 select
@@ -406,31 +175,31 @@ then 1 else 0 end
 ) as repayment_vol_6M__flag,
 sum(case
 when tbl_dt > dt_m1 and tbl_dt <= snapshot_dt and tranname = 'XtraFloat Payment'
-then cast(amount as double) end) as repayment_val_1M__l1,
+then -1 * cast(amount as double) end) as repayment_val_1M__l1,
 sum(case
 when tbl_dt > dt_d30 and tbl_dt <= snapshot_dt and tranname = 'XtraFloat Payment'
-then cast(amount as double) end) as Repayment_val_M1__l1,
+then -1 * cast(amount as double) end) as Repayment_val_M1__l1,
 sum(case
 when tbl_dt > dt_d60 and tbl_dt <= dt_d30 and tranname = 'XtraFloat Payment'
-then cast(amount as double) end) as Repayment_val_M2__l1,
+then -1 * cast(amount as double) end) as Repayment_val_M2__l1,
 sum(case
 when tbl_dt > dt_d90 and tbl_dt <= dt_d60 and tranname = 'XtraFloat Payment'
-then cast(amount as double) end) as Repayment_val_M3__l1,
+then -1 * cast(amount as double) end) as Repayment_val_M3__l1,
 sum(case
 when tbl_dt > dt_d120 and tbl_dt <= dt_d90 and tranname = 'XtraFloat Payment'
-then cast(amount as double) end) as Repayment_val_M4__l1,
+then -1 * cast(amount as double) end) as Repayment_val_M4__l1,
 sum(case
 when tbl_dt > dt_d150 and tbl_dt <= dt_d120 and tranname = 'XtraFloat Payment'
-then cast(amount as double) end) as Repayment_val_M5__l1,
+then -1 * cast(amount as double) end) as Repayment_val_M5__l1,
 sum(case
 when tbl_dt > dt_d180 and tbl_dt <= dt_d150 and tranname = 'XtraFloat Payment'
-then cast(amount as double) end) as Repayment_val_M6__l1,
+then -1 * cast(amount as double) end) as Repayment_val_M6__l1,
 sum(case
 when tbl_dt > dt_m3 and tbl_dt <= snapshot_dt and tranname = 'XtraFloat Payment'
-then cast(amount as double) end) as repayment_val_3M__l1,
+then -1 * cast(amount as double) end) as repayment_val_3M__l1,
 sum(case
 when tbl_dt > dt_m6 and tbl_dt <= snapshot_dt and tranname = 'XtraFloat Payment'
-then cast(amount as double) end) as repayment_val_6M__l1
+then -1 * cast(amount as double) end) as repayment_val_6M__l1
 from t_pull
 group by
 msisdn,
