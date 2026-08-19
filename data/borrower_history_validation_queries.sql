@@ -339,6 +339,139 @@ WHERE e.column_name IS NULL;
 -- an extra column can't cancel out into a false pass the way a bare count
 -- comparison could.
 
+-- 1d. Type-family contract: 1c only checks column NAMES -- a column could
+-- keep its name and silently change from double to varchar, or boolean to
+-- string, and still pass. Checked against FAMILIES (matched by data_type
+-- prefix), not exact Trino type names, deliberately: I can't confirm exact
+-- warehouse types without live access, and asserting one specific type
+-- (e.g. bigint vs integer for a count) would risk flagging a difference
+-- that doesn't actually matter to the consumer as a false defect.
+-- Families are derived from prepare_borrower_limit_features()'s own
+-- coercion code (extrafloat/engine/extrafloat_limit_engine_features.py) --
+-- what it actually does to each column -- not guessed from column names.
+-- NOTE: latest_requestid is classified NUMERIC here, not VARCHAR, even
+-- though the Python code does `.astype(str)` on it -- traced in
+-- borrower_history.txt to `w.disbursement_fid AS requestid` with no cast,
+-- so its real SQL type is whatever disbursement_fid natively is (source
+-- samples suggest bigint). The Python astype(str) call works on either a
+-- numeric or string column, so it doesn't resolve this on its own -- if
+-- this check flags latest_requestid, confirm whether that's the expected
+-- bigint-like family or an actual problem.
+WITH expected_family(column_name, family) AS (
+VALUES
+('phonenumber','VARCHAR'),
+('total_loans','NUMERIC'),('first_loan_ts','TIMESTAMP'),('latest_loan_ts','TIMESTAMP'),
+('total_disbursed_amount','NUMERIC'),('avg_loan_size_lifetime','NUMERIC'),('max_loan_size_lifetime','NUMERIC'),
+('lifetime_on_time_24h_rate','NUMERIC'),('lifetime_on_time_26h_rate','NUMERIC'),
+('lifetime_default_24h_rate','NUMERIC'),('lifetime_default_26h_rate','NUMERIC'),
+('lifetime_severe_default_48h_rate','NUMERIC'),('lifetime_zero_recovery_rate','NUMERIC'),
+('lifetime_avg_hours_to_principal_cure','NUMERIC'),('lifetime_worst_hours_to_principal_cure','NUMERIC'),
+('lifetime_cure_time_volatility','NUMERIC'),
+('latest_requestid','NUMERIC'),  -- see NOTE above
+('latest_disbursement_ts','TIMESTAMP'),('latest_disbursed_amount','NUMERIC'),
+('num_prior_loans','NUMERIC'),('prior_on_time_24h_rate','NUMERIC'),('avg_prior_hours_to_cure','NUMERIC'),
+('worst_prior_hours_to_cure','NUMERIC'),('cure_time_volatility','NUMERIC'),('recent_3_on_time_rate','NUMERIC'),
+('recent_3_avg_cure_time','NUMERIC'),('lifetime_prior_default_24h_rate','NUMERIC'),
+('recent_5_default_24h_rate','NUMERIC'),('cure_time_trend','NUMERIC'),
+('borrower_trend','VARCHAR'),('borrower_profile_type','VARCHAR'),
+('loans_last_50_loans','NUMERIC'),('defaults_last_50_loans','NUMERIC'),('default_rate_last_50_loans','NUMERIC'),
+('prior_on_time_streak','NUMERIC'),('prior_default_streak','NUMERIC'),('avg_prior_loan_size','NUMERIC'),
+('max_prior_loan_size','NUMERIC'),('loan_size_vs_avg_ratio','NUMERIC'),('loan_size_vs_max_ratio','NUMERIC'),
+('loan_above_prior_max_flag','NUMERIC'),
+('has_pre_window_history','BOOLEAN'),
+('latest_loan_status','VARCHAR'),('latest_aging_bucket','VARCHAR'),('latest_days_aging','NUMERIC'),
+('latest_is_active_loan','BOOLEAN'),
+('latest_interest_and_penalty_ugx','NUMERIC'),('latest_expected_total_charge_ugx','NUMERIC'),
+('latest_charge_variance_ugx','NUMERIC'),('latest_charge_variance_pct','NUMERIC'),
+('latest_is_charge_anomaly','BOOLEAN')
+),
+actual_types AS (
+SELECT
+column_name,
+data_type,
+CASE
+WHEN data_type LIKE 'timestamp%' THEN 'TIMESTAMP'
+WHEN data_type LIKE 'date%' THEN 'TIMESTAMP'
+WHEN data_type IN ('double','real','bigint','integer','smallint','tinyint') OR data_type LIKE 'decimal%' THEN 'NUMERIC'
+WHEN data_type = 'boolean' THEN 'BOOLEAN'
+WHEN data_type LIKE 'varchar%' OR data_type LIKE 'char%' THEN 'VARCHAR'
+ELSE 'OTHER: ' || data_type
+END AS actual_family
+FROM information_schema.columns
+WHERE table_schema = ':validation_schema_as_quoted_string'  -- see the note on 1c's identical placeholder
+AND table_name = 'vw_bh_output'
+)
+SELECT
+ef.column_name,
+ef.family AS expected_family,
+at.data_type AS actual_data_type,
+at.actual_family
+FROM expected_family ef
+JOIN actual_types at ON at.column_name = ef.column_name
+WHERE at.actual_family != ef.family;
+-- RESULT:
+-- INTERPRETATION: this query should return ZERO rows (aside from expected
+-- latest_requestid ambiguity noted above, which needs a human judgment
+-- call, not an automatic pass/fail). Any other row is a column whose type
+-- family doesn't match what the Python consumer expects -- e.g. a rate
+-- column that became VARCHAR would silently coerce to NaN/garbage in
+-- pandas rather than erroring loudly.
+
+
+-- ============================================================================
+-- SOURCE DATA QUALITY GATE -- null/non-finite/implausible amounts
+-- ============================================================================
+-- Run this before A/B0-B4 -- a null or non-finite amount silently
+-- propagating through SUM/ABS/ratios/cure-timing logic would corrupt every
+-- downstream check without necessarily producing an obviously wrong result.
+--
+-- CAVEAT ON REACHABILITY: vw_bh_disb_dedup/vw_bh_repay_dedup (like
+-- borrower_history.txt itself) cast amounts with plain `cast(... AS
+-- double)`, not `try_cast`. If the underlying disbursement_amount_ugx/
+-- repayment_amount_ugx columns are ever non-numeric (e.g. stored as varchar
+-- with a malformed value), that cast throws and the ENTIRE view -- and
+-- every check in this file, including this one -- fails to even run,
+-- rather than surfacing as a null/bad row here. This section can only
+-- catch quality problems that survive a successful cast (null, zero,
+-- negative, non-finite double values); it cannot catch a cast failure
+-- itself. If GATE 0's views fail to build with a cast/conversion error,
+-- that error IS the finding -- it means switching to try_cast (and then
+-- deciding what a failed-cast row should mean for the query) needs to be a
+-- deliberate decision, not something to silently code around here.
+SELECT
+'disbursements' AS source,
+COUNT(*) AS total_rows,
+SUM(CASE WHEN disbursed_amount IS NULL THEN 1 ELSE 0 END) AS n_null_amount,
+SUM(CASE WHEN disbursed_amount <= 0 THEN 1 ELSE 0 END) AS n_zero_or_negative_amount,
+SUM(CASE WHEN is_nan(disbursed_amount) THEN 1 ELSE 0 END) AS n_nan_amount,
+SUM(CASE WHEN is_infinite(disbursed_amount) THEN 1 ELSE 0 END) AS n_infinite_amount,
+-- heuristic threshold, not a confirmed business limit -- flag for review,
+-- not an automatic fail; adjust once the actual expected loan-size range
+-- is confirmed with the business owner
+SUM(CASE WHEN disbursed_amount > 1000000000 THEN 1 ELSE 0 END) AS n_implausibly_large_amount
+FROM :validation_schema.vw_bh_disb_dedup
+UNION ALL
+SELECT
+'repayments',
+COUNT(*),
+SUM(CASE WHEN repayment_amount IS NULL THEN 1 ELSE 0 END),
+SUM(CASE WHEN repayment_amount = 0 THEN 1 ELSE 0 END),  -- zero is plausible for a repayment (a $0 correction row); negative is covered by Section B0's sign diagnostic, not repeated here
+SUM(CASE WHEN is_nan(repayment_amount) THEN 1 ELSE 0 END),
+SUM(CASE WHEN is_infinite(repayment_amount) THEN 1 ELSE 0 END),
+SUM(CASE WHEN ABS(repayment_amount) > 1000000000 THEN 1 ELSE 0 END)
+FROM :validation_schema.vw_bh_repay_dedup;
+-- RESULT:
+-- INTERPRETATION: n_null_amount, n_nan_amount, and n_infinite_amount should
+-- all be 0 for both sources -- any of these would propagate as NULL/NaN/Inf
+-- through every downstream SUM/ratio in loan_final and silently corrupt
+-- results for that loan and (via the borrower-level AVG/streak windows)
+-- potentially other loans for the same borrower too. n_zero_or_negative_
+-- amount for disbursements should be 0 (a loan can't disburse <= 0).
+-- n_implausibly_large_amount is a heuristic flag for manual review, not a
+-- hard failure -- confirm what "implausible" actually means for this
+-- product with the business owner before treating any nonzero count here
+-- as a defect.
+
 
 -- ============================================================================
 -- SECTION A -- Repayment amount semantics: gross or principal-only?
@@ -965,7 +1098,10 @@ HAVING COUNT(*) > 1
 --   GATE 1 grain violations:   ____________________
 --   GATE 1 range violations:   ____________________
 --   GATE 1 null-rate counts:   ____________________ (n_null_* columns, and whether they're explained by recent unseasoned loans)
---   GATE 1 column contract:    ____________________ (missing / unexpected columns, if any)
+--   GATE 1 missing-snapshot vs matched-but-null: ___ (n_latest_loan_missing_state_snapshot / n_latest_loan_matched_but_status_null)
+--   GATE 1 column contract (1c names): ___________ (missing / unexpected columns, if any)
+--   GATE 1 column contract (1d types): ___________ (any type-family mismatches; note latest_requestid needs a judgment call, not auto-fail)
+--   Source data quality gate:  ____________________ (null/NaN/Inf/implausible amount counts, both sources)
 --   Section A conclusion:      ____________________ (principal-only / gross / unclear)
 --   B0 negative repayment share: __________________
 --   B1 coverage (count/value): ____________________

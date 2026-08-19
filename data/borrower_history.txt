@@ -66,6 +66,19 @@ cast('2026-06-01 00:00:00.000' AS timestamp) AS snapshot_ts
 ),
 loan_level AS (
 -- ── Begin: loan-level query sourced from the momo_loan_book_tracker tables ──
+-- DEDUP-VS-SCOPE ORDERING (applies here and identically to repay_raw and
+-- loan_state_loads_dedup below): the business-date filter (date(...) <=
+-- snapshot_dt) is applied BEFORE deduplication picks the latest inserted_ts
+-- version. That means the implemented semantics are "latest IN-SCOPE
+-- record as of load cutoff" -- not "latest record as of load cutoff, then
+-- apply business-date scope." If a correction changes an event's own
+-- timestamp (e.g. disbursement_ts) to move it outside snapshot_dt, this
+-- filter drops that latest version entirely and dedup falls back to an
+-- older, possibly-superseded in-scope version, rather than recognizing the
+-- event moved out of scope. This is safe only if disbursement_ts/
+-- repayment_ts are immutable per ID once written -- confirm that guarantee
+-- with the source system owner; if event timestamps can be corrected, this
+-- ordering needs to be revisited deliberately, not assumed.
 WITH disb_raw AS (
 SELECT
 disbursement_fid,
