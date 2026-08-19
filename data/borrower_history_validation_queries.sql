@@ -349,14 +349,16 @@ WHERE e.column_name IS NULL;
 -- Families are derived from prepare_borrower_limit_features()'s own
 -- coercion code (extrafloat/engine/extrafloat_limit_engine_features.py) --
 -- what it actually does to each column -- not guessed from column names.
--- NOTE: latest_requestid is classified NUMERIC here, not VARCHAR, even
--- though the Python code does `.astype(str)` on it -- traced in
--- borrower_history.txt to `w.disbursement_fid AS requestid` with no cast,
--- so its real SQL type is whatever disbursement_fid natively is (source
--- samples suggest bigint). The Python astype(str) call works on either a
--- numeric or string column, so it doesn't resolve this on its own -- if
--- this check flags latest_requestid, confirm whether that's the expected
--- bigint-like family or an actual problem.
+-- NOTE: latest_requestid is deliberately EXCLUDED from this pass/fail
+-- assertion (see the separate informational query right after this one).
+-- Traced in borrower_history.txt to `w.disbursement_fid AS requestid` with
+-- no cast, so its real SQL type is whatever disbursement_fid natively is
+-- (source samples suggest bigint) -- while the Python consumer does
+-- `.astype(str)` on it, which works on either a numeric or string column
+-- and so doesn't resolve the ambiguity either way. Asserting a family here
+-- that isn't actually a ratified contract would make this gate cry wolf on
+-- every run regardless of whether anything is actually wrong; instead its
+-- real type is reported separately for a human to judge.
 WITH expected_family(column_name, family) AS (
 VALUES
 ('phonenumber','VARCHAR'),
@@ -367,7 +369,8 @@ VALUES
 ('lifetime_severe_default_48h_rate','NUMERIC'),('lifetime_zero_recovery_rate','NUMERIC'),
 ('lifetime_avg_hours_to_principal_cure','NUMERIC'),('lifetime_worst_hours_to_principal_cure','NUMERIC'),
 ('lifetime_cure_time_volatility','NUMERIC'),
-('latest_requestid','NUMERIC'),  -- see NOTE above
+-- latest_requestid intentionally omitted -- see NOTE above and the
+-- informational query following this one.
 ('latest_disbursement_ts','TIMESTAMP'),('latest_disbursed_amount','NUMERIC'),
 ('num_prior_loans','NUMERIC'),('prior_on_time_24h_rate','NUMERIC'),('avg_prior_hours_to_cure','NUMERIC'),
 ('worst_prior_hours_to_cure','NUMERIC'),('cure_time_volatility','NUMERIC'),('recent_3_on_time_rate','NUMERIC'),
@@ -410,12 +413,34 @@ FROM expected_family ef
 JOIN actual_types at ON at.column_name = ef.column_name
 WHERE at.actual_family != ef.family;
 -- RESULT:
--- INTERPRETATION: this query should return ZERO rows (aside from expected
--- latest_requestid ambiguity noted above, which needs a human judgment
--- call, not an automatic pass/fail). Any other row is a column whose type
--- family doesn't match what the Python consumer expects -- e.g. a rate
--- column that became VARCHAR would silently coerce to NaN/garbage in
--- pandas rather than erroring loudly.
+-- INTERPRETATION: this query should return ZERO rows, full stop -- every
+-- column it checks has a ratified expected family. Any row is a column
+-- whose type family doesn't match what the Python consumer expects -- e.g.
+-- a rate column that became VARCHAR would silently coerce to NaN/garbage
+-- in pandas rather than erroring loudly.
+
+-- 1d-info. latest_requestid's actual type, reported (not asserted) --
+-- excluded from 1d above because its correct family is an open question,
+-- not a known contract (see the NOTE on 1d). This is diagnostic, not a
+-- pass/fail gate: read actual_data_type and make the numeric-vs-string
+-- call directly, e.g. by asking whoever owns disbursement_fid's schema.
+SELECT
+column_name,
+data_type AS actual_data_type,
+CASE
+WHEN data_type LIKE 'timestamp%' OR data_type LIKE 'date%' THEN 'TIMESTAMP'
+WHEN data_type IN ('double','real','bigint','integer','smallint','tinyint') OR data_type LIKE 'decimal%' THEN 'NUMERIC'
+WHEN data_type = 'boolean' THEN 'BOOLEAN'
+WHEN data_type LIKE 'varchar%' OR data_type LIKE 'char%' THEN 'VARCHAR'
+ELSE 'OTHER: ' || data_type
+END AS actual_family
+FROM information_schema.columns
+WHERE table_schema = ':validation_schema_as_quoted_string'  -- see the note on 1c's identical placeholder
+AND table_name = 'vw_bh_output'
+AND column_name = 'latest_requestid';
+-- RESULT:
+-- INTERPRETATION: informational only -- record actual_family here in GATE 6
+-- once known, so this stops being an open question on every future review.
 
 
 -- ============================================================================
@@ -1100,7 +1125,8 @@ HAVING COUNT(*) > 1
 --   GATE 1 null-rate counts:   ____________________ (n_null_* columns, and whether they're explained by recent unseasoned loans)
 --   GATE 1 missing-snapshot vs matched-but-null: ___ (n_latest_loan_missing_state_snapshot / n_latest_loan_matched_but_status_null)
 --   GATE 1 column contract (1c names): ___________ (missing / unexpected columns, if any)
---   GATE 1 column contract (1d types): ___________ (any type-family mismatches; note latest_requestid needs a judgment call, not auto-fail)
+--   GATE 1 column contract (1d types): ___________ (any type-family mismatches -- should be ZERO rows, latest_requestid is excluded, not exempted)
+--   GATE 1d-info latest_requestid actual_family: ___________ (record here once known; not a pass/fail check)
 --   Source data quality gate:  ____________________ (null/NaN/Inf/implausible amount counts, both sources)
 --   Section A conclusion:      ____________________ (principal-only / gross / unclear)
 --   B0 negative repayment share: __________________
