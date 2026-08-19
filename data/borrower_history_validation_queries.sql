@@ -4,13 +4,27 @@
 -- Diagnostics for the borrower_history.txt rewrite (xtrafloat_daily_trans ->
 -- momo_loan_book_tracker_* tables). None of these have been run -- this repo
 -- has no live warehouse connection, so every query here is prepared, not
--- executed. Run each section in Athena/Trino, read the interpretation note,
--- and treat the rewrite as unverified until this file's findings are filled
--- in (see the "RESULT:" placeholders).
+-- executed. Treat the rewrite as unverified until GATE 6 at the bottom of
+-- this file is filled in with real execution evidence.
 --
--- Set these to match the borrower_history.txt run being validated:
---   :snapshot_dt      -- e.g. 20260531
---   :as_of_load_ts    -- e.g. TIMESTAMP '2026-06-01 00:00:00.000'
+-- ARCHITECTURE (v2): every earlier version of this file had each section
+-- (B1/B2/B3/C/D/...) re-implement its own copy of the disbursement/repayment/
+-- loan-state dedup logic, and those copies drifted from borrower_history.txt
+-- and from each other -- missing ROW_NUMBER dedup in some places, missing the
+-- as_of_load_ts freeze in others. That's a structural problem, not a series
+-- of one-off typos, so this version fixes it structurally: GATE 0 below
+-- creates a small set of views ONCE, matching borrower_history.txt's own
+-- dedup/window/anomaly-exclusion logic exactly, and every later section
+-- queries those views instead of re-deriving the logic. There is now exactly
+-- one place this logic is defined.
+--
+-- Substitute before running:
+--   :validation_schema  -- a database you have CREATE VIEW rights in (a
+--                            scratch/sandbox schema, not production)
+--   :snapshot_dt         -- e.g. 20260531 -- MUST match the borrower_history.txt
+--                            run being validated
+--   :as_of_load_ts       -- e.g. TIMESTAMP '2026-06-01 00:00:00.000' -- MUST
+--                            match the borrower_history.txt run being validated
 -- ============================================================================
 --
 -- ============================================================================
@@ -18,41 +32,263 @@
 -- using any of these as a go/no-go gate; they are starting points, not
 -- something I can unilaterally declare correct)
 -- ============================================================================
---   Attributed repayment coverage        (B1: attributed_repayments /
---                                          total_repayments)             >= 99%
---   Boundary-sensitive repayment rate    (B1: near_next_disbursement_
---                                          boundary / attributed_
---                                          repayments)                   <= 1%
---   Rapid-reborrow rate                  (B1: rapid_reborrow_disbursements
---                                          / total_disbursements -- proxy
---                                          for "overlapping/near-
---                                          simultaneous loans", since there
---                                          is no direct concurrency signal
---                                          without an exact loan key)     <= 2%
---   Reconciliation match rate            (B2: n_exact_match_abs / n_matched
---                                          -- B3: n_abs_matches_lifetime_repaid
---                                          / n_single_loan_closed_charged)  >= 98%
---   p95 abs reconciliation error         (B2: p95_abs_diff_abs_ugx, relative
---                                          to median principal size)        <= 2%
---   Negative repayment share             (B0: negative_repayments /
---                                          total_repayments)             ~0%,
---                                          investigate any nonzero count
---                                          before trusting B1-B3's totals
---   Dedup tie collisions                 (F: keys with >1 row at the max
---                                          inserted_ts)                  0
---                                          (any nonzero count means dedup
---                                          is picking a row nondetermin-
---                                          istically for that key)
+--   Attributed repayment coverage (count)  (B1: attributed_repayments /
+--                                            total_repayments)            >= 99%
+--   Attributed repayment coverage (value)  (B1: attributed UGX / total
+--                                            repayment UGX)               >= 99%
+--   Boundary-sensitive repayment rate      (B1: near_next_disbursement_
+--                                            boundary / attributed_
+--                                            repayments)                  <= 1%
+--   Rapid-reborrow rate                    (B1: rapid_reborrow_disbursements
+--                                            / total_disbursements)       <= 2%
+--   Reconciliation match rate (count)      (B2: n_exact_match_abs /
+--                                            n_matched)                   >= 98%
+--   Reconciliation match rate (value)      (B2: matched UGX within
+--                                            tolerance / total matched
+--                                            lifetime_repaid_ugx)         >= 98%
+--   p95 abs reconciliation error, relative
+--   to median matched-loan principal        (B2)                          <= 2%
+--   Negative repayment share               (B0: negative_repayments /
+--                                            total_repayments)            ~0%,
+--                                            investigate any nonzero count
+--   Dedup tie collisions                   (GATE 0 views are built to
+--                                            resolve ties the same way
+--                                            production does; F reports the
+--                                            count separately)             0
+--   Final-output grain violations          (GATE 1: rows with phonenumber
+--                                            not unique, null, or empty)    0
+--   Final-output range violations          (GATE 1: rates outside [0,1],
+--                                            negative counts, first_loan_ts
+--                                            > latest_loan_ts)              0
 -- ============================================================================
+
+
+-- ============================================================================
+-- GATE 0 -- Canonical source layer (create once, reuse everywhere below)
+-- ============================================================================
+-- Mirrors borrower_history.txt's disb_raw -> disb_dedup -> disb_windows,
+-- repay_raw -> repay_dedup, and loan_state_loads_dedup -> loan_state_snapshot
+-- -> loan_state_anomalies chain exactly: same casts, same filters, same
+-- dedup ORDER BY, same as_of_load_ts freeze. If you change
+-- borrower_history.txt's dedup/window/anomaly logic, update these views to
+-- match -- this is the only place that logic should exist in this file.
+
+-- Includes disbursement_external_id even though most sections don't need it,
+-- so Section E's identity-bridge check can use this single deduped view
+-- instead of joining back to the raw, un-deduped source table (which would
+-- reintroduce the exact fan-out risk this canonical layer exists to remove).
+CREATE OR REPLACE VIEW :validation_schema.vw_bh_disb_dedup AS
+SELECT disbursement_fid, phonenumber, disbursement_ts, disbursed_amount, disbursement_external_id
+FROM (
+SELECT d.*,
+ROW_NUMBER() OVER (
+PARTITION BY disbursement_fid
+ORDER BY inserted_ts DESC
+) rn
+FROM (
+SELECT
+disbursement_fid,
+regexp_replace(trim(cast(customer_msisdn AS varchar)), '[^0-9]', '') AS phonenumber,
+try_cast(disbursement_ts AS timestamp) AS disbursement_ts,
+cast(disbursement_amount_ugx AS double) AS disbursed_amount,
+disbursement_external_id,
+inserted_ts
+FROM analytics.momo_loan_book_tracker_disbursements_daily
+WHERE try_cast(disbursement_ts AS timestamp) IS NOT NULL
+AND disbursement_fid IS NOT NULL
+AND customer_msisdn IS NOT NULL
+AND date(try_cast(disbursement_ts AS timestamp)) <= date_parse(cast(:snapshot_dt AS varchar), '%Y%m%d')
+AND inserted_ts <= :as_of_load_ts
+) d
+)
+WHERE rn = 1;
+
+CREATE OR REPLACE VIEW :validation_schema.vw_bh_disb_windows AS
+SELECT
+disbursement_fid,
+phonenumber,
+disbursement_ts,
+disbursed_amount,
+LEAD(disbursement_ts) OVER (
+PARTITION BY phonenumber ORDER BY disbursement_ts, disbursement_fid
+) AS next_disbursement_ts
+FROM :validation_schema.vw_bh_disb_dedup;
+
+CREATE OR REPLACE VIEW :validation_schema.vw_bh_repay_dedup AS
+SELECT repayment_fid, phonenumber, repayment_ts, repayment_amount
+FROM (
+SELECT r.*,
+ROW_NUMBER() OVER (
+PARTITION BY repayment_fid
+ORDER BY inserted_ts DESC
+) rn
+FROM (
+SELECT
+repayment_fid,
+regexp_replace(trim(cast(customer_msisdn AS varchar)), '[^0-9]', '') AS phonenumber,
+try_cast(repayment_ts AS timestamp) AS repayment_ts,
+cast(repayment_amount_ugx AS double) AS repayment_amount,
+inserted_ts
+FROM analytics.momo_loan_book_tracker_repayments_daily
+WHERE try_cast(repayment_ts AS timestamp) IS NOT NULL
+AND repayment_fid IS NOT NULL
+AND customer_msisdn IS NOT NULL
+AND date(try_cast(repayment_ts AS timestamp)) <= date_parse(cast(:snapshot_dt AS varchar), '%Y%m%d')
+AND inserted_ts <= :as_of_load_ts
+) r
+)
+WHERE rn = 1;
+
+CREATE OR REPLACE VIEW :validation_schema.vw_bh_loan_state_snapshot AS
+SELECT disbursement_fid, loan_status, aging_bucket, days_aging, is_active_loan,
+is_anomaly_open, has_pre_window_history, lifetime_disbursed_ugx,
+lifetime_repaid_ugx, lifetime_gross_repaid_ugx, interest_and_penalty_ugx,
+expected_total_charge_ugx, charge_variance_ugx, charge_variance_pct,
+is_charge_anomaly
+FROM (
+SELECT lsld.*,
+ROW_NUMBER() OVER (
+PARTITION BY disbursement_fid
+ORDER BY date_key DESC
+) rn2
+FROM (
+SELECT *
+FROM (
+SELECT lsd.*,
+ROW_NUMBER() OVER (
+PARTITION BY disbursement_fid, date_key
+ORDER BY inserted_ts DESC
+) rn
+FROM analytics.momo_loan_book_tracker_loan_state_daily lsd
+WHERE disbursement_fid IS NOT NULL
+AND date_key <= :snapshot_dt
+AND inserted_ts <= :as_of_load_ts
+)
+WHERE rn = 1
+) lsld
+)
+WHERE rn2 = 1;
+
+CREATE OR REPLACE VIEW :validation_schema.vw_bh_loan_state_anomalies AS
+SELECT disbursement_fid
+FROM :validation_schema.vw_bh_loan_state_snapshot
+WHERE loan_status = 'ANOMALY_OPEN' OR is_anomaly_open = true;
+
+-- Surviving loan-level population: exactly what feeds classified/loan_core
+-- in borrower_history.txt (disbursements, ANOMALY_OPEN excluded). Every
+-- section below that needs "the population borrower_history.txt actually
+-- produces loans from" should use this view, not disb_dedup directly.
+CREATE OR REPLACE VIEW :validation_schema.vw_bh_surviving_loans AS
+SELECT d.disbursement_fid, d.phonenumber, d.disbursement_ts, d.disbursed_amount
+FROM :validation_schema.vw_bh_disb_dedup d
+WHERE d.disbursement_fid NOT IN (SELECT disbursement_fid FROM :validation_schema.vw_bh_loan_state_anomalies);
+
+-- The production query itself, as a view -- gives us (a) a real compile
+-- check (CREATE VIEW fails if the query doesn't parse/analyze) and (b) a
+-- single queryable target for the GATE 1 final-output checks below, without
+-- pasting the 700+ line query into this file a second time and letting the
+-- two copies drift.
+-- ACTION REQUIRED: replace the placeholder line below with the full,
+-- current contents of data/borrower_history.txt (paste the whole file in
+-- place of "-- <PASTE data/borrower_history.txt HERE>"). Do not maintain a
+-- second copy of that query's text anywhere else in this file.
+CREATE OR REPLACE VIEW :validation_schema.vw_bh_output AS
+-- <PASTE data/borrower_history.txt HERE>
+;
+
+
+-- ============================================================================
+-- GATE 1 -- Final-output checks (against vw_bh_output)
+-- ============================================================================
+-- Nothing in earlier versions of this file validated the actual production
+-- query's output shape at all -- every section only tested the new source
+-- adapter (disbursements/repayments/loan-state) in isolation. This is the
+-- first check against the real thing.
+
+-- 1a. Grain: exactly one row per phonenumber, no null/empty identifiers.
+SELECT
+COUNT(*) AS total_rows,
+COUNT(DISTINCT phonenumber) AS distinct_phonenumbers,
+COUNT(*) - COUNT(DISTINCT phonenumber) AS grain_violation_count,
+SUM(CASE WHEN phonenumber IS NULL OR phonenumber = '' THEN 1 ELSE 0 END) AS null_or_empty_phonenumber
+FROM :validation_schema.vw_bh_output;
+-- RESULT:
+-- INTERPRETATION: grain_violation_count and null_or_empty_phonenumber must
+-- both be 0 -- prepare_borrower_limit_features() dedupes on msisdn and
+-- assumes one row per borrower; a violation here means something upstream
+-- (dedup, join fan-out) is broken.
+
+-- 1b. Range and logical-identity checks.
+SELECT
+SUM(CASE WHEN lifetime_on_time_24h_rate NOT BETWEEN 0 AND 1 THEN 1 ELSE 0 END) AS bad_on_time_24h_rate,
+SUM(CASE WHEN lifetime_default_24h_rate NOT BETWEEN 0 AND 1 THEN 1 ELSE 0 END) AS bad_default_24h_rate,
+SUM(CASE WHEN lifetime_on_time_26h_rate NOT BETWEEN 0 AND 1 THEN 1 ELSE 0 END) AS bad_on_time_26h_rate,
+SUM(CASE WHEN lifetime_default_26h_rate NOT BETWEEN 0 AND 1 THEN 1 ELSE 0 END) AS bad_default_26h_rate,
+SUM(CASE WHEN lifetime_severe_default_48h_rate NOT BETWEEN 0 AND 1 THEN 1 ELSE 0 END) AS bad_severe_default_48h_rate,
+SUM(CASE WHEN lifetime_zero_recovery_rate NOT BETWEEN 0 AND 1 THEN 1 ELSE 0 END) AS bad_zero_recovery_rate,
+SUM(CASE WHEN total_loans < 1 THEN 1 ELSE 0 END) AS bad_total_loans,
+SUM(CASE WHEN num_prior_loans < 0 THEN 1 ELSE 0 END) AS bad_num_prior_loans,
+SUM(CASE WHEN first_loan_ts > latest_loan_ts THEN 1 ELSE 0 END) AS bad_first_vs_latest_ts,
+-- on_time_24h_flag and default_24h_flag are exact complements per loan
+-- (see loan_final in borrower_history.txt), so their lifetime rates should
+-- sum to exactly 1 for every borrower with qualifying loans -- same for the
+-- 26h pair. A violation means the two derivations of the same threshold
+-- (timestamp comparison vs. checkpoint FILTER) have drifted apart.
+SUM(CASE WHEN ABS(lifetime_on_time_24h_rate + lifetime_default_24h_rate - 1.0) > 0.001 THEN 1 ELSE 0 END) AS bad_24h_complement_identity,
+SUM(CASE WHEN ABS(lifetime_on_time_26h_rate + lifetime_default_26h_rate - 1.0) > 0.001 THEN 1 ELSE 0 END) AS bad_26h_complement_identity,
+-- for the latest loan specifically, num_prior_loans must equal total_loans - 1
+-- (it's the last loan in the same ordering total_loans counts over)
+SUM(CASE WHEN num_prior_loans != total_loans - 1 THEN 1 ELSE 0 END) AS bad_num_prior_loans_identity
+FROM :validation_schema.vw_bh_output;
+-- RESULT:
+-- INTERPRETATION: every column here should be 0. Any nonzero count is a
+-- concrete, named defect to investigate before this rewrite can be trusted
+-- -- these are structural invariants of borrower_history.txt's own logic,
+-- not thresholds open to interpretation.
+
+-- 1c. Column contract: exact presence of the 41 legacy columns (order is not
+-- independently verifiable from information_schema, which does not
+-- guarantee ordinal stability across all engines -- treat this as a set
+-- check; verify order by reading the view/query definition directly).
+SELECT column_name
+FROM information_schema.columns
+WHERE table_schema = ':validation_schema_as_quoted_string'  -- substitute the schema name here AS A QUOTED STRING, e.g. 'sandbox' -- unlike every :validation_schema.object_name reference elsewhere in this file, this one is a string comparison, not an identifier prefix, and needs quotes
+AND table_name = 'vw_bh_output'
+AND column_name NOT IN (
+'phonenumber','total_loans','first_loan_ts','latest_loan_ts','total_disbursed_amount',
+'avg_loan_size_lifetime','max_loan_size_lifetime','lifetime_on_time_24h_rate',
+'lifetime_on_time_26h_rate','lifetime_default_24h_rate','lifetime_default_26h_rate',
+'lifetime_severe_default_48h_rate','lifetime_zero_recovery_rate',
+'lifetime_avg_hours_to_principal_cure','lifetime_worst_hours_to_principal_cure',
+'lifetime_cure_time_volatility','latest_requestid','latest_disbursement_ts',
+'latest_disbursed_amount','num_prior_loans','prior_on_time_24h_rate',
+'avg_prior_hours_to_cure','worst_prior_hours_to_cure','cure_time_volatility',
+'recent_3_on_time_rate','recent_3_avg_cure_time','lifetime_prior_default_24h_rate',
+'recent_5_default_24h_rate','cure_time_trend','borrower_trend','borrower_profile_type',
+'loans_last_50_loans','defaults_last_50_loans','default_rate_last_50_loans',
+'prior_on_time_streak','prior_default_streak','avg_prior_loan_size','max_prior_loan_size',
+'loan_size_vs_avg_ratio','loan_size_vs_max_ratio','loan_above_prior_max_flag',
+-- additive enrichment columns
+'has_pre_window_history','latest_loan_status','latest_aging_bucket','latest_days_aging',
+'latest_is_active_loan','latest_interest_and_penalty_ugx','latest_expected_total_charge_ugx',
+'latest_charge_variance_ugx','latest_charge_variance_pct','latest_is_charge_anomaly'
+);
+-- RESULT:
+-- INTERPRETATION: this query should return ZERO rows. Any row returned is an
+-- unexpected column not in BORROWER_LIMIT_REQUIRED_COLUMNS or the documented
+-- enrichment set -- means the SELECT list drifted from what's documented. If
+-- a legacy or enrichment column above is instead MISSING from vw_bh_output
+-- entirely, this query won't catch that (it only flags extras) -- cross-check
+-- the count of matched names separately: expect exactly 51.
 
 
 -- ============================================================================
 -- SECTION A -- Repayment amount semantics: gross or principal-only?
 -- ============================================================================
--- Blocks cure-timing feature validity if wrong (see review). Uses ONLY
--- loan_state_daily's own authoritative totals -- independent of the
--- repay_attributed heuristic in borrower_history.txt, so this is a clean
--- check even if attribution turns out to be imperfect.
+-- Blocks cure-timing feature validity if wrong. Uses ONLY
+-- vw_bh_loan_state_snapshot's own authoritative totals -- independent of
+-- repayment attribution, so this is a clean check even if attribution turns
+-- out to be imperfect.
 --
 -- CAVEAT: this section tests what lifetime_repaid_ugx/lifetime_gross_repaid_ugx
 -- mean, NOT directly what the atomic repayment_amount_ugx field in
@@ -60,16 +296,9 @@
 -- If lifetime_repaid_ugx is itself a derived allocation (tracker-side split of
 -- gross cash flow into a principal-recovered component) rather than a raw sum
 -- of repayment_amount_ugx, it would read as principal-only by construction
--- regardless of what the atomic field contains. Section B3 below tests the
--- atomic field directly, on a subset where attribution is unambiguous, and is
--- the more decisive check -- treat A as corroborating context, not proof.
---
--- Logic: for CLOSED loans with a non-zero interest_and_penalty_ugx, compare
--- lifetime_repaid_ugx and lifetime_gross_repaid_ugx against (a) principal
--- alone and (b) principal + charge. This also directly checks whether the
--- "repaid" vs "gross_repaid" split loan_state_daily already exposes behaves
--- the way its naming implies (gross_repaid - repaid ~= interest_and_penalty_ugx),
--- rather than assuming and deriving that split myself.
+-- regardless of what the atomic field contains. Section B3 tests the atomic
+-- field directly, on a subset where attribution is unambiguous, and is the
+-- more decisive check -- treat A as corroborating context, not proof.
 WITH closed_charged_loans AS (
 SELECT
 disbursement_fid,
@@ -82,18 +311,9 @@ lifetime_repaid_ugx / NULLIF(lifetime_disbursed_ugx + interest_and_penalty_ugx, 
 lifetime_gross_repaid_ugx / NULLIF(lifetime_disbursed_ugx, 0) AS gross_repaid_over_principal,
 lifetime_gross_repaid_ugx / NULLIF(lifetime_disbursed_ugx + interest_and_penalty_ugx, 0) AS gross_repaid_over_gross,
 (lifetime_gross_repaid_ugx - lifetime_repaid_ugx) / NULLIF(interest_and_penalty_ugx, 0) AS gross_minus_repaid_over_charge
-FROM (
-SELECT lsd.*,
-ROW_NUMBER() OVER (
-PARTITION BY disbursement_fid
-ORDER BY date_key DESC, inserted_ts DESC
-) rn
-FROM analytics.momo_loan_book_tracker_loan_state_daily lsd
+FROM :validation_schema.vw_bh_loan_state_snapshot
 WHERE loan_status = 'CLOSED'
 AND interest_and_penalty_ugx > 0
-AND date_key <= :snapshot_dt
-)
-WHERE rn = 1
 )
 SELECT
 COUNT(*) AS n_closed_charged_loans,
@@ -111,120 +331,60 @@ FROM closed_charged_loans;
 -- median_gross_minus_repaid_over_charge near 1.0 (and n_gap_matches_charge
 -- high) confirms lifetime_repaid_ugx = principal-recovered and
 -- lifetime_gross_repaid_ugx = principal + charge, exactly as the field names
--- imply -- gives confidence in interest_and_penalty_ugx as the right charge
--- figure to use elsewhere (e.g. Section C/D, or the latest_* enrichment
--- columns). If it does NOT hold, don't trust the "gross" naming at face
--- value -- fall back to Section B3 as the primary evidence.
--- median_repaid_over_principal near 1.0 with median_gross_repaid_over_principal
--- clearly above 1.0 is the expected pattern regardless of what the ATOMIC
--- repayment_amount_ugx field contains, per the caveat above -- do not treat
--- this alone as resolving whether borrower_history.txt's cure-timing logic
--- (which sums the atomic field) is correct. Go to Section B3 for that.
+-- imply. median_repaid_over_principal near 1.0 with median_gross_repaid_over_
+-- principal clearly above 1.0 is the expected pattern regardless of what the
+-- ATOMIC repayment_amount_ugx field contains, per the caveat above -- do not
+-- treat this alone as resolving whether borrower_history.txt's cure-timing
+-- logic is correct. Go to Section B3 for that.
 
 
 -- ============================================================================
 -- SECTION B0 -- Repayment sign diagnostic
 -- ============================================================================
 -- classified in borrower_history.txt applies ABS() unconditionally to both
--- disbursement and repayment amounts (inherited from the original query's
--- pattern). That's only safe for repayments if every atomic row is genuine
--- positive cash flow and any negative rows are purely a sign convention. If
--- repayments_daily instead contains reversals, refunds, chargebacks, or
--- correction entries as negative rows, ABS() silently converts those into
--- additional positive recovery -- overstating repayment and making loans
--- cure too early.
+-- disbursement and repayment amounts. That's only safe for repayments if
+-- every atomic row is genuine positive cash flow and any negative rows are
+-- purely a sign convention. If repayments_daily instead contains reversals,
+-- refunds, chargebacks, or correction entries as negative rows, ABS()
+-- silently converts those into additional positive recovery.
 --
 -- CAVEAT: repayments_daily (per the schema sample this file was built from)
 -- has no explicit transaction-type/status/reversal-code column, so this
--- diagnostic can only detect negative SIGN as a proxy -- it cannot attribute
--- a negative row to a specific cause. If negative rows exist in meaningful
--- volume, escalate to whoever owns the tracker tables' data dictionary
--- rather than guessing at the cause from this query alone.
+-- diagnostic can only detect negative SIGN as a proxy. Uses vw_bh_repay_dedup
+-- (post-dedup, post-as_of_load_ts-freeze) so this reflects the same
+-- repayment population borrower_history.txt actually classifies, not the
+-- raw un-deduped table.
 SELECT
 COUNT(*) AS total_repayments,
-SUM(CASE WHEN repayment_amount_ugx < 0 THEN 1 ELSE 0 END) AS negative_repayments,
-SUM(CASE WHEN repayment_amount_ugx < 0 THEN 1 ELSE 0 END) * 1.0 / NULLIF(COUNT(*), 0) AS negative_repayment_share,
-SUM(CASE WHEN repayment_amount_ugx < 0 THEN repayment_amount_ugx ELSE 0 END) AS negative_repayment_total_ugx,
-SUM(repayment_amount_ugx) AS raw_sum_ugx,
-SUM(ABS(repayment_amount_ugx)) AS abs_sum_ugx,
-SUM(ABS(repayment_amount_ugx)) - SUM(repayment_amount_ugx) AS overstatement_from_abs_ugx,
--- the only lifecycle-adjacent columns on this table, as a coarse proxy
--- breakdown in the absence of a real status/type field
-SUM(CASE WHEN repayment_amount_ugx < 0 AND optout_transaction_id IS NOT NULL THEN 1 ELSE 0 END) AS negative_with_optout_txn,
-SUM(CASE WHEN repayment_amount_ugx < 0 AND cancel_preapproval_id IS NOT NULL THEN 1 ELSE 0 END) AS negative_with_cancel_preapproval
-FROM analytics.momo_loan_book_tracker_repayments_daily
-WHERE try_cast(repayment_ts AS timestamp) IS NOT NULL
-AND date(try_cast(repayment_ts AS timestamp)) <= date_parse(cast(:snapshot_dt AS varchar), '%Y%m%d')
-AND inserted_ts <= :as_of_load_ts;
+SUM(CASE WHEN repayment_amount < 0 THEN 1 ELSE 0 END) AS negative_repayments,
+SUM(CASE WHEN repayment_amount < 0 THEN 1 ELSE 0 END) * 1.0 / NULLIF(COUNT(*), 0) AS negative_repayment_share,
+SUM(CASE WHEN repayment_amount < 0 THEN repayment_amount ELSE 0 END) AS negative_repayment_total_ugx,
+SUM(repayment_amount) AS raw_sum_ugx,
+SUM(ABS(repayment_amount)) AS abs_sum_ugx,
+SUM(ABS(repayment_amount)) - SUM(repayment_amount) AS overstatement_from_abs_ugx
+FROM :validation_schema.vw_bh_repay_dedup;
 -- RESULT:
--- INTERPRETATION: negative_repayment_share should be ~0% per the acceptance
--- threshold above. overstatement_from_abs_ugx is exactly how much extra
--- "recovery" borrower_history.txt's ABS()-based classified CTE adds versus
--- the raw signed total -- if this is nonzero and negative_repayments is not
--- explained as a benign sign convention (confirm with the data owner), the
--- unconditional ABS() in borrower_history.txt needs to change to
--- source-semantic handling (e.g. excluding or separately classifying
--- negative rows) rather than blindly flipping their sign.
+-- INTERPRETATION: negative_repayment_share should be ~0%. overstatement_
+-- from_abs_ugx is exactly how much extra "recovery" borrower_history.txt's
+-- ABS()-based classified CTE adds versus the raw signed total -- if this is
+-- nonzero and not explained as a benign sign convention (confirm with the
+-- data owner), the unconditional ABS() needs to change to source-semantic
+-- handling rather than blindly flipping sign.
 
 
 -- ============================================================================
 -- SECTION B -- Repayment attribution quality (repay_attributed heuristic)
 -- ============================================================================
--- Reproduces the borrower_history.txt attribution join, then checks it
--- against loan_state_daily's authoritative per-loan repaid total.
---
--- NOTE ON RUNNING THIS SECTION: B1, B2, and B3 are three independent
--- statements, each terminated by its own semicolon. A WITH clause's CTEs
--- only stay in scope for the single statement they precede -- they do NOT
--- carry over to the next semicolon-terminated statement in Trino/Athena. So
--- each of B1/B2/B3 repeats the same disb/disb_windows/repay/attributed
--- prefix rather than sharing one; that's intentional, not copy-paste debt.
---
--- B1/B2/B3 report BOTH the raw signed sum and the ABS()-basis sum (matching
--- what borrower_history.txt's classified CTE actually computes) -- see
--- Section B0 for why these can differ.
+-- All three of B1/B2/B3 now read from the GATE 0 views -- same dedup, same
+-- as_of_load_ts freeze, same population as borrower_history.txt actually
+-- uses. B1/B2/B3 report BOTH the raw signed sum and the ABS()-basis sum
+-- (matching what classified actually computes) -- see Section B0.
 
 -- B1. Coverage: how many repayments got dropped for lack of a matching
--- disbursement, and how many disbursements look like rapid reborrows (a
--- proxy for "overlapping loans", since there is no exact concurrency signal)?
-WITH disb AS (
-SELECT
-disbursement_fid,
-regexp_replace(trim(cast(customer_msisdn AS varchar)), '[^0-9]', '') AS phonenumber,
-try_cast(disbursement_ts AS timestamp) AS disbursement_ts,
-cast(disbursement_amount_ugx AS double) AS disbursed_amount
-FROM analytics.momo_loan_book_tracker_disbursements_daily
-WHERE try_cast(disbursement_ts AS timestamp) IS NOT NULL
-AND disbursement_fid IS NOT NULL
-AND customer_msisdn IS NOT NULL
-AND date(try_cast(disbursement_ts AS timestamp)) <= date_parse(cast(:snapshot_dt AS varchar), '%Y%m%d')
-AND inserted_ts <= :as_of_load_ts
-),
-disb_windows AS (
-SELECT
-disbursement_fid,
-phonenumber,
-disbursement_ts,
-disbursed_amount,
-LEAD(disbursement_ts) OVER (
-PARTITION BY phonenumber ORDER BY disbursement_ts, disbursement_fid
-) AS next_disbursement_ts
-FROM disb
-),
-repay AS (
-SELECT
-repayment_fid,
-regexp_replace(trim(cast(customer_msisdn AS varchar)), '[^0-9]', '') AS phonenumber,
-try_cast(repayment_ts AS timestamp) AS repayment_ts,
-cast(repayment_amount_ugx AS double) AS repayment_amount
-FROM analytics.momo_loan_book_tracker_repayments_daily
-WHERE try_cast(repayment_ts AS timestamp) IS NOT NULL
-AND repayment_fid IS NOT NULL
-AND customer_msisdn IS NOT NULL
-AND date(try_cast(repayment_ts AS timestamp)) <= date_parse(cast(:snapshot_dt AS varchar), '%Y%m%d')
-AND inserted_ts <= :as_of_load_ts
-),
-attributed AS (
+-- disbursement (count AND value), and how many disbursements look like
+-- rapid reborrows (a proxy for "overlapping loans", since there is no exact
+-- concurrency signal)?
+WITH attributed AS (
 SELECT
 w.disbursement_fid,
 r.repayment_fid,
@@ -232,419 +392,357 @@ r.repayment_ts,
 r.repayment_amount,
 w.disbursement_ts,
 w.next_disbursement_ts,
--- flag repayments landing within 1 hour of the *next* disbursement --
--- ambiguous cases where the attribution boundary is a close call
 CASE WHEN w.next_disbursement_ts IS NOT NULL
 AND date_diff('second', r.repayment_ts, w.next_disbursement_ts) <= 3600
 THEN 1 ELSE 0 END AS near_boundary_flag
-FROM repay r
-JOIN disb_windows w
+FROM :validation_schema.vw_bh_repay_dedup r
+JOIN :validation_schema.vw_bh_disb_windows w
 ON r.phonenumber = w.phonenumber
 AND r.repayment_ts >= w.disbursement_ts
 AND (w.next_disbursement_ts IS NULL OR r.repayment_ts < w.next_disbursement_ts)
 )
 SELECT
-(SELECT COUNT(*) FROM repay) AS total_repayments,
+(SELECT COUNT(*) FROM :validation_schema.vw_bh_repay_dedup) AS total_repayments,
 (SELECT COUNT(*) FROM attributed) AS attributed_repayments,
-(SELECT COUNT(*) FROM repay) - (SELECT COUNT(*) FROM attributed) AS dropped_repayments,
+(SELECT COUNT(*) FROM :validation_schema.vw_bh_repay_dedup) - (SELECT COUNT(*) FROM attributed) AS dropped_repayments,
+(SELECT SUM(ABS(repayment_amount)) FROM :validation_schema.vw_bh_repay_dedup) AS total_repayment_ugx_abs,
+(SELECT SUM(ABS(repayment_amount)) FROM attributed) AS attributed_repayment_ugx_abs,
 (SELECT COUNT(*) FROM attributed WHERE near_boundary_flag = 1) AS near_next_disbursement_boundary,
-(SELECT COUNT(*) FROM disb_windows) AS total_disbursements,
--- proxy for "overlapping loans": a second disbursement to the same customer
--- before their prior loan could plausibly have cured (26h grace period)
-(SELECT COUNT(*) FROM disb_windows
+(SELECT COUNT(*) FROM :validation_schema.vw_bh_disb_windows) AS total_disbursements,
+(SELECT COUNT(*) FROM :validation_schema.vw_bh_disb_windows
  WHERE next_disbursement_ts IS NOT NULL
  AND date_diff('hour', disbursement_ts, next_disbursement_ts) <= 26) AS rapid_reborrow_disbursements;
 -- RESULT:
--- INTERPRETATION: dropped_repayments should be small and explainable (e.g.
--- repayments for loans disbursed before the source table's coverage starts).
--- A large dropped count means the attribution logic is silently discarding
--- real cash flow. near_next_disbursement_boundary flags repayments that could
--- plausibly belong to either the current or the next loan -- inspect these by
--- hand; a high count here is the clearest sign the sequential-loans
--- assumption is being stressed (e.g. rapid top-up/reborrow behavior).
--- rapid_reborrow_disbursements / total_disbursements is the closest available
--- proxy for the "rate of borrowers with overlapping or near-simultaneous
--- loans" metric -- see the acceptance thresholds block at the top of this
--- file. It is a proxy, not a direct measurement, since neither table exposes
--- an explicit "loan closed" event to test true concurrency against.
+-- INTERPRETATION: dropped_repayments (count) and the gap between total_
+-- repayment_ugx_abs and attributed_repayment_ugx_abs (value) should both be
+-- small -- report both per the acceptance thresholds, since a small count-
+-- based drop rate can still hide a large monetary one if what's dropped
+-- skews toward high-value loans. near_next_disbursement_boundary flags
+-- repayments that could plausibly belong to either loan. rapid_reborrow_
+-- disbursements / total_disbursements is the closest available proxy for
+-- "rate of borrowers with overlapping or near-simultaneous loans" -- a
+-- proxy, not a direct measurement, since neither table exposes an explicit
+-- "loan closed" event to test true concurrency against.
 
-
--- B2. Reconciliation against loan_state_daily's authoritative repaid total.
--- (mixes two possible explanations for a mismatch -- see the B3 caveat below)
-WITH disb AS (
-SELECT
-disbursement_fid,
-regexp_replace(trim(cast(customer_msisdn AS varchar)), '[^0-9]', '') AS phonenumber,
-try_cast(disbursement_ts AS timestamp) AS disbursement_ts,
-cast(disbursement_amount_ugx AS double) AS disbursed_amount
-FROM analytics.momo_loan_book_tracker_disbursements_daily
-WHERE try_cast(disbursement_ts AS timestamp) IS NOT NULL
-AND disbursement_fid IS NOT NULL
-AND customer_msisdn IS NOT NULL
-AND date(try_cast(disbursement_ts AS timestamp)) <= date_parse(cast(:snapshot_dt AS varchar), '%Y%m%d')
-AND inserted_ts <= :as_of_load_ts
-),
-disb_windows AS (
-SELECT
-disbursement_fid,
-phonenumber,
-disbursement_ts,
-disbursed_amount,
-LEAD(disbursement_ts) OVER (
-PARTITION BY phonenumber ORDER BY disbursement_ts, disbursement_fid
-) AS next_disbursement_ts
-FROM disb
-),
-repay AS (
-SELECT
-repayment_fid,
-regexp_replace(trim(cast(customer_msisdn AS varchar)), '[^0-9]', '') AS phonenumber,
-try_cast(repayment_ts AS timestamp) AS repayment_ts,
-cast(repayment_amount_ugx AS double) AS repayment_amount
-FROM analytics.momo_loan_book_tracker_repayments_daily
-WHERE try_cast(repayment_ts AS timestamp) IS NOT NULL
-AND repayment_fid IS NOT NULL
-AND customer_msisdn IS NOT NULL
-AND date(try_cast(repayment_ts AS timestamp)) <= date_parse(cast(:snapshot_dt AS varchar), '%Y%m%d')
-AND inserted_ts <= :as_of_load_ts
-),
-attributed AS (
-SELECT
-w.disbursement_fid,
-r.repayment_amount
-FROM repay r
-JOIN disb_windows w
+-- B2. Reconciliation against loan_state_daily's authoritative repaid total,
+-- with state-only/disbursement-only loans reported separately (not folded
+-- into the rate via COALESCE), and value-weighted + principal-relative
+-- error alongside the count-based rate.
+WITH attributed AS (
+SELECT w.disbursement_fid, r.repayment_amount
+FROM :validation_schema.vw_bh_repay_dedup r
+JOIN :validation_schema.vw_bh_disb_windows w
 ON r.phonenumber = w.phonenumber
 AND r.repayment_ts >= w.disbursement_ts
 AND (w.next_disbursement_ts IS NULL OR r.repayment_ts < w.next_disbursement_ts)
 ),
--- LEFT JOIN from disb_windows (not GROUP BY attributed) so every known
--- disbursement gets a row here, including loans with zero repayments so
--- far -- otherwise those would wrongly show up as "state-only" below purely
--- for having no repayments yet, not for being outside the disbursement
--- population.
 per_loan_attributed AS (
+-- LEFT JOIN from disb_windows so every known disbursement gets a row,
+-- including loans with zero repayments so far.
 SELECT
 w.disbursement_fid,
+w.disbursed_amount,
 COALESCE(SUM(a.repayment_amount), 0) AS attributed_repaid_raw,
 COALESCE(SUM(ABS(a.repayment_amount)), 0) AS attributed_repaid_abs
-FROM disb_windows w
+FROM :validation_schema.vw_bh_disb_windows w
 LEFT JOIN attributed a ON a.disbursement_fid = w.disbursement_fid
-GROUP BY w.disbursement_fid
+GROUP BY w.disbursement_fid, w.disbursed_amount
 ),
-loan_state_latest AS (
-SELECT disbursement_fid, lifetime_repaid_ugx
-FROM (
-SELECT lsd.*,
-ROW_NUMBER() OVER (
-PARTITION BY disbursement_fid
-ORDER BY date_key DESC, inserted_ts DESC
-) rn
-FROM analytics.momo_loan_book_tracker_loan_state_daily lsd
-WHERE date_key <= :snapshot_dt
-)
-WHERE rn = 1
-),
--- FULL OUTER JOIN so state-only and disbursement-only loans are visible
--- and excluded from the reconciliation rate, not silently folded into it
--- via COALESCE(...,0) as if a missing side were a real zero.
 joined AS (
 SELECT
 COALESCE(pla.disbursement_fid, lsl.disbursement_fid) AS disbursement_fid,
+pla.disbursed_amount,
 pla.attributed_repaid_raw,
 pla.attributed_repaid_abs,
 lsl.lifetime_repaid_ugx,
 CASE WHEN pla.disbursement_fid IS NULL THEN 1 ELSE 0 END AS state_only,
 CASE WHEN lsl.disbursement_fid IS NULL THEN 1 ELSE 0 END AS disbursement_only
 FROM per_loan_attributed pla
-FULL OUTER JOIN loan_state_latest lsl ON lsl.disbursement_fid = pla.disbursement_fid
+FULL OUTER JOIN :validation_schema.vw_bh_loan_state_snapshot lsl
+ON lsl.disbursement_fid = pla.disbursement_fid
 )
 SELECT
 COUNT(*) AS n_total,
 SUM(state_only) AS n_state_only,
 SUM(disbursement_only) AS n_disbursement_only,
 SUM(CASE WHEN state_only = 0 AND disbursement_only = 0 THEN 1 ELSE 0 END) AS n_matched,
--- reconciliation rate computed ONLY over n_matched, both bases
 SUM(CASE WHEN state_only = 0 AND disbursement_only = 0
 AND ABS(attributed_repaid_raw - lifetime_repaid_ugx) <= 1 THEN 1 ELSE 0 END) AS n_exact_match_raw,
 SUM(CASE WHEN state_only = 0 AND disbursement_only = 0
 AND ABS(attributed_repaid_abs - lifetime_repaid_ugx) <= 1 THEN 1 ELSE 0 END) AS n_exact_match_abs,
+-- value-weighted: total matched-loan lifetime_repaid_ugx vs. how much of
+-- it is within tolerance
+SUM(CASE WHEN state_only = 0 AND disbursement_only = 0 THEN lifetime_repaid_ugx ELSE 0 END) AS total_matched_lifetime_repaid_ugx,
+SUM(CASE WHEN state_only = 0 AND disbursement_only = 0
+AND ABS(attributed_repaid_abs - lifetime_repaid_ugx) <= 1 THEN lifetime_repaid_ugx ELSE 0 END) AS matched_within_tolerance_ugx,
 approx_percentile(
 CASE WHEN state_only = 0 AND disbursement_only = 0
 THEN ABS(attributed_repaid_raw - lifetime_repaid_ugx) END, 0.95) AS p95_abs_diff_raw_ugx,
 approx_percentile(
 CASE WHEN state_only = 0 AND disbursement_only = 0
-THEN ABS(attributed_repaid_abs - lifetime_repaid_ugx) END, 0.95) AS p95_abs_diff_abs_ugx
+THEN ABS(attributed_repaid_abs - lifetime_repaid_ugx) END, 0.95) AS p95_abs_diff_abs_ugx,
+approx_percentile(
+CASE WHEN state_only = 0 AND disbursement_only = 0
+THEN disbursed_amount END, 0.5) AS median_matched_principal_ugx
 FROM joined;
 -- RESULT:
 -- INTERPRETATION: n_state_only and n_disbursement_only should both be small
--- and explainable (e.g. disbursement_only = very recent loans not yet
--- reflected in loan_state_daily's next snapshot) -- if either is large, the
--- two source tables disagree on coverage and that's a data-pipeline issue
--- to raise separately, not something the reconciliation rate below should
--- absorb. n_exact_match_raw vs n_exact_match_abs / n_matched should both be
--- high per the acceptance threshold. CAVEAT: a mismatch on EITHER basis is
--- still ambiguous between two causes -- (1) the time-window heuristic
--- misattributing payments across loans, or (2) repayment_amount_ugx being
--- gross-of-charges while lifetime_repaid_ugx is principal-only (see Section
--- A's caveat). B3 below isolates cause (2) by removing cause (1) entirely,
--- so read B2 and B3 together: if B3 (no attribution ambiguity possible)
--- still shows a gap against lifetime_repaid_ugx, that gap is
--- amount-semantics, not attribution -- and B2's mismatch rate net of B3's
--- gap is the true attribution-error signal. Comparing n_exact_match_raw
--- against n_exact_match_abs also directly answers Section B0's question: if
--- raw matches much better than abs, negative rows are real adjustments that
--- ABS() is wrongly inflating into recovery.
+-- and explainable -- if either is large, the two source tables disagree on
+-- coverage, a data-pipeline issue to raise separately from the
+-- reconciliation rate. n_exact_match_abs / n_matched and matched_within_
+-- tolerance_ugx / total_matched_lifetime_repaid_ugx should both be high per
+-- the acceptance thresholds -- report both, since a high count-based match
+-- rate can still conceal a large monetary discrepancy concentrated in a few
+-- high-value loans. Compute p95_abs_diff_abs_ugx / median_matched_principal_ugx
+-- yourself from this row's two columns to evaluate the "p95 error relative
+-- to principal" threshold -- that ratio is deliberately not precomputed here
+-- since dividing two aggregates inside the same SELECT can hide which raw
+-- numbers produced it. CAVEAT: a mismatch on either basis is still ambiguous
+-- between (1) the time-window heuristic misattributing payments, or (2)
+-- repayment_amount being gross-of-charges (see Section A's caveat). B3
+-- below isolates cause (2) by removing cause (1) entirely -- read B2 and B3
+-- together. Comparing n_exact_match_raw against n_exact_match_abs also
+-- answers Section B0's question: if raw matches much better than abs,
+-- negative rows are real adjustments ABS() is wrongly inflating.
 
-
--- B3. Isolate amount semantics from attribution error: single-loan borrowers only.
--- A borrower with exactly one loan in the query window has no second loan to
--- misattribute a repayment to -- disbursement_ts is a lower bound and there
--- is no next_disbursement_ts upper bound, so every one of their repayments
--- unambiguously belongs to that one loan. Any gap between the summed ATOMIC
--- repayment_amount_ugx and loan_state_daily's totals for this subset is
--- attributable to amount semantics (gross vs principal), not attribution
--- error -- this is the most direct test of what repayment_amount_ugx means.
-WITH disb AS (
-SELECT
-disbursement_fid,
-regexp_replace(trim(cast(customer_msisdn AS varchar)), '[^0-9]', '') AS phonenumber,
-try_cast(disbursement_ts AS timestamp) AS disbursement_ts,
-cast(disbursement_amount_ugx AS double) AS disbursed_amount
-FROM analytics.momo_loan_book_tracker_disbursements_daily
-WHERE try_cast(disbursement_ts AS timestamp) IS NOT NULL
-AND disbursement_fid IS NOT NULL
-AND customer_msisdn IS NOT NULL
-AND date(try_cast(disbursement_ts AS timestamp)) <= date_parse(cast(:snapshot_dt AS varchar), '%Y%m%d')
-AND inserted_ts <= :as_of_load_ts
-),
-single_loan_borrowers AS (
+-- B3. Isolate amount semantics from attribution error: single-loan borrowers
+-- only, restricted to matched, closed, charged loans with no left-censoring
+-- and no boundary ambiguity -- a stricter eligibility set than earlier
+-- versions of this check, per the "not as unambiguous as claimed" critique:
+--   - exactly one DEDUPED disbursement (via vw_bh_disb_dedup, not raw rows)
+--   - a matching loan_state row exists (not disbursement-only)
+--   - loan_status = 'CLOSED' and interest_and_penalty_ugx > 0 (comparable
+--     to Section A's population)
+--   - has_pre_window_history is not true (excludes borrowers whose "only"
+--     loan in this feed may not be their only loan ever)
+--   - zero-repayment loans are reported separately, not silently dropped by
+--     the inner join
+WITH single_loan_borrowers AS (
 SELECT phonenumber
-FROM disb
+FROM :validation_schema.vw_bh_disb_dedup
 GROUP BY phonenumber
 HAVING COUNT(*) = 1
 ),
-single_loan_disb AS (
-SELECT d.disbursement_fid, d.phonenumber, d.disbursement_ts, d.disbursed_amount
-FROM disb d
+eligible AS (
+SELECT
+d.disbursement_fid,
+d.phonenumber,
+d.disbursement_ts,
+ls.lifetime_disbursed_ugx,
+ls.lifetime_repaid_ugx,
+ls.lifetime_gross_repaid_ugx,
+ls.interest_and_penalty_ugx
+FROM :validation_schema.vw_bh_disb_dedup d
 JOIN single_loan_borrowers slb ON slb.phonenumber = d.phonenumber
+JOIN :validation_schema.vw_bh_loan_state_snapshot ls ON ls.disbursement_fid = d.disbursement_fid
+WHERE ls.loan_status = 'CLOSED'
+AND ls.interest_and_penalty_ugx > 0
+AND COALESCE(ls.has_pre_window_history, false) = false
 ),
-repay AS (
+atomic_repaid AS (
 SELECT
-repayment_fid,
-regexp_replace(trim(cast(customer_msisdn AS varchar)), '[^0-9]', '') AS phonenumber,
-try_cast(repayment_ts AS timestamp) AS repayment_ts,
-cast(repayment_amount_ugx AS double) AS repayment_amount
-FROM analytics.momo_loan_book_tracker_repayments_daily
-WHERE try_cast(repayment_ts AS timestamp) IS NOT NULL
-AND repayment_fid IS NOT NULL
-AND customer_msisdn IS NOT NULL
-AND date(try_cast(repayment_ts AS timestamp)) <= date_parse(cast(:snapshot_dt AS varchar), '%Y%m%d')
-AND inserted_ts <= :as_of_load_ts
-),
-unambiguous_repaid AS (
-SELECT
-sld.disbursement_fid,
-SUM(r.repayment_amount) AS atomic_repaid_raw,
-SUM(ABS(r.repayment_amount)) AS atomic_repaid_abs
-FROM single_loan_disb sld
-JOIN repay r
-ON r.phonenumber = sld.phonenumber
-AND r.repayment_ts >= sld.disbursement_ts
-GROUP BY sld.disbursement_fid
-),
-loan_state_latest AS (
-SELECT disbursement_fid, lifetime_disbursed_ugx, lifetime_repaid_ugx,
-lifetime_gross_repaid_ugx, interest_and_penalty_ugx
-FROM (
-SELECT lsd.*,
-ROW_NUMBER() OVER (
-PARTITION BY disbursement_fid
-ORDER BY date_key DESC, inserted_ts DESC
-) rn
-FROM analytics.momo_loan_book_tracker_loan_state_daily lsd
-WHERE loan_status = 'CLOSED'
-AND interest_and_penalty_ugx > 0
-AND date_key <= :snapshot_dt
-)
-WHERE rn = 1
+e.disbursement_fid,
+COALESCE(SUM(r.repayment_amount), 0) AS atomic_repaid_raw,
+COALESCE(SUM(ABS(r.repayment_amount)), 0) AS atomic_repaid_abs,
+COUNT(r.repayment_fid) AS n_repayments
+FROM eligible e
+LEFT JOIN :validation_schema.vw_bh_repay_dedup r
+ON r.phonenumber = e.phonenumber
+AND r.repayment_ts >= e.disbursement_ts
+GROUP BY e.disbursement_fid
 )
 SELECT
-COUNT(*) AS n_single_loan_closed_charged,
-approx_percentile(ur.atomic_repaid_abs / NULLIF(ls.lifetime_disbursed_ugx, 0), 0.5) AS median_atomic_over_principal,
-approx_percentile(ur.atomic_repaid_abs / NULLIF(ls.lifetime_disbursed_ugx + ls.interest_and_penalty_ugx, 0), 0.5) AS median_atomic_over_gross,
-SUM(CASE WHEN ABS(ur.atomic_repaid_abs - ls.lifetime_repaid_ugx) <= 1 THEN 1 ELSE 0 END) AS n_abs_matches_lifetime_repaid,
-SUM(CASE WHEN ABS(ur.atomic_repaid_abs - ls.lifetime_gross_repaid_ugx) <= 1 THEN 1 ELSE 0 END) AS n_abs_matches_lifetime_gross_repaid,
-SUM(CASE WHEN ABS(ur.atomic_repaid_raw - ls.lifetime_repaid_ugx) <= 1 THEN 1 ELSE 0 END) AS n_raw_matches_lifetime_repaid,
-SUM(CASE WHEN ABS(ur.atomic_repaid_raw - ls.lifetime_gross_repaid_ugx) <= 1 THEN 1 ELSE 0 END) AS n_raw_matches_lifetime_gross_repaid
-FROM unambiguous_repaid ur
-JOIN loan_state_latest ls ON ls.disbursement_fid = ur.disbursement_fid;
+COUNT(*) AS n_eligible_single_loan_closed_charged,
+SUM(CASE WHEN n_repayments = 0 THEN 1 ELSE 0 END) AS n_zero_repayment_excluded_from_ratios,
+approx_percentile(
+CASE WHEN n_repayments > 0 THEN ar.atomic_repaid_abs / NULLIF(e.lifetime_disbursed_ugx, 0) END, 0.5
+) AS median_atomic_over_principal,
+approx_percentile(
+CASE WHEN n_repayments > 0 THEN ar.atomic_repaid_abs / NULLIF(e.lifetime_disbursed_ugx + e.interest_and_penalty_ugx, 0) END, 0.5
+) AS median_atomic_over_gross,
+SUM(CASE WHEN n_repayments > 0 AND ABS(ar.atomic_repaid_abs - e.lifetime_repaid_ugx) <= 1 THEN 1 ELSE 0 END) AS n_abs_matches_lifetime_repaid,
+SUM(CASE WHEN n_repayments > 0 AND ABS(ar.atomic_repaid_abs - e.lifetime_gross_repaid_ugx) <= 1 THEN 1 ELSE 0 END) AS n_abs_matches_lifetime_gross_repaid,
+SUM(CASE WHEN n_repayments > 0 AND ABS(ar.atomic_repaid_raw - e.lifetime_repaid_ugx) <= 1 THEN 1 ELSE 0 END) AS n_raw_matches_lifetime_repaid,
+SUM(CASE WHEN n_repayments > 0 AND ABS(ar.atomic_repaid_raw - e.lifetime_gross_repaid_ugx) <= 1 THEN 1 ELSE 0 END) AS n_raw_matches_lifetime_gross_repaid
+FROM eligible e
+JOIN atomic_repaid ar ON ar.disbursement_fid = e.disbursement_fid;
 -- RESULT:
--- INTERPRETATION: this is the decisive check, not Section A.
+-- INTERPRETATION: this is the decisive check, not Section A -- but read
+-- "decisive" as "strongly indicative," not "proof": these borrowers have
+-- only one deduped disbursement WITHIN THIS FEED, not necessarily one loan
+-- in their complete history (has_pre_window_history=false reduces but does
+-- not eliminate that risk), and a reused/reassigned phone number could still
+-- misattribute payments to the wrong person. n_zero_repayment_excluded_from_
+-- ratios should be reported alongside the ratio columns, not treated as
+-- implicitly zero.
 -- Amount semantics: if n_abs_matches_lifetime_repaid (or n_raw_matches_
 -- lifetime_repaid) is high, repayment_amount_ugx is principal-only. If the
 -- *_gross_repaid variants are high instead, repayments are gross-of-charges.
--- If neither matches cleanly, repayment allocation is more complex than a
--- simple gross/principal split -- ask whoever owns the tracker tables' data
--- dictionary rather than guessing further.
--- Sign handling: comparing the raw-basis matches against the abs-basis
--- matches directly answers Section B0's question on this unambiguous
--- subset -- if raw matches noticeably better, negative rows are real
--- adjustments (reversals/refunds) that ABS() is wrongly turning into
--- recovery, and borrower_history.txt's classified CTE needs to stop
--- applying ABS() unconditionally to repayments.
+-- Sign handling: raw vs abs match-rate comparison answers Section B0's
+-- question on this low-ambiguity subset.
 -- CORRECTION to an earlier version of this note: if repayments turn out to
 -- be gross-of-charges, "floor the cure comparison at disbursed_amount" is
--- NOT by itself a fix. Flooring only changes the threshold gross cash must
--- cross -- it says nothing about the ORDER charges are allocated in. If a
--- payment applies to interest/penalty before principal, cumulative gross
--- cash flow crossing disbursed_amount still does not prove principal itself
--- has been repaid; it could mean charges were partly repaid while principal
--- remains outstanding. A correct fix needs the tracker's actual allocation
--- waterfall (principal-first vs charge-first vs pro-rata), not just a
--- different threshold -- if that isn't documented anywhere, ask for it
--- explicitly rather than assuming principal-first.
+-- NOT by itself a fix -- it only changes the threshold, not the allocation
+-- order. If a payment applies to interest/penalty before principal,
+-- cumulative gross cash crossing disbursed_amount does not prove principal
+-- itself has been repaid. A correct fix needs the tracker's actual
+-- allocation waterfall, not just a different threshold.
 
 
 -- ============================================================================
 -- SECTION C -- ANOMALY_OPEN exclusion impact
 -- ============================================================================
--- NOTE ON POPULATION: total_loans/total_borrowers here are loan_state_daily's
--- own population (every disbursement_fid it currently carries a snapshot
--- for), not necessarily identical to the disbursement-driven loan_level
--- population borrower_history.txt actually produces -- appropriate for this
--- section's specific question ("what does excluding ANOMALY_OPEN cost
--- against everything loan_state_daily knows about"), but don't read
--- anomaly_open_loans/total_loans as exactly the fraction of loan_level rows
--- that get dropped. Section D below is held to the exact-population standard
--- since it's aggregated onto the final borrower_history.txt output shape.
 SELECT
-COUNT(*) AS total_loans,
-SUM(CASE WHEN loan_status = 'ANOMALY_OPEN' OR is_anomaly_open = true THEN 1 ELSE 0 END) AS anomaly_open_loans,
-COUNT(DISTINCT customer_msisdn) AS total_borrowers,
-COUNT(DISTINCT CASE WHEN loan_status = 'ANOMALY_OPEN' OR is_anomaly_open = true THEN customer_msisdn END) AS borrowers_with_an_anomaly_loan
-FROM (
-SELECT lsd.*,
-ROW_NUMBER() OVER (
-PARTITION BY disbursement_fid
-ORDER BY date_key DESC, inserted_ts DESC
-) rn
-FROM analytics.momo_loan_book_tracker_loan_state_daily lsd
-WHERE date_key <= :snapshot_dt
-)
-WHERE rn = 1;
+(SELECT COUNT(*) FROM :validation_schema.vw_bh_disb_dedup) AS total_loans,
+(SELECT COUNT(*) FROM :validation_schema.vw_bh_loan_state_anomalies) AS anomaly_open_loans,
+(SELECT COUNT(DISTINCT phonenumber) FROM :validation_schema.vw_bh_disb_dedup) AS total_borrowers,
+(SELECT COUNT(DISTINCT d.phonenumber)
+ FROM :validation_schema.vw_bh_disb_dedup d
+ JOIN :validation_schema.vw_bh_loan_state_anomalies a ON a.disbursement_fid = d.disbursement_fid
+) AS borrowers_with_an_anomaly_loan;
 -- RESULT:
--- INTERPRETATION: report anomaly_open_loans / total_loans and
--- borrowers_with_an_anomaly_loan / total_borrowers as the population-shift
--- cost of the exclusion decision -- record this figure alongside the
--- decision, since it changes every affected borrower's prior-loan windows,
--- streaks, and lifetime rates, not just the anomalous loan itself.
+-- INTERPRETATION: report anomaly_open_loans / total_loans and borrowers_
+-- with_an_anomaly_loan / total_borrowers as the population-shift cost of the
+-- exclusion decision -- both counts now come from the same deduped
+-- disbursement population borrower_history.txt actually uses, not raw
+-- loan_state_daily.
 
 
 -- ============================================================================
 -- SECTION D -- has_pre_window_history impact
 -- ============================================================================
--- Rebuilt on the SAME surviving population borrower_history.txt actually
--- produces (normalized phonenumber, deduped disbursements, ANOMALY_OPEN
--- excluded) -- the previous version grouped raw loan_state_daily.
--- customer_msisdn directly, which could include borrowers absent from the
--- disbursement population, unnormalized duplicate phone representations,
--- borrowers represented only by excluded anomaly loans, and a possible
--- null-customer group. That made it a source-table diagnostic, not the
--- actual percentage in the produced borrower dataset.
-WITH disb AS (
-SELECT
-disbursement_fid,
-regexp_replace(trim(cast(customer_msisdn AS varchar)), '[^0-9]', '') AS phonenumber
-FROM analytics.momo_loan_book_tracker_disbursements_daily
-WHERE try_cast(disbursement_ts AS timestamp) IS NOT NULL
-AND disbursement_fid IS NOT NULL
-AND customer_msisdn IS NOT NULL
-AND date(try_cast(disbursement_ts AS timestamp)) <= date_parse(cast(:snapshot_dt AS varchar), '%Y%m%d')
-AND inserted_ts <= :as_of_load_ts
-),
-loan_state_snapshot AS (
-SELECT disbursement_fid, loan_status, is_anomaly_open, has_pre_window_history
-FROM (
-SELECT lsd.*,
-ROW_NUMBER() OVER (
-PARTITION BY disbursement_fid
-ORDER BY date_key DESC, inserted_ts DESC
-) rn
-FROM analytics.momo_loan_book_tracker_loan_state_daily lsd
-WHERE disbursement_fid IS NOT NULL
-AND date_key <= :snapshot_dt
-)
-WHERE rn = 1
-),
-surviving_loans AS (
-SELECT d.disbursement_fid, d.phonenumber, ls.has_pre_window_history
-FROM disb d
-LEFT JOIN loan_state_snapshot ls ON ls.disbursement_fid = d.disbursement_fid
-WHERE ls.disbursement_fid IS NULL
-OR NOT (ls.loan_status = 'ANOMALY_OPEN' OR ls.is_anomaly_open = true)
+-- Uses vw_bh_surviving_loans (deduped, normalized, ANOMALY_OPEN-excluded) --
+-- the same population borrower_history.txt's loan_level actually produces.
+WITH per_loan_flag AS (
+SELECT sl.phonenumber, ls.has_pre_window_history
+FROM :validation_schema.vw_bh_surviving_loans sl
+LEFT JOIN :validation_schema.vw_bh_loan_state_snapshot ls ON ls.disbursement_fid = sl.disbursement_fid
 )
 SELECT
 COUNT(*) AS total_borrowers,
 SUM(CASE WHEN flagged THEN 1 ELSE 0 END) AS borrowers_with_pre_window_history,
 SUM(CASE WHEN flagged THEN 1 ELSE 0 END) * 1.0 / NULLIF(COUNT(*), 0) AS pct_left_censored
 FROM (
-SELECT
-phonenumber,
-bool_or(has_pre_window_history) AS flagged
-FROM surviving_loans
+SELECT phonenumber, bool_or(has_pre_window_history) AS flagged
+FROM per_loan_flag
 GROUP BY phonenumber
 );
 -- RESULT:
--- INTERPRETATION: pct_left_censored is the share of borrowers whose
--- total_loans/first_loan_ts/lifetime rates from borrower_history.txt should
--- be treated as incomplete, not zero-history. Feed this into model
--- monitoring; if material, consider segmenting or excluding these borrowers
--- from lifetime-rate-dependent policy decisions until resolved.
+-- INTERPRETATION: pct_left_censored is the share of borrowers whose total_
+-- loans/first_loan_ts/lifetime rates from borrower_history.txt should be
+-- treated as incomplete, not zero-history.
 
 
 -- ============================================================================
 -- SECTION E -- Candidate old->new loan identity bridge
 -- ============================================================================
--- disbursement_external_id / repayment_external_id may tie back to the old
--- transaction log's transactionid/requestid. Existence check only -- if these
--- match, they're a far better reconciliation key than the msisdn+timestamp
--- proxy used elsewhere in this file.
+-- Tightened from an existence-only check: deduped new-side population,
+-- frozen to the same as_of_load_ts, plus cardinality and agreement checks
+-- -- a high raw match rate alone doesn't prove disbursement_external_id is
+-- safe to use as a loan key.
+WITH old_dispatch_raw AS (
 SELECT
-COUNT(*) AS new_disbursements_with_external_id,
-COUNT(DISTINCT d.disbursement_external_id) AS distinct_external_ids,
-SUM(CASE WHEN t.requestid IS NOT NULL THEN 1 ELSE 0 END) AS matched_to_old_requestid
-FROM analytics.momo_loan_book_tracker_disbursements_daily d
-LEFT JOIN devdata.xtrafloat_daily_trans t
+transactionid,
+regexp_replace(trim(cast(phonenumber AS varchar)), '[^0-9]', '') AS phonenumber,
+cast(requestid AS varchar) AS requestid,
+try_cast(original_timestamp_enrich AS timestamp) AS event_ts,
+cast(amount AS double) AS raw_amount
+FROM devdata.xtrafloat_daily_trans
+WHERE lower(trim(tranname)) = 'xtrafloat dispatch'
+AND requestid IS NOT NULL
+AND try_cast(original_timestamp_enrich AS timestamp) IS NOT NULL
+),
+-- dedupe to one row per transactionid (same pattern as borrower_history_
+-- original.txt's own dedup), then collapse to one row per requestid (the
+-- earliest dispatch event) -- without this, un-deduped old-table ingestion
+-- artifacts would masquerade as genuine cardinality collisions below.
+old_dispatch_txn_dedup AS (
+SELECT * FROM (
+SELECT o.*,
+ROW_NUMBER() OVER (PARTITION BY transactionid ORDER BY event_ts DESC) rn
+FROM old_dispatch_raw o
+)
+WHERE rn = 1
+),
+old_dispatch AS (
+SELECT * FROM (
+SELECT t.*,
+ROW_NUMBER() OVER (PARTITION BY requestid ORDER BY event_ts ASC) rn2
+FROM old_dispatch_txn_dedup t
+)
+WHERE rn2 = 1
+),
+bridge AS (
+SELECT
+d.disbursement_fid,
+d.phonenumber,
+d.disbursement_ts,
+d.disbursed_amount,
+t.requestid AS old_requestid,
+t.phonenumber AS old_phonenumber,
+t.event_ts AS old_event_ts,
+t.raw_amount AS old_raw_amount
+FROM :validation_schema.vw_bh_disb_dedup d
+LEFT JOIN old_dispatch t
 ON cast(t.requestid AS varchar) = cast(d.disbursement_external_id AS varchar)
 WHERE d.disbursement_external_id IS NOT NULL
-AND date(try_cast(d.disbursement_ts AS timestamp)) <= date_parse(cast(:snapshot_dt AS varchar), '%Y%m%d');
+)
+SELECT
+COUNT(*) AS new_disbursements_with_external_id,
+SUM(CASE WHEN old_requestid IS NOT NULL THEN 1 ELSE 0 END) AS matched_to_old_requestid,
+-- cardinality: does one new disbursement ever map to >1 old requestid, or
+-- vice versa?
+(SELECT COUNT(*) FROM (
+SELECT disbursement_fid FROM bridge WHERE old_requestid IS NOT NULL
+GROUP BY disbursement_fid HAVING COUNT(DISTINCT old_requestid) > 1
+)) AS new_ids_matching_multiple_old,
+(SELECT COUNT(*) FROM (
+SELECT old_requestid FROM bridge WHERE old_requestid IS NOT NULL
+GROUP BY old_requestid HAVING COUNT(DISTINCT disbursement_fid) > 1
+)) AS old_ids_matching_multiple_new,
+-- agreement on the matched subset: do phone/amount/timestamp actually line
+-- up, or does the id merely coincide?
+SUM(CASE WHEN old_requestid IS NOT NULL AND phonenumber = old_phonenumber THEN 1 ELSE 0 END) AS matched_phone_agrees,
+SUM(CASE WHEN old_requestid IS NOT NULL AND ABS(disbursed_amount - old_raw_amount) <= 1 THEN 1 ELSE 0 END) AS matched_amount_agrees,
+approx_percentile(
+CASE WHEN old_requestid IS NOT NULL THEN ABS(date_diff('second', disbursement_ts, old_event_ts)) END, 0.5
+) AS median_abs_timestamp_diff_seconds
+FROM bridge;
 -- RESULT:
--- INTERPRETATION: if matched_to_old_requestid is a high fraction of
--- new_disbursements_with_external_id, disbursement_external_id is a real
--- bridge to the old requestid space -- use it (not msisdn+timestamp
--- proximity) for any old-vs-new loan-level comparison, including a tighter
--- version of Section B's reconciliation. If near-zero, external_id is not the
--- bridge and old-vs-new comparison must stay at the aggregate/population
--- level (Section C/D style), not loan-by-loan.
+-- INTERPRETATION: matched_to_old_requestid / new_disbursements_with_
+-- external_id being high is necessary but not sufficient -- new_ids_
+-- matching_multiple_old and old_ids_matching_multiple_new must both be 0
+-- for this to be a safe 1:1 key; if either is nonzero, disbursement_
+-- external_id is not a reliable bridge on its own. matched_phone_agrees and
+-- matched_amount_agrees should both be ~100% of the matched subset --
+-- disagreement means the id match is coincidental, not a real link. If all
+-- of these pass, use disbursement_external_id (not msisdn+timestamp
+-- proximity) for old-vs-new loan-level comparison.
 
 
 -- ============================================================================
 -- SECTION F -- Dedup tie-breaker collisions
 -- ============================================================================
--- Every dedup in this file (and in borrower_history.txt) orders by
--- inserted_ts DESC only. If two rows for the same business key share the
--- exact same max inserted_ts, ROW_NUMBER() picks between them
--- nondeterministically -- there's no known secondary field (sequence,
--- batch id, version) in the schema this file was built from to break the
--- tie reliably. Rather than assume that never happens, count it.
+-- Deliberately does NOT use the GATE 0 views -- the views already resolve
+-- ties (that's what ROW_NUMBER does), so querying them can never reveal a
+-- tie. This section has to look at the pre-dedup population directly. Fixed
+-- from an earlier version that checked the CURRENT global max inserted_ts
+-- regardless of as_of_load_ts -- that could miss a tie that existed at the
+-- frozen cutoff (superseded by a later unique load) or report a tie that
+-- arose only after the cutoff (irrelevant to the run being validated).
+-- Every check below is bounded to the same date/inserted_ts cutoffs
+-- borrower_history.txt itself uses.
 SELECT 'disbursements_daily' AS source_table, COUNT(*) AS keys_with_tie
 FROM (
-SELECT disbursement_fid, MAX(inserted_ts) AS max_ts, COUNT(*) AS n_at_max_ts
+SELECT disbursement_fid
 FROM analytics.momo_loan_book_tracker_disbursements_daily d
-WHERE inserted_ts = (
+WHERE date(try_cast(disbursement_ts AS timestamp)) <= date_parse(cast(:snapshot_dt AS varchar), '%Y%m%d')
+AND inserted_ts <= :as_of_load_ts
+AND inserted_ts = (
 SELECT MAX(inserted_ts) FROM analytics.momo_loan_book_tracker_disbursements_daily d2
 WHERE d2.disbursement_fid = d.disbursement_fid
+AND date(try_cast(d2.disbursement_ts AS timestamp)) <= date_parse(cast(:snapshot_dt AS varchar), '%Y%m%d')
+AND d2.inserted_ts <= :as_of_load_ts
 )
 GROUP BY disbursement_fid
 HAVING COUNT(*) > 1
@@ -654,9 +752,13 @@ SELECT 'repayments_daily', COUNT(*)
 FROM (
 SELECT repayment_fid
 FROM analytics.momo_loan_book_tracker_repayments_daily r
-WHERE inserted_ts = (
+WHERE date(try_cast(repayment_ts AS timestamp)) <= date_parse(cast(:snapshot_dt AS varchar), '%Y%m%d')
+AND inserted_ts <= :as_of_load_ts
+AND inserted_ts = (
 SELECT MAX(inserted_ts) FROM analytics.momo_loan_book_tracker_repayments_daily r2
 WHERE r2.repayment_fid = r.repayment_fid
+AND date(try_cast(r2.repayment_ts AS timestamp)) <= date_parse(cast(:snapshot_dt AS varchar), '%Y%m%d')
+AND r2.inserted_ts <= :as_of_load_ts
 )
 GROUP BY repayment_fid
 HAVING COUNT(*) > 1
@@ -666,17 +768,59 @@ SELECT 'loan_state_daily (per disbursement_fid, date_key)', COUNT(*)
 FROM (
 SELECT disbursement_fid, date_key
 FROM analytics.momo_loan_book_tracker_loan_state_daily l
-WHERE inserted_ts = (
+WHERE date_key <= :snapshot_dt
+AND inserted_ts <= :as_of_load_ts
+AND inserted_ts = (
 SELECT MAX(inserted_ts) FROM analytics.momo_loan_book_tracker_loan_state_daily l2
 WHERE l2.disbursement_fid = l.disbursement_fid AND l2.date_key = l.date_key
+AND l2.date_key <= :snapshot_dt
+AND l2.inserted_ts <= :as_of_load_ts
 )
 GROUP BY disbursement_fid, date_key
 HAVING COUNT(*) > 1
 );
 -- RESULT:
--- INTERPRETATION: keys_with_tie should be 0 for all three rows per the
--- acceptance threshold above. Any nonzero count means dedup is currently
--- choosing arbitrarily for that many business keys -- ask the table owner
--- whether a real tie-breaker field exists (sequence number, batch id,
--- ingestion offset) before shipping; if none exists, this needs to be
--- documented as a known nondeterminism rather than silently accepted.
+-- INTERPRETATION: keys_with_tie should be 0 for all three rows. Any nonzero
+-- count means dedup is choosing arbitrarily for that many business keys, AS
+-- OF THIS SPECIFIC (snapshot_dt, as_of_load_ts) RUN -- ask the table owner
+-- whether a real tie-breaker field exists before shipping.
+
+
+-- ============================================================================
+-- GATE 6 -- Record approval evidence
+-- ============================================================================
+-- Fill this in every time this file is actually run. An unfilled template
+-- is not evidence, per the earlier review's point that this file states a
+-- validation PLAN, not validation EVIDENCE, until results are recorded.
+--
+--   Execution date:            ____________________
+--   snapshot_dt used:          ____________________
+--   as_of_load_ts used:        ____________________
+--   Query engine/version:      ____________________ (e.g. Athena engine v3)
+--   GATE 1 grain violations:   ____________________
+--   GATE 1 range violations:   ____________________
+--   Section A conclusion:      ____________________ (principal-only / gross / unclear)
+--   B1 coverage (count/value): ____________________
+--   B2 reconciliation rate:    ____________________ (count / value)
+--   B3 conclusion:             ____________________
+--   Section C impact:          ____________________
+--   Section D pct_left_censored: __________________
+--   Section E bridge verdict:  ____________________ (safe key / not safe / partial)
+--   Section F tie count:       ____________________
+--   Threshold decision:        ____________________ (pass / fail / conditional, and why)
+--   Investigation links:       ____________________
+--   Approved by:               ____________________
+
+
+-- ============================================================================
+-- TEARDOWN -- drop the GATE 0 views once validation is complete, if
+-- :validation_schema is a shared scratch database other work might collide
+-- with names in.
+-- ============================================================================
+-- DROP VIEW IF EXISTS :validation_schema.vw_bh_output;
+-- DROP VIEW IF EXISTS :validation_schema.vw_bh_surviving_loans;
+-- DROP VIEW IF EXISTS :validation_schema.vw_bh_loan_state_anomalies;
+-- DROP VIEW IF EXISTS :validation_schema.vw_bh_loan_state_snapshot;
+-- DROP VIEW IF EXISTS :validation_schema.vw_bh_repay_dedup;
+-- DROP VIEW IF EXISTS :validation_schema.vw_bh_disb_windows;
+-- DROP VIEW IF EXISTS :validation_schema.vw_bh_disb_dedup;
