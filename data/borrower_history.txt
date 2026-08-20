@@ -468,6 +468,19 @@ END AS loan_status,
 -- keyed only by requestid = disbursement_fid either way. Joining here lets
 -- the ##BORROWER_HISTORY_CHECKPOINT_1## materialization below carry these
 -- columns forward without a second read of loan_state_snapshot downstream.
+--
+-- KNOWN LIMITATION (confirmed via data/spot_check_loan_trace.sql, not a
+-- guess): when a borrower takes a second disbursement on the SAME calendar
+-- day as an already-open loan, that second disbursement's own
+-- disbursement_fid gets no independent loan_state_daily row at all -- its
+-- principal appears to be folded into the first same-day loan's ongoing
+-- state instead (observed: two 750,000 disbursements 22h apart on the same
+-- date, one showing loan_state_daily's lifetime_disbursed_ugx = 1,500,000
+-- from day one, the other absent from loan_state_daily entirely). This
+-- LEFT JOIN handles that safely -- the second loan's ls_* columns just come
+-- back NULL, no error -- but expect NULL ls_loan_status/ls_aging_bucket/etc.
+-- for any loan that isn't the first disbursement a borrower took that day.
+-- Prevalence across the full loan book is not yet quantified.
 ls.loan_status AS ls_loan_status,
 ls.aging_bucket AS ls_aging_bucket,
 ls.days_aging AS ls_days_aging,
