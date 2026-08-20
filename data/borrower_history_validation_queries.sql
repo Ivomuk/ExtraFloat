@@ -1139,6 +1139,56 @@ HAVING COUNT(*) > 1
 
 
 -- ============================================================================
+-- SECTION G -- Same-day disbursement loan_state_daily coverage
+-- ============================================================================
+-- Quantifies a confirmed limitation (not a guess -- see
+-- data/spot_check_loan_trace.sql's msisdn 25672546 trace and the comment at
+-- borrower_history.txt's ls_* join): when a borrower takes a second
+-- disbursement on the SAME calendar day as an already-open loan, that
+-- second disbursement's own disbursement_fid appears to get no independent
+-- loan_state_daily row at all -- its principal seems folded into the first
+-- same-day loan's ongoing state instead. borrower_history.txt's LEFT JOIN
+-- handles this safely (NULL ls_* columns, no error), but this section
+-- measures how often it actually happens across the whole book, not just
+-- the one borrower it was first observed on.
+WITH same_day_ranked AS (
+SELECT
+d.disbursement_fid,
+d.phonenumber,
+d.disbursement_ts,
+ROW_NUMBER() OVER (
+PARTITION BY d.phonenumber, date(d.disbursement_ts)
+ORDER BY d.disbursement_ts
+) AS same_day_rn
+FROM :validation_schema.vw_bh_disb_dedup d
+)
+SELECT
+COUNT(*) AS total_disbursements,
+SUM(CASE WHEN sdr.same_day_rn = 1 THEN 1 ELSE 0 END) AS first_of_day_disbursements,
+SUM(CASE WHEN sdr.same_day_rn > 1 THEN 1 ELSE 0 END) AS same_day_repeat_disbursements,
+SUM(CASE WHEN sdr.same_day_rn > 1 AND ls.disbursement_fid IS NULL THEN 1 ELSE 0 END) AS same_day_repeats_missing_loan_state,
+SUM(CASE WHEN sdr.same_day_rn > 1 AND ls.disbursement_fid IS NOT NULL THEN 1 ELSE 0 END) AS same_day_repeats_with_loan_state,
+ROUND(100.0 * SUM(CASE WHEN sdr.same_day_rn > 1 THEN 1 ELSE 0 END) / NULLIF(COUNT(*), 0), 2) AS pct_disbursements_same_day_repeat,
+ROUND(100.0 * SUM(CASE WHEN sdr.same_day_rn > 1 AND ls.disbursement_fid IS NULL THEN 1 ELSE 0 END)
+       / NULLIF(SUM(CASE WHEN sdr.same_day_rn > 1 THEN 1 ELSE 0 END), 0), 2) AS pct_same_day_repeats_missing_loan_state
+FROM same_day_ranked sdr
+LEFT JOIN :validation_schema.vw_bh_loan_state_snapshot ls
+ON ls.disbursement_fid = sdr.disbursement_fid;
+-- RESULT:
+-- INTERPRETATION: pct_disbursements_same_day_repeat is how common
+-- multi-loan-per-day behavior is across the whole book -- context, not a
+-- pass/fail. pct_same_day_repeats_missing_loan_state is the number that
+-- matters: it's the share of those repeats where the confirmed gap
+-- actually bites, i.e. what fraction of borrower_history.txt's ls_*
+-- enrichment columns are NULL specifically because of this pattern (as
+-- opposed to a genuinely still-open/unseen loan). If that percentage isn't
+-- close to 100%, the merge behavior is NOT universal for same-day
+-- repeats -- worth a closer look at what distinguishes the ones that DO
+-- get their own loan_state_daily row from the ones that don't, rather than
+-- assuming every same-day repeat is affected.
+
+
+-- ============================================================================
 -- GATE 6 -- Record approval evidence
 -- ============================================================================
 -- Fill this in every time this file is actually run. An unfilled template
@@ -1171,6 +1221,7 @@ HAVING COUNT(*) > 1
 --   Section D pct_left_censored: __________________
 --   Section E bridge verdict:  ____________________ (safe key / not safe / partial)
 --   Section F tie count:       ____________________
+--   Section G same-day-repeat %/missing-loan-state %: ___________ (context, not pass/fail)
 --   Threshold decision:        ____________________ (pass / fail / conditional, and why)
 --   Investigation links:       ____________________
 --   Approved by:               ____________________
