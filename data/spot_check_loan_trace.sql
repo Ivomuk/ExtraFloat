@@ -8,10 +8,24 @@
 -- picked in STEP 1 -- nothing here does a full-table join, so this is cheap
 -- enough to run interactively even against the 120M-row source tables.
 --
--- STEP 1's date bounds are anchored to 2026-07-31 -- the same snapshot_dt
--- literal currently used in borrower_history.txt and loan_summary_query.txt.
--- Update it here too if those files' snapshot_dt ever changes, so the
--- sample stays anchored to the same cutoff the production queries use.
+-- STEP 1's date bounds are anchored to 2026-04-30 -- deliberately earlier
+-- than borrower_history.txt/loan_summary_query.txt's current snapshot_dt
+-- (2026-07-31), not tied to it. Picking an anchor well inside the data
+-- rather than right at the production cutoff means both sample buckets sit
+-- comfortably away from the edges of whatever's actually loaded -- the old
+-- bucket doesn't risk landing before the data even starts, and the recent
+-- bucket doesn't depend on rows disbursed in the last couple of days before
+-- the live cutoff (which may be sparser or still trickling in). Change this
+-- literal to try a different anchor; it doesn't need to match the
+-- production files' snapshot_dt.
+-- NOTE: this session never got a fully unambiguous read on the true
+-- MIN/MAX(disbursement_ts) range actually loaded in this warehouse (an
+-- earlier diagnostic answer was ambiguous about which date column it
+-- referred to). If both STEP 1 buckets come back empty, that's a sign
+-- 2026-04-30 sits outside the real data range -- rerun
+-- `SELECT MIN(disbursement_ts), MAX(disbursement_ts) FROM
+-- analytics.momo_loan_book_tracker_disbursements_daily` first and anchor
+-- to whatever that actually returns.
 --
 -- What this checks that the aggregate GATE-style validation queries don't:
 -- whether the repayment-attribution heuristic and the derived cure-timing
@@ -57,7 +71,7 @@ FROM analytics.momo_loan_book_tracker_disbursements_daily
 WHERE try_cast(disbursement_ts AS timestamp) IS NOT NULL
 AND disbursement_fid IS NOT NULL
 AND customer_msisdn IS NOT NULL
-AND date(try_cast(disbursement_ts AS timestamp)) BETWEEN date_add('day', -200, date '2026-07-31') AND date_add('day', -60, date '2026-07-31')
+AND date(try_cast(disbursement_ts AS timestamp)) BETWEEN date_add('day', -200, date '2026-04-30') AND date_add('day', -60, date '2026-04-30')
 ORDER BY disbursement_ts ASC
 LIMIT 3
 ),
@@ -67,7 +81,7 @@ FROM analytics.momo_loan_book_tracker_disbursements_daily
 WHERE try_cast(disbursement_ts AS timestamp) IS NOT NULL
 AND disbursement_fid IS NOT NULL
 AND customer_msisdn IS NOT NULL
-AND date(try_cast(disbursement_ts AS timestamp)) BETWEEN date_add('day', -2, date '2026-07-31') AND date '2026-07-31'
+AND date(try_cast(disbursement_ts AS timestamp)) BETWEEN date_add('day', -2, date '2026-04-30') AND date '2026-04-30'
 ORDER BY disbursement_ts DESC
 LIMIT 3
 )
