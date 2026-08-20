@@ -1,20 +1,24 @@
 """
-Assembles the four SQL statements used by
+Assembles the seven SQL statements used by
 data/borrower_history_validation_queries.sql's GATE 1 final-output checks,
 from the checked-in data/borrower_history.txt -- so validation always runs
 against the exact production query, not a manually pasted (and potentially
 stale or hand-edited) copy.
 
-borrower_history.txt is split by its ##BORROWER_HISTORY_CHECKPOINT_1##/_2##
-markers into three statements instead of one, because the unsplit query
-exceeds the warehouse's query-plan stage-count ceiling (100 max; ~280
-observed unsplit, ~142 observed after only one split). Part A1 (everything
-before marker 1: dedup, attribution, cure timing, loan-level flags) and
-Part A2 (between marker 1 and marker 2: the borrower-level window-function
-cascade) are each materialized as physical checkpoint tables in turn; Part A3
-(everything after marker 2) is the final CREATE OR REPLACE VIEW, built from
-the second checkpoint table instead of re-deriving anything inline. See the
-comments at each marker in borrower_history.txt for the full rationale.
+borrower_history.txt is split by its
+##BORROWER_HISTORY_CHECKPOINT_0##/_1##/_2## markers into four statements
+instead of one, because the unsplit query exceeds the warehouse's
+query-plan stage-count ceiling (100 max; ~280 observed unsplit, ~142
+observed after one split, 140 observed on checkpoint 1 alone after two
+splits). Part A0 (everything before marker 0: dedup, attribution, cure-event
+classification), Part A1 (between marker 0 and marker 1: cure timing,
+loan-level flags, reading Part A0's checkpoint table instead of re-deriving
+`classified`), and Part A2 (between marker 1 and marker 2: the
+borrower-level window-function cascade) are each materialized as physical
+checkpoint tables in turn; Part A3 (everything after marker 2) is the final
+CREATE OR REPLACE VIEW, built from the third checkpoint table instead of
+re-deriving anything inline. See the comments at each marker in
+borrower_history.txt for the full rationale.
 
 Stamps the git commit SHA of data/borrower_history.txt into the output as a
 comment, and warns if the working tree has uncommitted changes to it -- both
@@ -23,11 +27,12 @@ validated.
 
 Usage:
     python scripts/build_vw_bh_output.py <validation_schema> > vw_bh_output.sql
-    # then run vw_bh_output.sql in Athena/Trino -- it contains five
+    # then run vw_bh_output.sql in Athena/Trino -- it contains seven
     # statements in order: DROP TABLE/CREATE TABLE ... AS SELECT for
-    # checkpoint 1, DROP TABLE/CREATE TABLE ... AS SELECT for checkpoint 2
-    # (built from checkpoint 1), then CREATE OR REPLACE VIEW for
-    # vw_bh_output (built from checkpoint 2).
+    # checkpoint 0, DROP TABLE/CREATE TABLE ... AS SELECT for checkpoint 1
+    # (built from checkpoint 0), DROP TABLE/CREATE TABLE ... AS SELECT for
+    # checkpoint 2 (built from checkpoint 1), then CREATE OR REPLACE VIEW
+    # for vw_bh_output (built from checkpoint 2).
 """
 
 import re
@@ -38,10 +43,13 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SRC = REPO_ROOT / "data" / "borrower_history.txt"
 
+CHECKPOINT_MARKER_0 = "-- ##BORROWER_HISTORY_CHECKPOINT_0##"
 CHECKPOINT_MARKER_1 = "-- ##BORROWER_HISTORY_CHECKPOINT_1##"
 CHECKPOINT_MARKER_2 = "-- ##BORROWER_HISTORY_CHECKPOINT_2##"
+CHECKPOINT_TABLE_NAME_0 = "tbl_bh_classified"
 CHECKPOINT_TABLE_NAME_1 = "tbl_bh_loan_final"
 CHECKPOINT_TABLE_NAME_2 = "tbl_bh_loan_level"
+CHECKPOINT_PLACEHOLDER_0 = "{{CHECKPOINT_TABLE_0}}"
 CHECKPOINT_PLACEHOLDER_1 = "{{CHECKPOINT_TABLE_1}}"
 CHECKPOINT_PLACEHOLDER_2 = "{{CHECKPOINT_TABLE_2}}"
 
@@ -122,14 +130,18 @@ def main() -> None:
 
     body = SRC.read_text()
 
-    part_a1, rest = _split_once(body, CHECKPOINT_MARKER_1, "checkpoint 1")
+    part_a0, rest0 = _split_once(body, CHECKPOINT_MARKER_0, "checkpoint 0")
+    part_a1, rest = _split_once(rest0, CHECKPOINT_MARKER_1, "checkpoint 1")
     part_a2, part_a3 = _split_once(rest, CHECKPOINT_MARKER_2, "checkpoint 2")
 
+    checkpoint_table_0 = f"{schema}.{CHECKPOINT_TABLE_NAME_0}"
     checkpoint_table_1 = f"{schema}.{CHECKPOINT_TABLE_NAME_1}"
     checkpoint_table_2 = f"{schema}.{CHECKPOINT_TABLE_NAME_2}"
 
+    _require_placeholder(part_a1, CHECKPOINT_PLACEHOLDER_0, "Part A1 (between checkpoint 0 and checkpoint 1)")
     _require_placeholder(part_a2, CHECKPOINT_PLACEHOLDER_1, "Part A2 (between checkpoint 1 and checkpoint 2)")
     _require_placeholder(part_a3, CHECKPOINT_PLACEHOLDER_2, "Part A3 (after checkpoint 2)")
+    part_a1 = part_a1.replace(CHECKPOINT_PLACEHOLDER_0, checkpoint_table_0)
     part_a2 = part_a2.replace(CHECKPOINT_PLACEHOLDER_1, checkpoint_table_1)
     part_a3 = part_a3.replace(CHECKPOINT_PLACEHOLDER_2, checkpoint_table_2)
 
@@ -179,9 +191,14 @@ def main() -> None:
     for name in ("snapshot_dt", "as_of_load_ts", "snapshot_ts"):
         print(f"--   {name}: {params[name]}")
     print("--")
-    print("-- Runs as five statements: checkpoint 1 is dropped and rebuilt first,")
-    print("-- then checkpoint 2 (built from checkpoint 1), then vw_bh_output")
-    print("-- (built from checkpoint 2).")
+    print("-- Runs as seven statements: checkpoint 0 is dropped and rebuilt first,")
+    print("-- then checkpoint 1 (built from checkpoint 0), then checkpoint 2 (built")
+    print("-- from checkpoint 1), then vw_bh_output (built from checkpoint 2).")
+    print(f"DROP TABLE IF EXISTS {checkpoint_table_0};")
+    print(f"CREATE TABLE {checkpoint_table_0} AS")
+    print(part_a0.rstrip())
+    print(";")
+    print()
     print(f"DROP TABLE IF EXISTS {checkpoint_table_1};")
     print(f"CREATE TABLE {checkpoint_table_1} AS")
     print(part_a1.rstrip())

@@ -21,12 +21,13 @@
 --     authoritative lifecycle/charge fields for the borrower's latest loan.
 --
 -- EXECUTION: this file is NOT a single runnable statement -- it is split by
--- the ##BORROWER_HISTORY_CHECKPOINT_1##/_2## markers below into three SQL
--- statements (two CREATE TABLE ... AS SELECT checkpoints materializing the
--- per-loan-grain pipeline in two stages, then a CREATE OR REPLACE VIEW
--- building the borrower-level output from the second checkpoint), because
--- the unsplit query exceeds the warehouse's query-plan stage-count ceiling.
--- Use scripts/build_vw_bh_output.py <schema> to generate all three
+-- the ##BORROWER_HISTORY_CHECKPOINT_0##/_1##/_2## markers below into four
+-- SQL statements (three CREATE TABLE ... AS SELECT checkpoints
+-- materializing the per-loan-grain pipeline in three stages, then a
+-- CREATE OR REPLACE VIEW building the borrower-level output from the last
+-- checkpoint), because the unsplit query -- and even each of the first two
+-- split attempts -- exceeded the warehouse's query-plan stage-count
+-- ceiling. Use scripts/build_vw_bh_output.py <schema> to generate all four
 -- statements with the checkpoint table names and schema substituted in --
 -- see the comments at each checkpoint marker for why. Do not hand-paste this
 -- file as one query.
@@ -258,6 +259,58 @@ abs(ra.raw_amount) AS amount,
 'recovery' AS txn_type
 FROM repay_attributed ra
 WHERE ra.requestid NOT IN (SELECT disbursement_fid FROM loan_state_anomalies)
+)
+SELECT * FROM classified
+-- ##BORROWER_HISTORY_CHECKPOINT_0##
+-- ============================================================================
+-- MATERIALIZATION CHECKPOINT 0 -- checkpoint 1 (further down) was STILL
+-- hitting the warehouse's stage-count ceiling on its own (140 stages,
+-- observed; cap is 100) even after checkpoints 2 and 1 (see their comments)
+-- already split the original single-statement query twice. classified's
+-- own UNION ALL + two NOT IN(loan_state_anomalies) exclusions, combined
+-- with the cure-timing cascade and loan_final's 4-way trailing join, add up
+-- to more than expected from window-function count alone -- Trino's stage
+-- count scales with joins/unions/CTE boundaries too, not just OVER()
+-- clauses. classified (transaction grain: one row per disbursement or
+-- attributed repayment, ANOMALY_OPEN already excluded) is a clean, natural
+-- checkpoint: materialize it here, then everything below re-derives
+-- loan_state_snapshot fresh (cheap, 2 window functions -- not worth a
+-- third physical table) but reads classified from the checkpoint table
+-- instead of re-deriving the UNION/exclusion logic.
+WITH loan_state_loads_dedup AS (
+-- loan_state_daily is a daily snapshot; dedup re-ingested rows for the
+-- same (disbursement_fid, date_key) before picking the as-of snapshot.
+SELECT *
+FROM (
+SELECT lsd.*,
+ROW_NUMBER() OVER (
+PARTITION BY disbursement_fid, date_key
+ORDER BY inserted_ts DESC
+) rn
+FROM analytics.momo_loan_book_tracker_loan_state_daily lsd
+WHERE ova = 'XTRAFLOAT-AGENT'
+AND disbursement_fid IS NOT NULL
+AND date_key <= (SELECT snapshot_dt FROM snapshots)
+AND inserted_ts <= (SELECT as_of_load_ts FROM snapshots)
+)
+WHERE rn = 1
+),
+loan_state_snapshot AS (
+-- One row per disbursement_fid: its latest known state at/before the
+-- snapshot cutoff. A loan still open at the cutoff yields its latest
+-- state; a loan already closed yields its final closing-day row (rows
+-- stop appearing in loan_state_daily once a loan closes), which is
+-- exactly "state as of the snapshot" either way.
+SELECT *
+FROM (
+SELECT lsld.*,
+ROW_NUMBER() OVER (
+PARTITION BY disbursement_fid
+ORDER BY date_key DESC
+) rn2
+FROM loan_state_loads_dedup lsld
+)
+WHERE rn2 = 1
 ),
 loan_core AS (
 SELECT
@@ -268,7 +321,7 @@ SUM(CASE WHEN txn_type='disbursement' THEN amount ELSE 0 END) AS disbursed_amoun
 SUM(CASE WHEN txn_type='recovery' THEN amount ELSE 0 END) AS total_recovered,
 SUM(CASE WHEN txn_type='reimbursement' THEN amount ELSE 0 END) AS total_reimbursed,
 SUM(CASE WHEN txn_type='penalty' THEN amount ELSE 0 END) AS total_penalty
-FROM classified
+FROM {{CHECKPOINT_TABLE_0}}
 GROUP BY requestid, phonenumber
 ),
 recovery_times AS (
@@ -277,7 +330,7 @@ requestid,
 phonenumber,
 MIN(CASE WHEN txn_type IN ('recovery','reimbursement') THEN event_ts END) AS first_recovery_ts,
 MAX(CASE WHEN txn_type IN ('recovery','reimbursement') THEN event_ts END) AS last_recovery_ts
-FROM classified
+FROM {{CHECKPOINT_TABLE_0}}
 GROUP BY requestid, phonenumber
 ),
 cure_events AS (
@@ -289,7 +342,7 @@ CASE WHEN c.txn_type IN ('recovery','reimbursement') THEN c.amount ELSE 0 END AS
 l.disbursement_ts,
 l.disbursed_amount,
 l.total_penalty
-FROM classified c
+FROM {{CHECKPOINT_TABLE_0}} c
 JOIN loan_core l
 ON c.requestid = l.requestid
 AND c.phonenumber = l.phonenumber
@@ -507,19 +560,23 @@ ON l.requestid = ls.disbursement_fid
 SELECT * FROM loan_final
 -- ##BORROWER_HISTORY_CHECKPOINT_1##
 -- ============================================================================
--- MATERIALIZATION CHECKPOINT 1 -- everything above this marker (per-loan
--- grain: dedup, attribution, cure timing, on-time/default flags, loan_state
--- enrichment) is materialized as a physical table before the borrower-level
--- window-function cascade below runs. Even after CHECKPOINT_2 (further down)
--- removed the double-planning of this whole subtree, a single statement
--- covering everything through exposure_features still hit 142 stages (cap:
--- 100) -- borrower_history_base alone has 11 window functions in one CTE,
--- and the cascade through exposure_features has ~27 more. Splitting here
--- (a clean boundary: nothing below reads or filters on ls_* columns, so
--- attaching them to loan_final here instead of at the old end-of-pipeline
--- join point changes nothing about the final result) resets the stage count
--- again. See scripts/build_vw_bh_output.py for how the resulting three
--- statements get assembled.
+-- MATERIALIZATION CHECKPOINT 1 -- everything between CHECKPOINT_0 above and
+-- this marker (loan_state_snapshot re-derived fresh, then the cure-timing
+-- cascade through loan_final's on-time/default flags and ls_* enrichment)
+-- is materialized as a physical table before the borrower-level
+-- window-function cascade below runs. Even after CHECKPOINT_2 (further
+-- down) removed the double-planning of this whole subtree, a single
+-- statement covering everything through exposure_features still hit 142
+-- stages, and this checkpoint ALONE (before CHECKPOINT_0 was split out)
+-- still hit 140 stages on its own (cap: 100 both times) -- Trino's stage
+-- count scales with joins/UNIONs/CTE boundaries, not just window functions;
+-- borrower_history_base alone has 11 window functions in one CTE, and the
+-- cascade through exposure_features has ~27 more. Splitting here (a clean
+-- boundary: nothing below reads or filters on ls_* columns, so attaching
+-- them to loan_final here instead of at the old end-of-pipeline join point
+-- changes nothing about the final result) resets the stage count again.
+-- See scripts/build_vw_bh_output.py for how the resulting four statements
+-- get assembled.
 -- ============================================================================
 -- FIXED BORROWER HISTORY
 WITH borrower_history_base AS (
@@ -749,21 +806,24 @@ SELECT * FROM exposure_features
 -- ##BORROWER_HISTORY_CHECKPOINT_2##
 -- ============================================================================
 -- MATERIALIZATION CHECKPOINT 2 -- scripts/build_vw_bh_output.py splits the
--- file at both ##BORROWER_HISTORY_CHECKPOINT_1##/_2## markers into three SQL
--- statements: two CREATE TABLE ... AS SELECT (one per checkpoint) and a
--- final CREATE OR REPLACE VIEW for vw_bh_output, each reading from the prior
--- checkpoint table instead of re-deriving it inline. This exists because a
--- single unbroken query here exceeds the warehouse's stage-count ceiling
--- (100 max) -- the planner gives each window function/CTE boundary its own
--- exchange. The former single `loan_level` CTE (~25 nested CTEs, ~36 window
--- functions) was both being planned TWICE (referenced by both CTEs below --
--- CHECKPOINT_2 fixed that, 280 -> 142 stages) AND was still too deep as one
--- statement even planned once (142 stages) -- borrower_history_base alone
--- has 11 window functions in a single CTE, with ~27 more through
--- exposure_features. CHECKPOINT_1 (further up, right after loan_final)
--- splits that single traversal in two. No change to the actual computation
--- from either split. Do not hand-run this file as one paste -- use
--- scripts/build_vw_bh_output.py to generate the three statements.
+-- file at all three ##BORROWER_HISTORY_CHECKPOINT_0##/_1##/_2## markers
+-- into four SQL statements: three CREATE TABLE ... AS SELECT (one per
+-- checkpoint) and a final CREATE OR REPLACE VIEW for vw_bh_output, each
+-- reading from the prior checkpoint table instead of re-deriving it
+-- inline. This exists because a single unbroken query here exceeds the
+-- warehouse's stage-count ceiling (100 max) -- the planner gives each
+-- window function/join/UNION/CTE boundary its own exchange. The former
+-- single `loan_level` CTE (~25 nested CTEs, ~36 window functions) was both
+-- being planned TWICE (referenced by both CTEs below -- CHECKPOINT_2 fixed
+-- that, 280 -> 142 stages) AND was still too deep as one statement even
+-- planned once (142 stages) -- borrower_history_base alone has 11 window
+-- functions in a single CTE, with ~27 more through exposure_features.
+-- CHECKPOINT_1 (further up, right after loan_final) split that single
+-- traversal in two, but CHECKPOINT_1's own statement then hit 140 stages
+-- on its own, needing CHECKPOINT_0 (further up still, right after
+-- classified) to split it again. No change to the actual computation from
+-- any of the three splits. Do not hand-run this file as one paste -- use
+-- scripts/build_vw_bh_output.py to generate the four statements.
 -- ============================================================================
 
 -- ============================================================================
