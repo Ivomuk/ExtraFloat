@@ -4,28 +4,30 @@
 -- Cheap, human-readable spot check: pick a handful of disbursements and
 -- trace each one by hand through repayments_daily and loan_state_daily,
 -- instead of running a full validation suite over the whole table set.
--- Every query below is scoped to a tiny IN-list of msisdns/disbursement_fids
--- picked in STEP 1 -- nothing here does a full-table join, so this is cheap
--- enough to run interactively even against the 120M-row source tables.
 --
--- STEP 1's date bounds are anchored to 2026-04-30 -- deliberately earlier
--- than borrower_history.txt/loan_summary_query.txt's current snapshot_dt
--- (2026-07-31), not tied to it. Picking an anchor well inside the data
--- rather than right at the production cutoff means both sample buckets sit
--- comfortably away from the edges of whatever's actually loaded -- the old
--- bucket doesn't risk landing before the data even starts, and the recent
--- bucket doesn't depend on rows disbursed in the last couple of days before
--- the live cutoff (which may be sparser or still trickling in). Change this
--- literal to try a different anchor; it doesn't need to match the
--- production files' snapshot_dt.
--- NOTE: this session never got a fully unambiguous read on the true
--- MIN/MAX(disbursement_ts) range actually loaded in this warehouse (an
--- earlier diagnostic answer was ambiguous about which date column it
--- referred to). If both STEP 1 buckets come back empty, that's a sign
--- 2026-04-30 sits outside the real data range -- rerun
+-- PARTITION PRUNING: all three momo_loan_book_tracker_* tables are
+-- partitioned by date_key. Every WHERE clause below filters on date_key
+-- directly (not on a derived expression like date(try_cast(disbursement_ts
+-- AS timestamp)), which the engine can't use for partition elimination) --
+-- otherwise even a tiny disbursement_fid/customer_msisdn IN-list lookup
+-- would still force a scan across every partition in a ~120M-row table.
+-- date_key bounds are computed as constant expressions (date_add/
+-- date_format applied to the literal anchor, not to the column itself), so
+-- they fold to a plain range comparison against the raw partition column
+-- and still prune correctly.
+--
+-- STEP 1's anchor is 2026-04-30 -- deliberately earlier than
+-- borrower_history.txt/loan_summary_query.txt's current snapshot_dt
+-- (2026-07-31), not tied to it, so both sample buckets sit comfortably
+-- away from the edges of whatever's actually loaded (the old bucket
+-- doesn't risk landing before the data starts; the recent bucket doesn't
+-- depend on rows disbursed in the last couple of days before the live
+-- cutoff, which may be sparser or still trickling in). Change the anchor
+-- literal to try a different date; it doesn't need to match the production
+-- files' snapshot_dt. If STEP 1 comes back empty, that's a sign the anchor
+-- sits outside the real data range -- rerun
 -- `SELECT MIN(disbursement_ts), MAX(disbursement_ts) FROM
--- analytics.momo_loan_book_tracker_disbursements_daily` first and anchor
--- to whatever that actually returns.
+-- analytics.momo_loan_book_tracker_disbursements_daily` and re-anchor.
 --
 -- What this checks that the aggregate GATE-style validation queries don't:
 -- whether the repayment-attribution heuristic and the derived cure-timing
@@ -50,17 +52,10 @@
 
 -- STEP 1: a small, mixed sample -- 3 older (mature/fully-resolved) loans
 -- and 3 very recent (immature) loans, so you can eyeball both a completed
--- cure-timing outcome and a still-open one. Both buckets are DATE-BOUNDED
--- (not a bare ORDER BY ... LIMIT over the full 120M-row table) for two
--- reasons: (1) cost/performance -- an unbounded ORDER BY needs the engine
--- to consider the entire table to find the true min/max, which is not
--- cheap; a date bound prunes that scan (and, if these tables are date-
--- partitioned, prunes partitions outright); (2) meaningfulness -- the
--- literal oldest/newest rows ever recorded aren't necessarily "a clearly
--- mature loan" vs "a clearly immature loan," just whatever extremes happen
--- to exist. Bounding to "60-200 days before snapshot_dt" guarantees the
--- old bucket is well past the 48h penalty window; "within 2 days of
--- snapshot_dt" guarantees the recent bucket is still immature.
+-- cure-timing outcome and a still-open one. Bounding to "60-200 days before
+-- the anchor" guarantees the old bucket is well past the 48h penalty
+-- window; "within 2 days of the anchor" guarantees the recent bucket is
+-- still immature.
 -- Record the disbursement_fid / customer_msisdn values returned here --
 -- Athena/Trino has no cross-statement variables, so substitute them by
 -- hand into :sample_fids / :sample_msisdns in steps 2-4 below (same manual
@@ -71,7 +66,8 @@ FROM analytics.momo_loan_book_tracker_disbursements_daily
 WHERE try_cast(disbursement_ts AS timestamp) IS NOT NULL
 AND disbursement_fid IS NOT NULL
 AND customer_msisdn IS NOT NULL
-AND date(try_cast(disbursement_ts AS timestamp)) BETWEEN date_add('day', -200, date '2026-04-30') AND date_add('day', -60, date '2026-04-30')
+AND date_key BETWEEN cast(date_format(date_add('day', -200, date '2026-04-30'), '%Y%m%d') AS bigint)
+AND cast(date_format(date_add('day', -60, date '2026-04-30'), '%Y%m%d') AS bigint)
 ORDER BY disbursement_ts ASC
 LIMIT 3
 ),
@@ -81,7 +77,8 @@ FROM analytics.momo_loan_book_tracker_disbursements_daily
 WHERE try_cast(disbursement_ts AS timestamp) IS NOT NULL
 AND disbursement_fid IS NOT NULL
 AND customer_msisdn IS NOT NULL
-AND date(try_cast(disbursement_ts AS timestamp)) BETWEEN date_add('day', -2, date '2026-04-30') AND date '2026-04-30'
+AND date_key BETWEEN cast(date_format(date_add('day', -2, date '2026-04-30'), '%Y%m%d') AS bigint)
+AND cast(date_format(date '2026-04-30', '%Y%m%d') AS bigint)
 ORDER BY disbursement_ts DESC
 LIMIT 3
 )
@@ -92,21 +89,30 @@ SELECT 'recent' AS bucket, * FROM sample_recent;
 
 
 -- STEP 2: the disbursement rows themselves, for reference while eyeballing
--- steps 3-4. Substitute the disbursement_fid values from STEP 1.
+-- steps 3-4. Substitute the disbursement_fid values from STEP 1. The
+-- date_key bound here is the same combined range STEP 1 searched across
+-- (covers both buckets) -- these rows came from that same table/range, so
+-- it's a safe, still-pruning bound, not just the IN-list on its own.
 SELECT disbursement_fid, customer_msisdn, disbursement_ts, disbursement_amount_ugx, inserted_ts
 FROM analytics.momo_loan_book_tracker_disbursements_daily
 WHERE disbursement_fid IN (:sample_fids)
+AND date_key BETWEEN cast(date_format(date_add('day', -200, date '2026-04-30'), '%Y%m%d') AS bigint)
+AND cast(date_format(date '2026-04-30', '%Y%m%d') AS bigint)
 ORDER BY disbursement_ts;
 -- RESULT:
 
 
 -- STEP 3: every repayment for those SAME msisdns (not just matching
 -- disbursement_fid -- repayments carry no loan key at all, which is exactly
--- why the attribution heuristic exists). Scoped to a tiny msisdn IN-list
--- picked in STEP 1, so this stays cheap despite repayments_daily being huge.
+-- why the attribution heuristic exists). The date_key bound covers from
+-- the old bucket's earliest possible disbursement through the anchor date,
+-- so it catches any repayment against a sampled loan without scanning
+-- unrelated partitions.
 SELECT repayment_fid, customer_msisdn, repayment_ts, repayment_amount_ugx, inserted_ts
 FROM analytics.momo_loan_book_tracker_repayments_daily
 WHERE customer_msisdn IN (:sample_msisdns)
+AND date_key BETWEEN cast(date_format(date_add('day', -200, date '2026-04-30'), '%Y%m%d') AS bigint)
+AND cast(date_format(date '2026-04-30', '%Y%m%d') AS bigint)
 ORDER BY customer_msisdn, repayment_ts;
 -- RESULT:
 -- EYEBALL: for a msisdn with only ONE disbursement in your sample, every
@@ -126,12 +132,17 @@ ORDER BY customer_msisdn, repayment_ts;
 
 -- STEP 4: loan_state_daily's latest snapshot for those disbursement_fids --
 -- the authoritative status/lifetime totals to compare STEP 3's manual
--- running total against.
+-- running total against. Same combined date_key bound as steps 2-3 --
+-- loan_state_daily is itself a daily-snapshot table, so this also limits
+-- how many per-day rows come back per loan before ORDER BY picks the
+-- latest one.
 SELECT disbursement_fid, date_key, loan_status, aging_bucket, days_aging,
 lifetime_disbursed_ugx, lifetime_repaid_ugx, lifetime_gross_repaid_ugx,
 interest_and_penalty_ugx, is_anomaly_open
 FROM analytics.momo_loan_book_tracker_loan_state_daily
 WHERE disbursement_fid IN (:sample_fids)
+AND date_key BETWEEN cast(date_format(date_add('day', -200, date '2026-04-30'), '%Y%m%d') AS bigint)
+AND cast(date_format(date '2026-04-30', '%Y%m%d') AS bigint)
 ORDER BY disbursement_fid, date_key DESC;
 -- RESULT:
 -- EYEBALL: lifetime_repaid_ugx here should track (not necessarily equal --
