@@ -277,7 +277,23 @@ SELECT * FROM classified
 -- loan_state_snapshot fresh (cheap, 2 window functions -- not worth a
 -- third physical table) but reads classified from the checkpoint table
 -- instead of re-deriving the UNION/exclusion logic.
-WITH loan_state_loads_dedup AS (
+--
+-- snapshots is redefined here too -- it's a plain literal-valued CTE (no
+-- table scan), but it was only defined once, in checkpoint 0's own WITH
+-- clause, and checkpoint 1 is now a separate SQL statement that can't see
+-- it. Without this redefinition, every `(SELECT ... FROM snapshots)`
+-- reference below (loan_state_loads_dedup's date_key/inserted_ts bounds,
+-- and the on_time/default flags further down that compare against
+-- snapshot_ts) resolves `snapshots` as an unqualified table lookup instead
+-- of a CTE, which fails with "Schema must be specified when session schema
+-- is not set" the moment no default session schema is configured.
+WITH snapshots AS (
+SELECT
+cast(20260731 AS bigint) AS snapshot_dt,
+cast('2026-08-20 00:00:00.000' AS timestamp) AS as_of_load_ts,
+cast('2026-08-20 00:00:00.000' AS timestamp) AS snapshot_ts
+),
+loan_state_loads_dedup AS (
 -- loan_state_daily is a daily snapshot; dedup re-ingested rows for the
 -- same (disbursement_fid, date_key) before picking the as-of snapshot.
 SELECT *

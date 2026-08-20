@@ -153,20 +153,27 @@ def main() -> None:
     # result without necessarily looking wrong.
     #
     # Fail closed: if borrower_history.txt's snapshots CTE has changed shape
-    # such that a parameter is missing, or duplicated (e.g. a second CTE
-    # elsewhere in the file coincidentally matches the pattern), silently
-    # picking one match via a dict comprehension would let a wrong or stale
-    # value flow into a runnable CREATE TABLE/VIEW statement with no warning
-    # that anything went wrong. Refuse to emit SQL at all in that case instead.
+    # such that a parameter is missing, or the file's copies of it disagree
+    # (e.g. one got hand-edited and the others didn't), silently picking one
+    # match via a dict comprehension would let a wrong or stale value flow
+    # into a runnable CREATE TABLE/VIEW statement with no warning that
+    # anything went wrong. Refuse to emit SQL at all in that case instead.
+    #
+    # NOTE: the snapshots CTE is legitimately redefined twice in this file --
+    # once in checkpoint 0's own WITH clause, and again at the start of
+    # checkpoint 1's remainder, since checkpoint 1 is a separate SQL
+    # statement that can't see checkpoint 0's CTEs. So each param is expected
+    # to match at least once and every match must agree, not "exactly one
+    # match total".
     matches = _SNAPSHOT_PARAM.findall(body)
     counts: dict[str, list[str]] = {"snapshot_dt": [], "as_of_load_ts": [], "snapshot_ts": []}
     for value, name in matches:
         counts[name].append(value)
 
     errors = [
-        f"  {name}: found {len(values)} matches ({values!r}), expected exactly 1"
+        f"  {name}: found {len(values)} matches ({values!r}), expected at least 1 and all equal"
         for name, values in counts.items()
-        if len(values) != 1
+        if len(values) == 0 or len(set(values)) != 1
     ]
     if errors:
         sys.exit(
@@ -175,8 +182,8 @@ def main() -> None:
             "refusing to generate SQL against a mismatched or guessed cutoff.\n"
             + "\n".join(errors)
             + "\nEither the snapshots CTE has changed shape (update "
-            "_SNAPSHOT_PARAM in this script) or a duplicate/ambiguous match "
-            "exists elsewhere in the file."
+            "_SNAPSHOT_PARAM in this script) or its redefinitions have drifted "
+            "out of sync with each other."
         )
     params = {name: values[0] for name, values in counts.items()}
 
