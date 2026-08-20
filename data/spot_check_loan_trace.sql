@@ -5,6 +5,13 @@
 -- trace each one by hand through repayments_daily and loan_state_daily,
 -- instead of running a full validation suite over the whole table set.
 --
+-- Steps 2-4's date_key upper bound extends 7 days PAST the anchor date, not
+-- just up to it -- a loan disbursed on the anchor date itself (the recent
+-- bucket's edge case) has its 24h/48h penalty checkpoints falling on the
+-- day(s) after the anchor. A cutoff capped exactly at the anchor would
+-- silently miss any repayment/state update after that point, making a
+-- loan look defaulted when the query just never looked far enough forward.
+--
 -- PARTITION PRUNING: all three momo_loan_book_tracker_* tables are
 -- partitioned by date_key. Every WHERE clause below filters on date_key
 -- directly (not on a derived expression like date(try_cast(disbursement_ts
@@ -97,22 +104,25 @@ SELECT disbursement_fid, customer_msisdn, disbursement_ts, disbursement_amount_u
 FROM analytics.momo_loan_book_tracker_disbursements_daily
 WHERE disbursement_fid IN (:sample_fids)
 AND date_key BETWEEN cast(date_format(date_add('day', -200, date '2026-04-30'), '%Y%m%d') AS bigint)
-AND cast(date_format(date '2026-04-30', '%Y%m%d') AS bigint)
+AND cast(date_format(date_add('day', 7, date '2026-04-30'), '%Y%m%d') AS bigint)
 ORDER BY disbursement_ts;
 -- RESULT:
 
 
 -- STEP 3: every repayment for those SAME msisdns (not just matching
 -- disbursement_fid -- repayments carry no loan key at all, which is exactly
--- why the attribution heuristic exists). The date_key bound covers from
--- the old bucket's earliest possible disbursement through the anchor date,
--- so it catches any repayment against a sampled loan without scanning
--- unrelated partitions.
+-- why the attribution heuristic exists). The date_key bound's LOWER end
+-- covers the old bucket's earliest possible disbursement; the UPPER end
+-- extends 7 days PAST the anchor, not just up to it -- a loan disbursed on
+-- the anchor date itself (the recent bucket's edge case) has its 24h/48h
+-- penalty checkpoints falling on the day(s) AFTER the anchor, and a repayment
+-- cutoff capped exactly at the anchor would silently miss those, making a
+-- loan look defaulted when the query just never looked far enough forward.
 SELECT repayment_fid, customer_msisdn, repayment_ts, repayment_amount_ugx, inserted_ts
 FROM analytics.momo_loan_book_tracker_repayments_daily
 WHERE customer_msisdn IN (:sample_msisdns)
 AND date_key BETWEEN cast(date_format(date_add('day', -200, date '2026-04-30'), '%Y%m%d') AS bigint)
-AND cast(date_format(date '2026-04-30', '%Y%m%d') AS bigint)
+AND cast(date_format(date_add('day', 7, date '2026-04-30'), '%Y%m%d') AS bigint)
 ORDER BY customer_msisdn, repayment_ts;
 -- RESULT:
 -- EYEBALL: for a msisdn with only ONE disbursement in your sample, every
@@ -142,7 +152,7 @@ interest_and_penalty_ugx, is_anomaly_open
 FROM analytics.momo_loan_book_tracker_loan_state_daily
 WHERE disbursement_fid IN (:sample_fids)
 AND date_key BETWEEN cast(date_format(date_add('day', -200, date '2026-04-30'), '%Y%m%d') AS bigint)
-AND cast(date_format(date '2026-04-30', '%Y%m%d') AS bigint)
+AND cast(date_format(date_add('day', 7, date '2026-04-30'), '%Y%m%d') AS bigint)
 ORDER BY disbursement_fid, date_key DESC;
 -- RESULT:
 -- EYEBALL: lifetime_repaid_ugx here should track (not necessarily equal --
