@@ -81,6 +81,7 @@ regexp_replace(trim(cast(customer_msisdn as varchar)), '[^0-9]', '') as msisdn
 from analytics.momo_loan_book_tracker_disbursements_daily
 where try_cast(disbursement_ts as timestamp) is not null
 and customer_msisdn is not null
+and date_key <= (select snapshot_dt from snapshots)
 and date(try_cast(disbursement_ts as timestamp)) <= date_parse(cast((select snapshot_dt from snapshots) as varchar), '%Y%m%d')
 and inserted_ts <= (select as_of_load_ts from snapshots)
 ) b0
@@ -102,6 +103,18 @@ try_cast(date_format(date_add('day', -180, date_parse(cast(b.snapshot_dt as varc
 from base b
 ),
 -- ── Begin: per-loan dedup + cure-timing pipeline (mirrors borrower_history.txt) ──
+-- date_key <= snapshot_dt in disb_raw/repay_raw below is a PARTITION filter
+-- (these tables are partitioned by date_key, confirmed directly against
+-- the warehouse) -- without it, every query here scans every partition
+-- regardless of how selective the other predicates are. Kept alongside the
+-- existing date(event_ts) business-date filter, not instead of it: this
+-- assumes date_key tracks the event's own calendar date closely enough to
+-- use as a safe upper bound, mirroring the same addition made to
+-- borrower_history.txt. If date_key ever represents something else (e.g.
+-- load/batch date rather than event date), this bound could wrongly
+-- exclude in-scope rows -- spot-check with data/spot_check_loan_trace.sql
+-- before trusting this filter in production if that assumption hasn't been
+-- confirmed.
 disb_raw as (
 select
 disbursement_fid,
@@ -113,6 +126,7 @@ from analytics.momo_loan_book_tracker_disbursements_daily
 where try_cast(disbursement_ts as timestamp) is not null
 and disbursement_fid is not null
 and customer_msisdn is not null
+and date_key <= (select snapshot_dt from snapshots)
 and date(try_cast(disbursement_ts as timestamp)) <= date_parse(cast((select snapshot_dt from snapshots) as varchar), '%Y%m%d')
 and inserted_ts <= (select as_of_load_ts from snapshots)
 ),
@@ -151,6 +165,7 @@ from analytics.momo_loan_book_tracker_repayments_daily
 where try_cast(repayment_ts as timestamp) is not null
 and repayment_fid is not null
 and customer_msisdn is not null
+and date_key <= (select snapshot_dt from snapshots)
 and date(try_cast(repayment_ts as timestamp)) <= date_parse(cast((select snapshot_dt from snapshots) as varchar), '%Y%m%d')
 and inserted_ts <= (select as_of_load_ts from snapshots)
 ),

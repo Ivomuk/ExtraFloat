@@ -91,6 +91,17 @@ cast('2026-08-20 00:00:00.000' AS timestamp) AS snapshot_ts
 -- with the source system owner; if event timestamps can be corrected, this
 -- ordering needs to be revisited deliberately, not assumed.
 disb_raw AS (
+-- date_key <= snapshot_dt is a PARTITION filter (this table is partitioned
+-- by date_key, confirmed directly against the warehouse) -- without it,
+-- every query here scans every partition regardless of how selective the
+-- other predicates are. Kept alongside the existing date(disbursement_ts)
+-- business-date filter, not instead of it: this assumes date_key tracks
+-- disbursement_ts's own calendar date closely enough to use as a safe
+-- upper bound, mirroring how loan_state_loads_dedup below has always used
+-- date_key. If date_key ever represents something else (e.g. load/batch
+-- date rather than event date), this bound could wrongly exclude in-scope
+-- rows -- spot-check with data/spot_check_loan_trace.sql before trusting
+-- this filter in production if that assumption hasn't been confirmed.
 SELECT
 disbursement_fid,
 regexp_replace(trim(cast(customer_msisdn AS varchar)), '[^0-9]', '') AS phonenumber,
@@ -101,6 +112,7 @@ FROM analytics.momo_loan_book_tracker_disbursements_daily
 WHERE try_cast(disbursement_ts AS timestamp) IS NOT NULL
 AND disbursement_fid IS NOT NULL
 AND customer_msisdn IS NOT NULL
+AND date_key <= (SELECT snapshot_dt FROM snapshots)
 AND date(try_cast(disbursement_ts AS timestamp)) <= date_parse(cast((SELECT snapshot_dt FROM snapshots) AS varchar), '%Y%m%d')
 AND inserted_ts <= (SELECT as_of_load_ts FROM snapshots)
 ),
@@ -130,6 +142,8 @@ PARTITION BY phonenumber ORDER BY event_ts, disbursement_fid
 FROM disb_dedup
 ),
 repay_raw AS (
+-- date_key <= snapshot_dt: same partition-pruning rationale/assumption as
+-- disb_raw above.
 SELECT
 repayment_fid,
 regexp_replace(trim(cast(customer_msisdn AS varchar)), '[^0-9]', '') AS phonenumber,
@@ -140,6 +154,7 @@ FROM analytics.momo_loan_book_tracker_repayments_daily
 WHERE try_cast(repayment_ts AS timestamp) IS NOT NULL
 AND repayment_fid IS NOT NULL
 AND customer_msisdn IS NOT NULL
+AND date_key <= (SELECT snapshot_dt FROM snapshots)
 AND date(try_cast(repayment_ts AS timestamp)) <= date_parse(cast((SELECT snapshot_dt FROM snapshots) AS varchar), '%Y%m%d')
 AND inserted_ts <= (SELECT as_of_load_ts FROM snapshots)
 ),
