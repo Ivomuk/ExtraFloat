@@ -8,6 +8,11 @@
 -- picked in STEP 1 -- nothing here does a full-table join, so this is cheap
 -- enough to run interactively even against the 120M-row source tables.
 --
+-- STEP 1's date bounds are anchored to 2026-07-31 -- the same snapshot_dt
+-- literal currently used in borrower_history.txt and loan_summary_query.txt.
+-- Update it here too if those files' snapshot_dt ever changes, so the
+-- sample stays anchored to the same cutoff the production queries use.
+--
 -- What this checks that the aggregate GATE-style validation queries don't:
 -- whether the repayment-attribution heuristic and the derived cure-timing
 -- (used by both borrower_history.txt's on_time/default flags and
@@ -29,12 +34,22 @@
 --      loan you'd expect, or does it look ambiguous/wrong?
 -- ============================================================================
 
--- STEP 1: a small, mixed sample -- 3 older (likely-mature/fully-resolved)
--- loans and 3 very recent (likely-immature) loans, so you can eyeball both
--- a completed cure-timing outcome and a still-open one. Record the
--- disbursement_fid / customer_msisdn values returned here -- Athena/Trino
--- has no cross-statement variables, so substitute them by hand into
--- :sample_fids / :sample_msisdns in steps 2-4 below (same manual
+-- STEP 1: a small, mixed sample -- 3 older (mature/fully-resolved) loans
+-- and 3 very recent (immature) loans, so you can eyeball both a completed
+-- cure-timing outcome and a still-open one. Both buckets are DATE-BOUNDED
+-- (not a bare ORDER BY ... LIMIT over the full 120M-row table) for two
+-- reasons: (1) cost/performance -- an unbounded ORDER BY needs the engine
+-- to consider the entire table to find the true min/max, which is not
+-- cheap; a date bound prunes that scan (and, if these tables are date-
+-- partitioned, prunes partitions outright); (2) meaningfulness -- the
+-- literal oldest/newest rows ever recorded aren't necessarily "a clearly
+-- mature loan" vs "a clearly immature loan," just whatever extremes happen
+-- to exist. Bounding to "60-200 days before snapshot_dt" guarantees the
+-- old bucket is well past the 48h penalty window; "within 2 days of
+-- snapshot_dt" guarantees the recent bucket is still immature.
+-- Record the disbursement_fid / customer_msisdn values returned here --
+-- Athena/Trino has no cross-statement variables, so substitute them by
+-- hand into :sample_fids / :sample_msisdns in steps 2-4 below (same manual
 -- substitution pattern as :snapshot_dt elsewhere in this project).
 WITH sample_old AS (
 SELECT disbursement_fid, customer_msisdn, disbursement_ts, disbursement_amount_ugx
@@ -42,6 +57,7 @@ FROM analytics.momo_loan_book_tracker_disbursements_daily
 WHERE try_cast(disbursement_ts AS timestamp) IS NOT NULL
 AND disbursement_fid IS NOT NULL
 AND customer_msisdn IS NOT NULL
+AND date(try_cast(disbursement_ts AS timestamp)) BETWEEN date_add('day', -200, date '2026-07-31') AND date_add('day', -60, date '2026-07-31')
 ORDER BY disbursement_ts ASC
 LIMIT 3
 ),
@@ -51,6 +67,7 @@ FROM analytics.momo_loan_book_tracker_disbursements_daily
 WHERE try_cast(disbursement_ts AS timestamp) IS NOT NULL
 AND disbursement_fid IS NOT NULL
 AND customer_msisdn IS NOT NULL
+AND date(try_cast(disbursement_ts AS timestamp)) BETWEEN date_add('day', -2, date '2026-07-31') AND date '2026-07-31'
 ORDER BY disbursement_ts DESC
 LIMIT 3
 )
