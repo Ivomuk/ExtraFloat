@@ -16,6 +16,16 @@
 -- capped exactly at the anchor would silently miss those, making a loan
 -- look defaulted when the query just never looked far enough forward.
 --
+-- SERVICE SCOPING: all three momo_loan_book_tracker_* tables carry activity
+-- from OTHER MoMo services too, not just XtraFloat agent lending, confirmed
+-- directly against the warehouse. Every WHERE clause below also filters
+-- ova = 'XTRAFLOAT-AGENT' -- without it, disbursement/repayment/loan-state
+-- rows from unrelated services leak into the trace for any msisdn that also
+-- uses those other services, which is what first surfaced as several
+-- apparent anomalies here (a repayment_fid appearing to cover multiple
+-- unrelated amounts, a loan_state_daily lifetime_disbursed_ugx not matching
+-- disbursements_daily's own amount for the same disbursement_fid).
+--
 -- PARTITION PRUNING: all three momo_loan_book_tracker_* tables are
 -- partitioned by date_key. Every WHERE clause below filters on date_key
 -- directly (not on a derived expression like date(try_cast(disbursement_ts
@@ -76,6 +86,7 @@ SELECT disbursement_fid, customer_msisdn, disbursement_ts, disbursement_amount_u
 FROM analytics.momo_loan_book_tracker_disbursements_daily
 WHERE date_key BETWEEN cast(date_format(date_add('day', -20, date '2026-04-30'), '%Y%m%d') AS bigint)
 AND cast(date_format(date_add('day', -10, date '2026-04-30'), '%Y%m%d') AS bigint)
+AND ova = 'XTRAFLOAT-AGENT'
 AND try_cast(disbursement_ts AS timestamp) IS NOT NULL
 AND disbursement_fid IS NOT NULL
 AND customer_msisdn IS NOT NULL
@@ -87,6 +98,7 @@ SELECT disbursement_fid, customer_msisdn, disbursement_ts, disbursement_amount_u
 FROM analytics.momo_loan_book_tracker_disbursements_daily
 WHERE date_key BETWEEN cast(date_format(date_add('day', -2, date '2026-04-30'), '%Y%m%d') AS bigint)
 AND cast(date_format(date '2026-04-30', '%Y%m%d') AS bigint)
+AND ova = 'XTRAFLOAT-AGENT'
 AND try_cast(disbursement_ts AS timestamp) IS NOT NULL
 AND disbursement_fid IS NOT NULL
 AND customer_msisdn IS NOT NULL
@@ -108,6 +120,7 @@ SELECT disbursement_fid, customer_msisdn, disbursement_ts, disbursement_amount_u
 FROM analytics.momo_loan_book_tracker_disbursements_daily
 WHERE date_key BETWEEN cast(date_format(date_add('day', -20, date '2026-04-30'), '%Y%m%d') AS bigint)
 AND cast(date_format(date_add('day', 7, date '2026-04-30'), '%Y%m%d') AS bigint)
+AND ova = 'XTRAFLOAT-AGENT'
 AND disbursement_fid IN (:sample_fids)
 ORDER BY disbursement_ts;
 -- RESULT:
@@ -121,6 +134,7 @@ SELECT repayment_fid, customer_msisdn, repayment_ts, repayment_amount_ugx, inser
 FROM analytics.momo_loan_book_tracker_repayments_daily
 WHERE date_key BETWEEN cast(date_format(date_add('day', -20, date '2026-04-30'), '%Y%m%d') AS bigint)
 AND cast(date_format(date_add('day', 7, date '2026-04-30'), '%Y%m%d') AS bigint)
+AND ova = 'XTRAFLOAT-AGENT'
 AND customer_msisdn IN (:sample_msisdns)
 ORDER BY customer_msisdn, repayment_ts;
 -- RESULT:
@@ -151,6 +165,7 @@ interest_and_penalty_ugx, is_anomaly_open
 FROM analytics.momo_loan_book_tracker_loan_state_daily
 WHERE date_key BETWEEN cast(date_format(date_add('day', -20, date '2026-04-30'), '%Y%m%d') AS bigint)
 AND cast(date_format(date_add('day', 7, date '2026-04-30'), '%Y%m%d') AS bigint)
+AND ova = 'XTRAFLOAT-AGENT'
 AND disbursement_fid IN (:sample_fids)
 ORDER BY disbursement_fid, date_key DESC;
 -- RESULT:

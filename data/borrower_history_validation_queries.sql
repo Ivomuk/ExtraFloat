@@ -68,7 +68,9 @@
 -- ============================================================================
 -- Mirrors borrower_history.txt's disb_raw -> disb_dedup -> disb_windows,
 -- repay_raw -> repay_dedup, and loan_state_loads_dedup -> loan_state_snapshot
--- -> loan_state_anomalies chain exactly: same casts, same filters, same
+-- -> loan_state_anomalies chain exactly: same casts, same filters (including
+-- ova = 'XTRAFLOAT-AGENT' -- all three momo_loan_book_tracker_* tables carry
+-- other MoMo services' activity too, confirmed against the warehouse), same
 -- dedup ORDER BY, same as_of_load_ts freeze. If you change
 -- borrower_history.txt's dedup/window/anomaly logic, update these views to
 -- match -- this is the only place that logic should exist in this file.
@@ -94,7 +96,8 @@ cast(disbursement_amount_ugx AS double) AS disbursed_amount,
 disbursement_external_id,
 inserted_ts
 FROM analytics.momo_loan_book_tracker_disbursements_daily
-WHERE try_cast(disbursement_ts AS timestamp) IS NOT NULL
+WHERE ova = 'XTRAFLOAT-AGENT'
+AND try_cast(disbursement_ts AS timestamp) IS NOT NULL
 AND disbursement_fid IS NOT NULL
 AND customer_msisdn IS NOT NULL
 AND date_key <= :snapshot_dt
@@ -131,7 +134,8 @@ try_cast(repayment_ts AS timestamp) AS repayment_ts,
 cast(repayment_amount_ugx AS double) AS repayment_amount,
 inserted_ts
 FROM analytics.momo_loan_book_tracker_repayments_daily
-WHERE try_cast(repayment_ts AS timestamp) IS NOT NULL
+WHERE ova = 'XTRAFLOAT-AGENT'
+AND try_cast(repayment_ts AS timestamp) IS NOT NULL
 AND repayment_fid IS NOT NULL
 AND customer_msisdn IS NOT NULL
 AND date_key <= :snapshot_dt
@@ -162,7 +166,8 @@ PARTITION BY disbursement_fid, date_key
 ORDER BY inserted_ts DESC
 ) rn
 FROM analytics.momo_loan_book_tracker_loan_state_daily lsd
-WHERE disbursement_fid IS NOT NULL
+WHERE ova = 'XTRAFLOAT-AGENT'
+AND disbursement_fid IS NOT NULL
 AND date_key <= :snapshot_dt
 AND inserted_ts <= :as_of_load_ts
 )
@@ -1073,12 +1078,14 @@ SELECT 'disbursements_daily' AS source_table, COUNT(*) AS keys_with_tie
 FROM (
 SELECT disbursement_fid
 FROM analytics.momo_loan_book_tracker_disbursements_daily d
-WHERE d.date_key <= :snapshot_dt
+WHERE d.ova = 'XTRAFLOAT-AGENT'
+AND d.date_key <= :snapshot_dt
 AND date(try_cast(disbursement_ts AS timestamp)) <= date_parse(cast(:snapshot_dt AS varchar), '%Y%m%d')
 AND inserted_ts <= :as_of_load_ts
 AND inserted_ts = (
 SELECT MAX(inserted_ts) FROM analytics.momo_loan_book_tracker_disbursements_daily d2
 WHERE d2.disbursement_fid = d.disbursement_fid
+AND d2.ova = 'XTRAFLOAT-AGENT'
 AND d2.date_key <= :snapshot_dt
 AND date(try_cast(d2.disbursement_ts AS timestamp)) <= date_parse(cast(:snapshot_dt AS varchar), '%Y%m%d')
 AND d2.inserted_ts <= :as_of_load_ts
@@ -1091,12 +1098,14 @@ SELECT 'repayments_daily', COUNT(*)
 FROM (
 SELECT repayment_fid
 FROM analytics.momo_loan_book_tracker_repayments_daily r
-WHERE r.date_key <= :snapshot_dt
+WHERE r.ova = 'XTRAFLOAT-AGENT'
+AND r.date_key <= :snapshot_dt
 AND date(try_cast(repayment_ts AS timestamp)) <= date_parse(cast(:snapshot_dt AS varchar), '%Y%m%d')
 AND inserted_ts <= :as_of_load_ts
 AND inserted_ts = (
 SELECT MAX(inserted_ts) FROM analytics.momo_loan_book_tracker_repayments_daily r2
 WHERE r2.repayment_fid = r.repayment_fid
+AND r2.ova = 'XTRAFLOAT-AGENT'
 AND r2.date_key <= :snapshot_dt
 AND date(try_cast(r2.repayment_ts AS timestamp)) <= date_parse(cast(:snapshot_dt AS varchar), '%Y%m%d')
 AND r2.inserted_ts <= :as_of_load_ts
@@ -1109,11 +1118,13 @@ SELECT 'loan_state_daily (per disbursement_fid, date_key)', COUNT(*)
 FROM (
 SELECT disbursement_fid, date_key
 FROM analytics.momo_loan_book_tracker_loan_state_daily l
-WHERE date_key <= :snapshot_dt
+WHERE l.ova = 'XTRAFLOAT-AGENT'
+AND date_key <= :snapshot_dt
 AND inserted_ts <= :as_of_load_ts
 AND inserted_ts = (
 SELECT MAX(inserted_ts) FROM analytics.momo_loan_book_tracker_loan_state_daily l2
 WHERE l2.disbursement_fid = l.disbursement_fid AND l2.date_key = l.date_key
+AND l2.ova = 'XTRAFLOAT-AGENT'
 AND l2.date_key <= :snapshot_dt
 AND l2.inserted_ts <= :as_of_load_ts
 )

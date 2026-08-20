@@ -91,6 +91,16 @@ cast('2026-08-20 00:00:00.000' AS timestamp) AS snapshot_ts
 -- with the source system owner; if event timestamps can be corrected, this
 -- ordering needs to be revisited deliberately, not assumed.
 disb_raw AS (
+-- ova = 'XTRAFLOAT-AGENT' -- all three momo_loan_book_tracker_* tables
+-- carry activity from OTHER MoMo services too, not just XtraFloat agent
+-- lending, confirmed directly against the warehouse. Without this filter,
+-- disbursements/repayments/loan-state rows from unrelated services leak in
+-- for any msisdn that also uses those other services -- this was traced
+-- back as the likely explanation for several apparent anomalies found via
+-- data/spot_check_loan_trace.sql (a repayment_fid appearing to cover
+-- multiple unrelated amounts, a loan_state_daily lifetime_disbursed_ugx
+-- that didn't match disbursements_daily's own disbursement_amount_ugx for
+-- the same disbursement_fid). Applied to all three tables' raw CTEs below.
 -- date_key <= snapshot_dt is a PARTITION filter (this table is partitioned
 -- by date_key, confirmed directly against the warehouse) -- without it,
 -- every query here scans every partition regardless of how selective the
@@ -109,7 +119,8 @@ try_cast(disbursement_ts AS timestamp) AS event_ts,
 cast(disbursement_amount_ugx AS double) AS raw_amount,
 inserted_ts
 FROM analytics.momo_loan_book_tracker_disbursements_daily
-WHERE try_cast(disbursement_ts AS timestamp) IS NOT NULL
+WHERE ova = 'XTRAFLOAT-AGENT'
+AND try_cast(disbursement_ts AS timestamp) IS NOT NULL
 AND disbursement_fid IS NOT NULL
 AND customer_msisdn IS NOT NULL
 AND date_key <= (SELECT snapshot_dt FROM snapshots)
@@ -151,7 +162,8 @@ try_cast(repayment_ts AS timestamp) AS event_ts,
 cast(repayment_amount_ugx AS double) AS raw_amount,
 inserted_ts
 FROM analytics.momo_loan_book_tracker_repayments_daily
-WHERE try_cast(repayment_ts AS timestamp) IS NOT NULL
+WHERE ova = 'XTRAFLOAT-AGENT'
+AND try_cast(repayment_ts AS timestamp) IS NOT NULL
 AND repayment_fid IS NOT NULL
 AND customer_msisdn IS NOT NULL
 AND date_key <= (SELECT snapshot_dt FROM snapshots)
@@ -196,7 +208,8 @@ PARTITION BY disbursement_fid, date_key
 ORDER BY inserted_ts DESC
 ) rn
 FROM analytics.momo_loan_book_tracker_loan_state_daily lsd
-WHERE disbursement_fid IS NOT NULL
+WHERE ova = 'XTRAFLOAT-AGENT'
+AND disbursement_fid IS NOT NULL
 AND date_key <= (SELECT snapshot_dt FROM snapshots)
 AND inserted_ts <= (SELECT as_of_load_ts FROM snapshots)
 )

@@ -79,7 +79,8 @@ from (
 select distinct
 regexp_replace(trim(cast(customer_msisdn as varchar)), '[^0-9]', '') as msisdn
 from analytics.momo_loan_book_tracker_disbursements_daily
-where try_cast(disbursement_ts as timestamp) is not null
+where ova = 'XTRAFLOAT-AGENT'
+and try_cast(disbursement_ts as timestamp) is not null
 and customer_msisdn is not null
 and date_key <= (select snapshot_dt from snapshots)
 and date(try_cast(disbursement_ts as timestamp)) <= date_parse(cast((select snapshot_dt from snapshots) as varchar), '%Y%m%d')
@@ -103,6 +104,14 @@ try_cast(date_format(date_add('day', -180, date_parse(cast(b.snapshot_dt as varc
 from base b
 ),
 -- ── Begin: per-loan dedup + cure-timing pipeline (mirrors borrower_history.txt) ──
+-- ova = 'XTRAFLOAT-AGENT' -- all three momo_loan_book_tracker_* tables
+-- carry activity from OTHER MoMo services too, not just XtraFloat agent
+-- lending, confirmed directly against the warehouse. Applied to base above
+-- and disb_raw/repay_raw below -- see the matching comment in
+-- borrower_history.txt for how this was traced (a repayment_fid appearing
+-- to cover multiple unrelated amounts, a loan_state_daily
+-- lifetime_disbursed_ugx not matching disbursements_daily's own amount for
+-- the same disbursement_fid).
 -- date_key <= snapshot_dt in disb_raw/repay_raw below is a PARTITION filter
 -- (these tables are partitioned by date_key, confirmed directly against
 -- the warehouse) -- without it, every query here scans every partition
@@ -123,7 +132,8 @@ try_cast(disbursement_ts as timestamp) as disbursement_ts,
 cast(disbursement_amount_ugx as double) as disbursed_amount,
 inserted_ts
 from analytics.momo_loan_book_tracker_disbursements_daily
-where try_cast(disbursement_ts as timestamp) is not null
+where ova = 'XTRAFLOAT-AGENT'
+and try_cast(disbursement_ts as timestamp) is not null
 and disbursement_fid is not null
 and customer_msisdn is not null
 and date_key <= (select snapshot_dt from snapshots)
@@ -162,7 +172,8 @@ try_cast(repayment_ts as timestamp) as repayment_ts,
 cast(repayment_amount_ugx as double) as repayment_amount,
 inserted_ts
 from analytics.momo_loan_book_tracker_repayments_daily
-where try_cast(repayment_ts as timestamp) is not null
+where ova = 'XTRAFLOAT-AGENT'
+and try_cast(repayment_ts as timestamp) is not null
 and repayment_fid is not null
 and customer_msisdn is not null
 and date_key <= (select snapshot_dt from snapshots)
