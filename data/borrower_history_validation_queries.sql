@@ -275,6 +275,20 @@ SUM(CASE WHEN o.first_loan_ts > o.latest_loan_ts THEN 1 ELSE 0 END) AS bad_first
 -- sum to exactly 1 for every borrower with qualifying loans -- same for the
 -- 26h pair. A violation means the two derivations of the same threshold
 -- (timestamp comparison vs. checkpoint FILTER) have drifted apart.
+--
+-- ROOT CAUSE CONFIRMED AND FIXED (was affecting ~23% of borrowers,
+-- 29,667/127,409, on a live run before the fix): cure_progress_base's
+-- hours_since_disbursement and loan_final's hours_to_principal_cure both
+-- divided a BIGINT date_diff('second', ...) result by the unsuffixed
+-- literal 3600.0, which Trino types as DECIMAL(5,1) -- BIGINT/DECIMAL
+-- division follows decimal-arithmetic scale-inference rules that silently
+-- truncated precision, making an elapsed time of e.g. 86,493 seconds
+-- (24.0258... true hours) compare as <= 24 (a false positive on "within
+-- 24h"). Traced live via data/24h_complement_diagnostic.sql through
+-- data/24h_decimal_division_test.sql; fixed by casting the date_diff
+-- result to DOUBLE before dividing. Re-run vw_bh_output.sql and this check
+-- after pulling the fix -- bad_24h_complement_identity should now be 0 (or
+-- very close, from other, unrelated causes) rather than ~23% of borrowers.
 SUM(CASE WHEN ABS(o.lifetime_on_time_24h_rate + o.lifetime_default_24h_rate - 1.0) > 0.001 THEN 1 ELSE 0 END) AS bad_24h_complement_identity,
 SUM(CASE WHEN ABS(o.lifetime_on_time_26h_rate + o.lifetime_default_26h_rate - 1.0) > 0.001 THEN 1 ELSE 0 END) AS bad_26h_complement_identity,
 -- for the latest loan specifically, num_prior_loans must equal total_loans - 1
