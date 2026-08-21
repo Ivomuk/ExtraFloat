@@ -557,7 +557,14 @@ lifetime_gross_repaid_ugx / NULLIF(lifetime_disbursed_ugx, 0) AS gross_repaid_ov
 lifetime_gross_repaid_ugx / NULLIF(lifetime_disbursed_ugx + interest_and_penalty_ugx, 0) AS gross_repaid_over_gross,
 (lifetime_gross_repaid_ugx - lifetime_repaid_ugx) / NULLIF(interest_and_penalty_ugx, 0) AS gross_minus_repaid_over_charge
 FROM :validation_schema.vw_bh_loan_state_snapshot
-WHERE loan_status = 'CLOSED'
+-- CLOSED and SETTLED are both real, populated terminal statuses --
+-- confirmed via a live diagnostic that both reach 100% principal repayment
+-- (median repaid_over_principal = 1 for both), unlike ANOMALY_OPEN (~26%)
+-- or OPEN (0%). An earlier version of this filter used only 'CLOSED',
+-- which zeroed out this section entirely once the source tables were
+-- refreshed to a state where SETTLED (the dominant terminal status, ~4.7x
+-- more rows than CLOSED) covers most fully-repaid loans.
+WHERE loan_status IN ('SETTLED', 'CLOSED')
 AND interest_and_penalty_ugx > 0
 )
 SELECT
@@ -833,8 +840,9 @@ FROM joined;
 -- versions of this check, per the "not as unambiguous as claimed" critique:
 --   - exactly one DEDUPED disbursement (via vw_bh_disb_dedup, not raw rows)
 --   - a matching loan_state row exists (not disbursement-only)
---   - loan_status = 'CLOSED' and interest_and_penalty_ugx > 0 (comparable
---     to Section A's population)
+--   - loan_status IN ('SETTLED', 'CLOSED') and interest_and_penalty_ugx > 0
+--     (comparable to Section A's population -- both statuses confirmed via
+--     a live diagnostic to reach 100% principal repayment)
 --   - has_pre_window_history is not true (excludes borrowers whose "only"
 --     loan in this feed may not be their only loan ever)
 --   - zero-repayment loans are reported separately, not silently dropped by
@@ -857,7 +865,8 @@ ls.interest_and_penalty_ugx
 FROM :validation_schema.vw_bh_disb_dedup d
 JOIN single_loan_borrowers slb ON slb.phonenumber = d.phonenumber
 JOIN :validation_schema.vw_bh_loan_state_snapshot ls ON ls.disbursement_fid = d.disbursement_fid
-WHERE ls.loan_status = 'CLOSED'
+-- see Section A's identical note on SETTLED vs CLOSED above
+WHERE ls.loan_status IN ('SETTLED', 'CLOSED')
 AND ls.interest_and_penalty_ugx > 0
 AND COALESCE(ls.has_pre_window_history, false) = false
 ),
