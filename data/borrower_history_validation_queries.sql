@@ -530,10 +530,27 @@ FROM :validation_schema.vw_bh_repay_dedup;
 -- ============================================================================
 -- SECTION A -- Repayment amount semantics: gross or principal-only?
 -- ============================================================================
--- Blocks cure-timing feature validity if wrong. Uses ONLY
--- vw_bh_loan_state_snapshot's own authoritative totals -- independent of
--- repayment attribution, so this is a clean check even if attribution turns
--- out to be imperfect.
+-- N/A FOR XTRAFLOAT, CONFIRMED BY THE TABLE OWNER: this section's population
+-- filter requires interest_and_penalty_ugx > 0 on a closed/settled loan, but
+-- a live diagnostic (data/interest_and_penalty_check.sql,
+-- data/expected_charge_check.sql, data/charge_fields_all_status_check.sql)
+-- found interest_and_penalty_ugx, expected_total_charge_ugx, and
+-- charge_variance_ugx are 100% NULL across EVERY loan_status value in
+-- analytics.momo_loan_book_tracker_loan_state_daily -- not just SETTLED/
+-- CLOSED, but OPEN and ANOMALY_OPEN too. The table owner confirmed these
+-- fields will be permanently blank for XtraFloat specifically (other
+-- services on the shared table presumably populate them). This section will
+-- always return n_closed_charged_loans = 0 and cannot be fixed by changing
+-- the loan_status literal or trying a different charge column -- there is
+-- no populated charge field to test against for this product. Kept in the
+-- file for documentation/history rather than deleted; do not spend further
+-- time re-diagnosing this as a bug.
+--
+-- Historical context (from before this was confirmed N/A): blocks
+-- cure-timing feature validity if wrong. Uses ONLY vw_bh_loan_state_
+-- snapshot's own authoritative totals -- independent of repayment
+-- attribution, so this would have been a clean check even if attribution
+-- turned out to be imperfect.
 --
 -- CAVEAT: this section tests what lifetime_repaid_ugx/lifetime_gross_repaid_ugx
 -- mean, NOT directly what the atomic repayment_amount_ugx field in
@@ -542,8 +559,9 @@ FROM :validation_schema.vw_bh_repay_dedup;
 -- gross cash flow into a principal-recovered component) rather than a raw sum
 -- of repayment_amount_ugx, it would read as principal-only by construction
 -- regardless of what the atomic field contains. Section B3 tests the atomic
--- field directly, on a subset where attribution is unambiguous, and is the
--- more decisive check -- treat A as corroborating context, not proof.
+-- field directly, on a subset where attribution is unambiguous, and would
+-- have been the more decisive check -- also N/A for XtraFloat, see its own
+-- comment below.
 WITH closed_charged_loans AS (
 SELECT
 disbursement_fid,
@@ -830,9 +848,24 @@ FROM joined;
 -- Use B2b (not B2a) against the acceptance thresholds -- it's the
 -- population that actually determines what ships.
 
--- B3 is a BLOCKING gate for production go/no-go, same as B2 -- a failing
--- result here means the cure-timing logic's core assumption (atomic
--- repayment amounts are principal-only) is wrong, not just "worth noting."
+-- N/A FOR XTRAFLOAT, CONFIRMED BY THE TABLE OWNER -- NOT A BLOCKING GATE:
+-- B3's eligibility filter requires interest_and_penalty_ugx > 0 (comparable
+-- to Section A's population -- see that section's comment for the full
+-- diagnostic trail). That field, and its would-be replacements
+-- (expected_total_charge_ugx, charge_variance_ugx), are confirmed 100% NULL
+-- across every loan_status in analytics.momo_loan_book_tracker_loan_state_
+-- daily for XtraFloat, permanently (table owner confirmed, not a temporary
+-- data gap). This will always return n_eligible_single_loan_closed_charged
+-- = 0 -- do not treat that as a failing result or a production blocker, and
+-- do not re-diagnose it as a bug. B2b (immediately above) is the real
+-- gating reconciliation check and is unaffected by this -- it never reads
+-- the charge fields.
+--
+-- Historical context (from before this was confirmed N/A): this was
+-- designed as a BLOCKING gate for production go/no-go, same as B2 -- a
+-- failing result would have meant the cure-timing logic's core assumption
+-- (atomic repayment amounts are principal-only) was wrong, not just "worth
+-- noting."
 --
 -- B3. Isolate amount semantics from attribution error: single-loan borrowers
 -- only, restricted to matched, closed, charged loans with no left-censoring
@@ -1226,12 +1259,19 @@ ON ls.disbursement_fid = sdr.disbursement_fid;
 --   GATE 1 column contract (1d types): ___________ (any type-family mismatches -- should be ZERO rows, latest_requestid is excluded, not exempted)
 --   GATE 1d-info latest_requestid actual_family: ___________ (record here once known; not a pass/fail check)
 --   Source data quality gate:  ____________________ (null/NaN/Inf/implausible amount counts, both sources)
---   Section A conclusion:      ____________________ (principal-only / gross / unclear)
+--   Section A conclusion:      N/A for XtraFloat -- table owner confirmed
+--                              interest_and_penalty_ugx/expected_total_
+--                              charge_ugx/charge_variance_ugx are
+--                              permanently NULL for this product (see
+--                              Section A's comment) -- not principal-only /
+--                              gross / unclear, simply untestable this way
 --   B0 negative repayment share: __________________
 --   B1 coverage (count/value): ____________________
 --   B2a reconciliation (all loans): _______________
 --   B2b reconciliation (production-surviving loans -- the gating result): ___
---   B3 conclusion:             ____________________
+--   B3 conclusion:             N/A for XtraFloat -- same permanently-NULL
+--                              charge fields as Section A (see B3's
+--                              comment) -- not a blocking-gate failure
 --   B4 same-timestamp ties:    ____________________
 --   Section C impact:          ____________________
 --   Section D pct_left_censored: __________________

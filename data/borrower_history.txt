@@ -555,6 +555,18 @@ ls.aging_bucket AS ls_aging_bucket,
 ls.days_aging AS ls_days_aging,
 ls.is_active_loan AS ls_is_active_loan,
 ls.has_pre_window_history AS ls_has_pre_window_history,
+-- KNOWN LIMITATION, CONFIRMED PERMANENT BY THE TABLE OWNER (not a data-
+-- loading gap): interest_and_penalty_ugx/expected_total_charge_ugx/
+-- charge_variance_ugx/charge_variance_pct are 100% NULL across every
+-- loan_status value in analytics.momo_loan_book_tracker_loan_state_daily
+-- for XtraFloat specifically -- confirmed via a live diagnostic
+-- (data/interest_and_penalty_check.sql, data/expected_charge_check.sql,
+-- data/charge_fields_all_status_check.sql) covering SETTLED, CLOSED, OPEN,
+-- and ANOMALY_OPEN alike. latest_interest_and_penalty_ugx/latest_expected_
+-- total_charge_ugx/latest_charge_variance_ugx/latest_charge_variance_pct
+-- in the final borrower-level output will therefore always be NULL for
+-- every row. Kept as output columns for schema consistency rather than
+-- dropped -- do not treat their nullness as a bug to fix.
 ls.interest_and_penalty_ugx AS ls_interest_and_penalty_ugx,
 ls.expected_total_charge_ugx AS ls_expected_total_charge_ugx,
 ls.charge_variance_ugx AS ls_charge_variance_ugx,
