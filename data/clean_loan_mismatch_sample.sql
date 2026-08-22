@@ -12,7 +12,11 @@
 -- Step 1: sample of clean (SETTLED, never-merged, never-anomalous)
 -- mismatched loans, a mix of over- and under-attributed.
 WITH clean_loan_state AS (
-SELECT disbursement_fid, phonenumber, loan_uid, loan_status,
+-- customer_msisdn (not phonenumber) is loan_state_daily's own raw column
+-- name -- not selected here at all since it's never used: every downstream
+-- join keys on disbursement_fid, and phonenumber for the final output
+-- comes from per_loan_attributed (via vw_bh_disb_windows) instead.
+SELECT disbursement_fid, loan_uid, loan_status,
 lifetime_disbursed_ugx, lifetime_repaid_ugx, lifetime_gross_repaid_ugx,
 disbursement_event_count, repayment_event_count
 FROM (
