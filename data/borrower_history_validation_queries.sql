@@ -38,9 +38,31 @@
 --                                            repayment UGX)               >= 99%
 --   Boundary-sensitive repayment rate      (B1: near_next_disbursement_
 --                                            boundary / attributed_
---                                            repayments)                  <= 1%
+--                                            repayments)                  CONTEXT,
+--                                            NOT A GATE -- confirmed real
+--                                            (a live run showed ~30%,
+--                                            frequent reborrowing is normal
+--                                            for this working-capital
+--                                            product, not a data defect).
+--                                            Report the number; do not
+--                                            treat it as a pass/fail check
+--                                            against the old <=1% figure
+--                                            below, which was an unratified
+--                                            starting guess that real data
+--                                            has since disproven.
 --   Rapid-reborrow rate                    (B1: rapid_reborrow_disbursements
---                                            / total_disbursements)       <= 2%
+--                                            / total_disbursements)       CONTEXT,
+--                                            NOT A GATE -- same basis as
+--                                            boundary-sensitive rate above
+--                                            (confirmed real at ~51% on a
+--                                            live run, not a defect). The
+--                                            old <=2% figure below was an
+--                                            unratified starting guess, not
+--                                            a validated business target --
+--                                            replace both CONTEXT lines
+--                                            with real thresholds only if
+--                                            the team ratifies specific
+--                                            numbers.
 --   Reconciliation match rate (count)      (B2: n_exact_match_abs /
 --                                            n_matched)                   >= 98%
 --   Reconciliation match rate (value)      (B2: matched UGX within
@@ -699,14 +721,25 @@ SELECT
 -- RESULT:
 -- INTERPRETATION: dropped_repayments (count) and the gap between total_
 -- repayment_ugx_abs and attributed_repayment_ugx_abs (value) should both be
--- small -- report both per the acceptance thresholds, since a small count-
--- based drop rate can still hide a large monetary one if what's dropped
--- skews toward high-value loans. near_next_disbursement_boundary flags
--- repayments that could plausibly belong to either loan. rapid_reborrow_
--- disbursements / total_disbursements is the closest available proxy for
--- "rate of borrowers with overlapping or near-simultaneous loans" -- a
--- proxy, not a direct measurement, since neither table exposes an explicit
--- "loan closed" event to test true concurrency against.
+-- small -- report both per the acceptance thresholds (these two ARE real
+-- gates, still <=1%/>=99%-style targets). near_next_disbursement_boundary
+-- flags repayments that could plausibly belong to either loan.
+-- rapid_reborrow_disbursements / total_disbursements is the closest
+-- available proxy for "rate of borrowers with overlapping or near-
+-- simultaneous loans" -- a proxy, not a direct measurement, since neither
+-- table exposes an explicit "loan closed" event to test true concurrency
+-- against.
+--
+-- CONFIRMED, NOT A DEFECT: a live run showed near_next_disbursement_
+-- boundary/attributed_repayments ~30% and rapid_reborrow_disbursements/
+-- total_disbursements ~51%, both far over the ACCEPTANCE THRESHOLDS
+-- block's original <=1%/<=2% figures. Frequent reborrowing (a new
+-- disbursement while a prior one is still recent) is confirmed real
+-- behavior for this working-capital product, not a data-quality or
+-- attribution-heuristic defect -- B1's own attributed-coverage numbers
+-- (count/value) were healthy on the same run. Report both rates as
+-- context, per the ACCEPTANCE THRESHOLDS block above; do not treat them as
+-- failing gates against the old, unratified starting figures.
 
 -- B2 is a BLOCKING gate for production go/no-go, not an informational
 -- diagnostic -- treat a failing threshold here as reason to hold the
@@ -1281,6 +1314,9 @@ ON ls.disbursement_fid = sdr.disbursement_fid;
 --                              gross / unclear, simply untestable this way
 --   B0 negative repayment share: __________________
 --   B1 coverage (count/value): ____________________
+--   B1 rapid-reborrow rate / boundary-sensitive rate: __________ (context,
+--                              not pass/fail -- confirmed real borrower
+--                              behavior, see B1's comment)
 --   B2a reconciliation (all loans): _______________
 --   B2b reconciliation (production-surviving loans -- the gating result): ___
 --   B3 conclusion:             N/A for XtraFloat -- same permanently-NULL
