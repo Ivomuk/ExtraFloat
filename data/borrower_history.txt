@@ -379,6 +379,14 @@ FROM loan_state_loads_dedup lsld
 WHERE rn2 = 1
 ),
 loan_core AS (
+-- Combines what used to be two separate GROUP BY requestid, phonenumber
+-- passes over {{CHECKPOINT_TABLE_0}} -- this CTE's own aggregates, plus a
+-- former standalone recovery_times CTE -- into one. Same source table,
+-- same grouping key, only the aggregate expressions differed, so scanning
+-- and shuffling it twice was pure waste. first_recovery_ts/last_recovery_ts
+-- (used by loan_final for days_to_last_recovery/hours_to_first_recovery/
+-- hours_to_last_recovery) are now columns on loan_core directly, dropping
+-- one of loan_final's four trailing LEFT JOINs.
 SELECT
 requestid,
 phonenumber,
@@ -386,14 +394,7 @@ MIN(CASE WHEN txn_type='disbursement' THEN event_ts END) AS disbursement_ts,
 SUM(CASE WHEN txn_type='disbursement' THEN amount ELSE 0 END) AS disbursed_amount,
 SUM(CASE WHEN txn_type='recovery' THEN amount ELSE 0 END) AS total_recovered,
 SUM(CASE WHEN txn_type='reimbursement' THEN amount ELSE 0 END) AS total_reimbursed,
-SUM(CASE WHEN txn_type='penalty' THEN amount ELSE 0 END) AS total_penalty
-FROM {{CHECKPOINT_TABLE_0}}
-GROUP BY requestid, phonenumber
-),
-recovery_times AS (
-SELECT
-requestid,
-phonenumber,
+SUM(CASE WHEN txn_type='penalty' THEN amount ELSE 0 END) AS total_penalty,
 MIN(CASE WHEN txn_type IN ('recovery','reimbursement') THEN event_ts END) AS first_recovery_ts,
 MAX(CASE WHEN txn_type IN ('recovery','reimbursement') THEN event_ts END) AS last_recovery_ts
 FROM {{CHECKPOINT_TABLE_0}}
@@ -454,7 +455,16 @@ PARTITION BY requestid, phonenumber
 FROM cure_progress_base cpb
 ),
 -- EXTENDED MILESTONES
+-- =========================
+-- EXTENDED MILESTONES + CHECKPOINTS (merged)
+-- =========================
 milestones AS (
+-- Combines what used to be two separate GROUP BY requestid, phonenumber
+-- passes over cure_progress -- this CTE's own milestone timestamps, plus a
+-- former standalone checkpoints CTE's recovery_*h amounts -- into one.
+-- Same source, same grouping key, only the aggregate expressions differed.
+-- Dropping the standalone checkpoints CTE also removes one of loan_final's
+-- four trailing LEFT JOINs.
 SELECT
 requestid,
 phonenumber,
@@ -462,17 +472,7 @@ MAX(cumulative_cure) AS total_cure_cashflow,
 MIN(CASE WHEN cumulative_cure >= disbursed_amount * 0.5 THEN event_ts END) AS ts_50pct,
 MIN(CASE WHEN cumulative_cure >= disbursed_amount * 0.75 THEN event_ts END) AS ts_75pct,
 MIN(CASE WHEN cumulative_cure >= disbursed_amount THEN event_ts END) AS principal_cure_ts,
-MIN(CASE WHEN cumulative_cure >= disbursed_amount + total_penalty THEN event_ts END) AS full_balance_cure_ts
-FROM cure_progress
-GROUP BY requestid, phonenumber
-),
--- =========================
--- EXTENDED CHECKPOINTS
--- =========================
-checkpoints AS (
-SELECT
-requestid,
-phonenumber,
+MIN(CASE WHEN cumulative_cure >= disbursed_amount + total_penalty THEN event_ts END) AS full_balance_cure_ts,
 COALESCE(MAX(cumulative_cure) FILTER (WHERE hours_since_disbursement <= 6),0) AS recovery_6h,
 COALESCE(MAX(cumulative_cure) FILTER (WHERE hours_since_disbursement <= 12),0) AS recovery_12h,
 COALESCE(MAX(cumulative_cure) FILTER (WHERE hours_since_disbursement <= 24),0) AS recovery_24h,
@@ -497,10 +497,10 @@ m.full_balance_cure_ts,
 -- hours_since_disbursement above -- see that comment for the confirmed
 -- decimal-literal-division precision loss this avoids.
 CAST(date_diff('second', l.disbursement_ts, m.principal_cure_ts) AS DOUBLE) / 3600.0 AS hours_to_principal_cure,
-c.recovery_6h,
-c.recovery_12h,
-c.recovery_24h,
-c.recovery_26h,
+m.recovery_6h,
+m.recovery_12h,
+m.recovery_24h,
+m.recovery_26h,
 -- KNOWN LIMITATION (not fixed -- these don't reach the final borrower
 -- output today): none of the checkpoint/outstanding fields below are
 -- capped at principal, so an overpaid loan can produce pct_recovered_24h
@@ -509,11 +509,11 @@ c.recovery_26h,
 -- selected into the final output or reused elsewhere, derive a
 -- principal-allocation measure capped to [0, disbursed_amount] first
 -- rather than using the raw cash totals directly.
-c.recovery_24h / NULLIF(l.disbursed_amount,0) AS pct_recovered_24h,
-(l.disbursed_amount - c.recovery_24h) AS unpaid_amount_24h,
-(l.disbursed_amount - c.recovery_24h) / NULLIF(l.disbursed_amount,0) AS pct_unpaid_24h,
-(l.disbursed_amount - c.recovery_26h) AS unpaid_amount_26h,
-(l.disbursed_amount - c.recovery_26h) / NULLIF(l.disbursed_amount,0) AS pct_unpaid_26h,
+m.recovery_24h / NULLIF(l.disbursed_amount,0) AS pct_recovered_24h,
+(l.disbursed_amount - m.recovery_24h) AS unpaid_amount_24h,
+(l.disbursed_amount - m.recovery_24h) / NULLIF(l.disbursed_amount,0) AS pct_unpaid_24h,
+(l.disbursed_amount - m.recovery_26h) AS unpaid_amount_26h,
+(l.disbursed_amount - m.recovery_26h) / NULLIF(l.disbursed_amount,0) AS pct_unpaid_26h,
 -- Maturity-gated: NULL until the loan has actually had this many hours to
 -- cure, so an unseasoned loan reads as "not yet observable" rather than a
 -- default. See the snapshot_ts comment in the snapshots CTE above.
@@ -537,14 +537,14 @@ WHEN m.principal_cure_ts <= l.disbursement_ts + INTERVAL '26' HOUR THEN 'grace_2
 ELSE 'late_cured'
 END AS repayment_bucket,
 -- NEW FEATURES
-c.recovery_6h / NULLIF(l.disbursed_amount,0) AS pct_recovered_6h,
-c.recovery_12h / NULLIF(l.disbursed_amount,0) AS pct_recovered_12h,
-(l.disbursed_amount - c.recovery_24h) AS remaining_after_24h,
-(total_cure_cashflow - c.recovery_24h) AS recovery_after_24h,
+m.recovery_6h / NULLIF(l.disbursed_amount,0) AS pct_recovered_6h,
+m.recovery_12h / NULLIF(l.disbursed_amount,0) AS pct_recovered_12h,
+(l.disbursed_amount - m.recovery_24h) AS remaining_after_24h,
+(total_cure_cashflow - m.recovery_24h) AS recovery_after_24h,
 -- Maturity-gated -- see on_time_24h_flag above.
 CASE
 WHEN (SELECT snapshot_ts FROM snapshots) < l.disbursement_ts + INTERVAL '24' HOUR THEN NULL
-WHEN c.recovery_24h < l.disbursed_amount THEN 1 ELSE 0
+WHEN m.recovery_24h < l.disbursed_amount THEN 1 ELSE 0
 END AS default_24h_flag,
 CASE
 WHEN (SELECT snapshot_ts FROM snapshots) < l.disbursement_ts + INTERVAL '48' HOUR THEN NULL
@@ -561,13 +561,13 @@ CASE
 WHEN (SELECT snapshot_ts FROM snapshots) < l.disbursement_ts + INTERVAL '24' HOUR THEN NULL
 WHEN total_cure_cashflow = 0 THEN 1 ELSE 0
 END AS zero_recovery_flag,
-rt.first_recovery_ts,
-rt.last_recovery_ts,
-date(rt.first_recovery_ts) AS first_recovery_date,
-date(rt.last_recovery_ts) AS last_recovery_date,
-date_diff('day', l.disbursement_ts, rt.last_recovery_ts) AS days_to_last_recovery,
-date_diff('hour', l.disbursement_ts, rt.first_recovery_ts) AS hours_to_first_recovery,
-date_diff('hour', l.disbursement_ts, rt.last_recovery_ts) AS hours_to_last_recovery,
+l.first_recovery_ts,
+l.last_recovery_ts,
+date(l.first_recovery_ts) AS first_recovery_date,
+date(l.last_recovery_ts) AS last_recovery_date,
+date_diff('day', l.disbursement_ts, l.last_recovery_ts) AS days_to_last_recovery,
+date_diff('hour', l.disbursement_ts, l.first_recovery_ts) AS hours_to_first_recovery,
+date_diff('hour', l.disbursement_ts, l.last_recovery_ts) AS hours_to_last_recovery,
 hour(l.disbursement_ts) AS disbursement_hour,
 CASE
 WHEN hour(l.disbursement_ts) BETWEEN 6 AND 11 THEN 'morning'
@@ -643,12 +643,6 @@ FROM loan_core l
 LEFT JOIN milestones m
 ON l.requestid = m.requestid
 AND l.phonenumber = m.phonenumber
-LEFT JOIN checkpoints c
-ON l.requestid = c.requestid
-AND l.phonenumber = c.phonenumber
-LEFT JOIN recovery_times rt
-ON l.requestid = rt.requestid
-AND l.phonenumber = rt.phonenumber
 LEFT JOIN loan_state_snapshot ls
 ON l.requestid = ls.disbursement_fid
 )
