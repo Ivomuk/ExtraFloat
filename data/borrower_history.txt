@@ -141,16 +141,19 @@ FROM disb_raw d
 WHERE rn = 1
 ),
 disb_windows AS (
--- Per-customer disbursement timeline; next_disbursement_ts bounds the
--- window a repayment can be attributed to this loan (see repay_attributed).
+-- Per-customer disbursement listing, renamed for downstream clarity.
+-- next_disbursement_ts (a LEAD() window function requiring its own
+-- phonenumber-keyed shuffle) used to live here for repay_attributed's old
+-- range-join attribution -- removed since repay_attributed below now
+-- derives the same "bounded by the next disbursement" semantics via a
+-- forward-fill window function instead, which needs only each
+-- disbursement's own timestamp, not a precomputed next_disbursement_ts.
+-- Confirmed unused elsewhere in this file before removing.
 SELECT
 disbursement_fid,
 phonenumber,
 event_ts AS disbursement_ts,
-raw_amount AS disbursed_amount,
-LEAD(event_ts) OVER (
-PARTITION BY phonenumber ORDER BY event_ts, disbursement_fid
-) AS next_disbursement_ts
+raw_amount AS disbursed_amount
 FROM disb_dedup
 ),
 repay_raw AS (
@@ -183,20 +186,67 @@ FROM repay_raw r
 )
 WHERE rn = 1
 ),
+attribution_timeline AS (
+-- Forward-fill attribution instead of a phonenumber + timestamp-range
+-- JOIN: interleave each phonenumber's disbursements and repayments into
+-- one sorted timeline, then carry the most recent disbursement_fid
+-- forward onto each repayment (attribution_filled below). Logically
+-- identical to the old range join (r.event_ts >= disbursement_ts AND
+-- r.event_ts < next_disbursement_ts) but costs one sort per phonenumber
+-- instead of an O(disbursements x repayments) pairwise comparison within
+-- each phonenumber's bucket -- the same join shape that caused the
+-- validation suite's B2b/B3 600GB memory failures (see
+-- borrower_history_validation_queries.sql). is_repayment orders
+-- same-instant disbursement/repayment ties so the repayment picks up the
+-- JUST-disbursed loan, matching the old join's inclusive >= on the
+-- disbursement side and exclusive < on the next-disbursement side;
+-- disbursement_fid is a second tiebreak for the rare case of two
+-- disbursements at the identical instant (Section B4 in
+-- borrower_history_validation_queries.sql), matching the removed
+-- LEAD(...) ORDER BY event_ts, disbursement_fid exactly.
+SELECT
+phonenumber,
+disbursement_ts AS event_ts,
+disbursed_amount AS raw_amount,
+0 AS is_repayment,
+disbursement_fid
+FROM disb_windows
+UNION ALL
+SELECT
+phonenumber,
+event_ts,
+raw_amount,
+1 AS is_repayment,
+NULL AS disbursement_fid
+FROM repay_dedup
+),
+attribution_filled AS (
+SELECT
+phonenumber,
+event_ts,
+raw_amount,
+is_repayment,
+LAST_VALUE(disbursement_fid) IGNORE NULLS OVER (
+PARTITION BY phonenumber
+ORDER BY event_ts, is_repayment, disbursement_fid
+ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+) AS requestid
+FROM attribution_timeline
+),
 repay_attributed AS (
 -- Attribute each repayment to the most recent prior disbursement for that
--- customer, bounded by the next disbursement (if any). Repayments with no
--- matching prior disbursement in the query window are dropped (INNER JOIN).
+-- customer, bounded by the next disbursement (if any) -- see
+-- attribution_timeline/attribution_filled above for how. Repayments with
+-- no matching prior disbursement in the query window are dropped
+-- (requestid IS NULL), same semantics as the old INNER JOIN.
 SELECT
-w.disbursement_fid AS requestid,
-w.phonenumber,
-r.event_ts,
-r.raw_amount
-FROM repay_dedup r
-JOIN disb_windows w
-ON r.phonenumber = w.phonenumber
-AND r.event_ts >= w.disbursement_ts
-AND (w.next_disbursement_ts IS NULL OR r.event_ts < w.next_disbursement_ts)
+requestid,
+phonenumber,
+event_ts,
+raw_amount
+FROM attribution_filled
+WHERE is_repayment = 1
+AND requestid IS NOT NULL
 ),
 loan_state_loads_dedup AS (
 -- loan_state_daily is a daily snapshot; dedup re-ingested rows for the
