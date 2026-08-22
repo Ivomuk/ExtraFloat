@@ -70,16 +70,21 @@ AND (w.next_disbursement_ts IS NULL OR r.repayment_ts < w.next_disbursement_ts)
 WHERE w.disbursement_fid IN (SELECT disbursement_fid FROM :validation_schema.vw_bh_surviving_loans)
 ),
 per_loan_attributed AS (
+-- vw_bh_surviving_loans has no next_disbursement_ts column (it's ANOMALY_
+-- OPEN-filtered disbursement_fid/phonenumber/disbursement_ts/disbursed_
+-- amount only) -- that column only exists on vw_bh_disb_windows, joined in
+-- here on disbursement_fid.
 SELECT
 w.disbursement_fid,
 w.phonenumber,
 w.disbursement_ts,
-w.next_disbursement_ts,
+dw.next_disbursement_ts,
 w.disbursed_amount,
 COALESCE(SUM(ABS(a.repayment_amount)), 0) AS attributed_repaid_abs
 FROM :validation_schema.vw_bh_surviving_loans w
+JOIN :validation_schema.vw_bh_disb_windows dw ON dw.disbursement_fid = w.disbursement_fid
 LEFT JOIN attributed a ON a.disbursement_fid = w.disbursement_fid
-GROUP BY w.disbursement_fid, w.phonenumber, w.disbursement_ts, w.next_disbursement_ts, w.disbursed_amount
+GROUP BY w.disbursement_fid, w.phonenumber, w.disbursement_ts, dw.next_disbursement_ts, w.disbursed_amount
 ),
 mismatched AS (
 SELECT
