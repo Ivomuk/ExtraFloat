@@ -844,13 +844,11 @@ PARTITION BY phonenumber
 ORDER BY disbursement_ts, requestid
 ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
 ) AS avg_prior_loan_size,
-disbursed_amount / NULLIF(
-AVG(disbursed_amount) OVER (
-PARTITION BY phonenumber
-ORDER BY disbursement_ts, requestid
-ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
-),0
-) AS loan_size_vs_history_ratio,
+-- loan_size_vs_history_ratio (an identical duplicate of loan_size_vs_
+-- avg_ratio below, per the original "kept both, since you had both"
+-- comment) was removed here -- confirmed dead: it was never referenced in
+-- the final borrower-level SELECT (only loan_size_vs_avg_ratio is), so it
+-- reached tbl_bh_loan_level and then just sat there unused.
 MAX(disbursed_amount) OVER (
 PARTITION BY phonenumber
 ORDER BY disbursement_ts, requestid
