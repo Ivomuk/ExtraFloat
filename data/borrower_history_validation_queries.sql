@@ -184,8 +184,17 @@ PARTITION BY phonenumber ORDER BY disbursement_ts, disbursement_fid
 ) AS next_disbursement_ts
 FROM :validation_schema.vw_bh_disb_dedup;
 
+-- repayment_uid included alongside the repayment_fid dedup key: raw pulls
+-- of specific repayment_fid clusters (data/repayment_full_schema_check.sql)
+-- found the source system reprocesses/retries the SAME real repayment under
+-- multiple DIFFERENT repayment_fid values that all share one repayment_uid
+-- -- the exact same fid-vs-uid split already found for loans (loan_uid vs
+-- disbursement_fid). This view still dedupes on repayment_fid only (its
+-- existing job: collapsing re-inserted updates to the SAME fid); a second,
+-- repayment_uid-based dedup pass belongs downstream wherever this view is
+-- consumed for attribution -- see data/repayment_uid_dedup_test.sql.
 CREATE OR REPLACE VIEW :validation_schema.vw_bh_repay_dedup AS
-SELECT repayment_fid, phonenumber, repayment_ts, repayment_amount
+SELECT repayment_fid, repayment_uid, phonenumber, repayment_ts, repayment_amount
 FROM (
 SELECT r.*,
 ROW_NUMBER() OVER (
@@ -195,6 +204,7 @@ ORDER BY inserted_ts DESC
 FROM (
 SELECT
 repayment_fid,
+repayment_uid,
 regexp_replace(trim(cast(customer_msisdn AS varchar)), '[^0-9]', '') AS phonenumber,
 try_cast(repayment_ts AS timestamp) AS repayment_ts,
 cast(repayment_amount_ugx AS double) AS repayment_amount,
