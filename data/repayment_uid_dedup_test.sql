@@ -27,9 +27,9 @@ FROM :validation_schema.vw_bh_repay_dedup
 )
 SELECT
 COUNT(*) AS total_repayment_rows,
-COUNT(DISTINCT COALESCE(CAST(repayment_uid AS BIGINT), repayment_fid)) AS distinct_repayment_uids,
-COUNT(*) - COUNT(DISTINCT COALESCE(CAST(repayment_uid AS BIGINT), repayment_fid)) AS duplicate_rows_by_uid,
-ROUND(100.0 * (COUNT(*) - COUNT(DISTINCT COALESCE(CAST(repayment_uid AS BIGINT), repayment_fid)))
+COUNT(DISTINCT COALESCE(CAST(repayment_uid AS VARCHAR), CAST(repayment_fid AS VARCHAR))) AS distinct_repayment_uids,
+COUNT(*) - COUNT(DISTINCT COALESCE(CAST(repayment_uid AS VARCHAR), CAST(repayment_fid AS VARCHAR))) AS duplicate_rows_by_uid,
+ROUND(100.0 * (COUNT(*) - COUNT(DISTINCT COALESCE(CAST(repayment_uid AS VARCHAR), CAST(repayment_fid AS VARCHAR))))
 / COUNT(*), 2) AS pct_rows_are_uid_duplicates,
 SUM(CASE WHEN repayment_uid IS NULL THEN 1 ELSE 0 END) AS n_null_repayment_uid
 FROM repay_fid_deduped;
@@ -50,7 +50,7 @@ SELECT phonenumber, repayment_amount, repayment_ts
 FROM (
 SELECT r.*,
 ROW_NUMBER() OVER (
-PARTITION BY COALESCE(CAST(repayment_uid AS BIGINT), repayment_fid)
+PARTITION BY COALESCE(CAST(repayment_uid AS VARCHAR), CAST(repayment_fid AS VARCHAR))
 ORDER BY repayment_ts, repayment_fid
 ) rn
 FROM :validation_schema.vw_bh_repay_dedup r
