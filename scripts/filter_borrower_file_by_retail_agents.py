@@ -31,9 +31,30 @@ training mode: reading run_pipeline.py confirms df_pd (built from
 2.1 features (from --train-file/--val-file, the agent-mart snapshot
 files) are only ever left-joined onto it by (agent_msisdn, split). So
 filtering --loan-training-file the same way this script already filters
---borrower-file keeps non-retail agents out of training entirely;
---train-file/--val-file do not need filtering for the same reason
---loan-file/--loan-history-file don't above.
+--borrower-file keeps non-retail agents out of population.
+
+--train-file/--val-file are ALSO filtered (train_retail_filtered.bat
+runs this script against them too), even though the left-join alone
+already guarantees a non-retail row there can't add a training example
+(no match, so it's dropped at merge time). Reason: every feature
+pd_model.preprocessing.transaction_features computes today is row-wise
+(a ratio/diff over that same row's own columns, no groupby/mean/rank
+across agents in this repo's code) -- but a small set of pass-through
+input columns it reads if present (commission_cluster_mean,
+vol_3m_cluster_mean, cluster_avg_commission, cluster_avg_vol_3m) are not
+computed anywhere in this repo; if a real export ever populates them
+from an upstream, cross-agent aggregate over the full (unfiltered)
+population, that skew would already be baked into each row's value
+before this script ever sees the file, and no row-level filter here can
+retroactively fix it. Filtering --train-file/--val-file directly doesn't
+retroactively fix pre-baked upstream aggregates either -- that would
+require the upstream SQL/warehouse query to exclude non-retail agents
+from whatever population it aggregates over -- but it does guarantee
+every row entering this pipeline's own feature code is retail-only,
+closing off any future row-wise feature from being affected and making
+the "population is retail-only end to end" property directly verifiable
+by inspecting the CSVs themselves rather than resting on a proof about
+today's specific merge code.
 
 Usage:
     python filter_borrower_file_by_retail_agents.py ^
