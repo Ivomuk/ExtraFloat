@@ -20,26 +20,42 @@
 -- ============================================================================
 
 -- Step 1: prevalence of repayment_uid duplication (exact key, not the fuzzy
--- amount/time-window proxy).
+-- amount/time-window proxy). Uses approx_distinct() (HyperLogLog, ~2.3%
+-- standard error by default) instead of COUNT(DISTINCT ...) -- an exact
+-- distinct count over ~6.4M rows is expensive, and this is a diagnostic
+-- signal (is duplication meaningfully bigger than the fuzzy heuristic's
+-- 0.5%?), not a value that needs to be exact to the row. Computed once in
+-- the agg CTE and reused, instead of repeating the DISTINCT aggregation
+-- three times in one SELECT.
 WITH repay_fid_deduped AS (
 SELECT repayment_fid, repayment_uid, repayment_amount, repayment_ts
 FROM :validation_schema.vw_bh_repay_dedup
-)
+),
+agg AS (
 SELECT
 COUNT(*) AS total_repayment_rows,
-COUNT(DISTINCT COALESCE(CAST(repayment_uid AS VARCHAR), CAST(repayment_fid AS VARCHAR))) AS distinct_repayment_uids,
-COUNT(*) - COUNT(DISTINCT COALESCE(CAST(repayment_uid AS VARCHAR), CAST(repayment_fid AS VARCHAR))) AS duplicate_rows_by_uid,
-ROUND(100.0 * (COUNT(*) - COUNT(DISTINCT COALESCE(CAST(repayment_uid AS VARCHAR), CAST(repayment_fid AS VARCHAR))))
-/ COUNT(*), 2) AS pct_rows_are_uid_duplicates,
+approx_distinct(COALESCE(CAST(repayment_uid AS VARCHAR), CAST(repayment_fid AS VARCHAR))) AS distinct_repayment_uids_approx,
 SUM(CASE WHEN repayment_uid IS NULL THEN 1 ELSE 0 END) AS n_null_repayment_uid
-FROM repay_fid_deduped;
+FROM repay_fid_deduped
+)
+SELECT
+total_repayment_rows,
+distinct_repayment_uids_approx,
+total_repayment_rows - distinct_repayment_uids_approx AS duplicate_rows_by_uid_approx,
+ROUND(100.0 * (total_repayment_rows - distinct_repayment_uids_approx) / total_repayment_rows, 2) AS pct_rows_are_uid_duplicates_approx,
+n_null_repayment_uid
+FROM agg;
 -- RESULT:
--- INTERPRETATION: compare pct_rows_are_uid_duplicates against
+-- INTERPRETATION: compare pct_rows_are_uid_duplicates_approx against
 -- duplicate_repayment_burst_test.sql's 0.5% -- if this is meaningfully
 -- larger, the exact repayment_uid key is catching real duplicates the fuzzy
 -- time-window heuristic missed (e.g. retries more than 5 seconds apart).
--- n_null_repayment_uid tells us how often the fallback to repayment_fid
--- (treating a NULL-uid row as its own group) is actually exercised.
+-- The ~2.3% standard error on the approx_distinct count is negligible next
+-- to a difference of that size; if the two numbers come back close instead,
+-- rerun with exact COUNT(DISTINCT) to confirm before concluding they're
+-- the same. n_null_repayment_uid tells us how often the fallback to
+-- repayment_fid (treating a NULL-uid row as its own group) is actually
+-- exercised.
 
 -- Step 2: reconciliation rate over the full surviving population using a
 -- repayment_uid-deduped repayment set (one row per repayment_uid, earliest
