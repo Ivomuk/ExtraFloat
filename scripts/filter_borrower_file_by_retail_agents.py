@@ -4,7 +4,7 @@ computed by apply_retail_agent_filter.py (its retail_agents_filtered.csv
 output). Single responsibility: mechanical row filter only -- does NOT
 re-implement classify_agent_profile()/is_retail(); trusts the allowlist
 already written there. Generic on the input file's schema (only requires
-an 'msisdn' or 'phonenumber' column), so despite the name this is also
+an 'msisdn', 'phonenumber', or 'agent_msisdn' column), so despite the name this is also
 reused to filter the PD-training loan-level file
 (--loan-training-file) before pd_model.run_pipeline -- pass --label to
 adjust the printed messages for that call site.
@@ -136,10 +136,12 @@ def main():
     print(f"Retail-agent allowlist: {n_allowlist:,} unique agents (from {retail_path})\n")
 
     bor = pd.read_csv(borrower_path, sep=",", encoding="utf-8-sig")
-    bor_msisdn_col = "msisdn" if "msisdn" in bor.columns else ("phonenumber" if "phonenumber" in bor.columns else None)
+    bor_msisdn_col = next(
+        (c for c in ("msisdn", "phonenumber", "agent_msisdn") if c in bor.columns), None
+    )
     if bor_msisdn_col is None:
         sys.exit(
-            f"ERROR: {label_lower} has neither 'msisdn' nor 'phonenumber' column. "
+            f"ERROR: {label_lower} has none of 'msisdn', 'phonenumber', 'agent_msisdn'. "
             f"Found: {list(bor.columns)[:20]}"
         )
 
