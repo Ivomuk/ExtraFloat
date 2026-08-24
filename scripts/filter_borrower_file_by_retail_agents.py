@@ -21,9 +21,23 @@ ever left-joined onto that same borrower-based frame later. So a
 non-retail agent still present in --borrower-file would still reach the
 final output -- just with NaN/zeroed transaction-derived fields via a
 failed left-join match -- unless the borrower file itself is filtered
-too. --loan-file / --loan-history-file do NOT need filtering: they're
-only ever left-joined onto the (now correctly restricted) borrower-based
-population, so non-retail rows there are harmless no-ops.
+too.
+
+--loan-file / --loan-history-file ARE ALSO filtered (run_retail_filtered.bat
+runs this script against them too), even though the left-join alone
+already guarantees a non-retail row there can't add an output row (no
+match onto the borrower-restricted base, dropped at merge time).
+Confirmed via extrafloat_limit_engine_features.py: its only two groupby
+calls key on ["msisdn", "snapshot_dt"] (per-agent, not cross-agent), so
+there's no cluster/peer-average-style column here that could bake in a
+non-retail agent's influence the way transaction_features.py's
+commission_cluster_mean-style columns hypothetically could (see below).
+Filtered anyway, on the same "close the loop across every input file,
+don't rely on a proof about today's specific join code" principle,
+per explicit direction to keep non-retail msisdns out of the entire
+process -- training, validation, segmentation, PD, and credit limit --
+not just out of whichever files happen to be provably load-bearing for
+population today.
 
 The identical reasoning applies to pd_model.run_pipeline's loan-level
 training mode: reading run_pipeline.py confirms df_pd (built from
