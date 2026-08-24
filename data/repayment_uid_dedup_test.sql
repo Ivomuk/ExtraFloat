@@ -26,23 +26,24 @@
 -- signal (is duplication meaningfully bigger than the fuzzy heuristic's
 -- 0.5%?), not a value that needs to be exact to the row. Computed once in
 -- the agg CTE and reused, instead of repeating the DISTINCT aggregation
--- three times in one SELECT.
-WITH repay_fid_deduped AS (
-SELECT repayment_fid, repayment_uid, repayment_amount, repayment_ts
-FROM :validation_schema.vw_bh_repay_dedup
-),
-agg AS (
+-- three times in one SELECT. No passthrough CTE for vw_bh_repay_dedup --
+-- querying it directly in agg since there's no filtering/transformation to
+-- justify the extra layer. COUNT_IF and NULLIF(total_repayment_rows, 0)
+-- guard the percentage against a divide-by-zero if the view ever returns
+-- no rows, matching the NULLIF guards used elsewhere in this file's B2b
+-- diagnostics.
+WITH agg AS (
 SELECT
 COUNT(*) AS total_repayment_rows,
 approx_distinct(COALESCE(CAST(repayment_uid AS VARCHAR), CAST(repayment_fid AS VARCHAR))) AS distinct_repayment_uids_approx,
-SUM(CASE WHEN repayment_uid IS NULL THEN 1 ELSE 0 END) AS n_null_repayment_uid
-FROM repay_fid_deduped
+COUNT_IF(repayment_uid IS NULL) AS n_null_repayment_uid
+FROM :validation_schema.vw_bh_repay_dedup
 )
 SELECT
 total_repayment_rows,
 distinct_repayment_uids_approx,
 total_repayment_rows - distinct_repayment_uids_approx AS duplicate_rows_by_uid_approx,
-ROUND(100.0 * (total_repayment_rows - distinct_repayment_uids_approx) / total_repayment_rows, 2) AS pct_rows_are_uid_duplicates_approx,
+ROUND(100.0 * (total_repayment_rows - distinct_repayment_uids_approx) / NULLIF(total_repayment_rows, 0), 2) AS pct_rows_are_uid_duplicates_approx,
 n_null_repayment_uid
 FROM agg;
 -- RESULT:
