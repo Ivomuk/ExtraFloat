@@ -61,35 +61,51 @@ FROM agg;
 -- Step 2: reconciliation rate over the full surviving population using a
 -- repayment_uid-deduped repayment set (one row per repayment_uid, earliest
 -- repayment_ts / lowest repayment_fid kept), same exact-match methodology
--- as every prior B2b test.
+-- as every prior B2b test. surviving_windows does the cheap equi-join
+-- (disb_windows to surviving_loans) BEFORE the expensive phonenumber+
+-- timestamp range join to repayments, instead of range-joining against the
+-- full (unfiltered) disb_windows population and filtering down to
+-- surviving loans afterward via an IN subquery -- same result (each
+-- repayment matches at most one window regardless of which population it's
+-- tested against, since disb_windows tiles each phonenumber's timeline
+-- without overlap), fewer stages, smaller range join.
 WITH uid_deduped AS (
 SELECT phonenumber, repayment_amount, repayment_ts
 FROM (
-SELECT r.*,
+SELECT
+phonenumber,
+repayment_amount,
+repayment_ts,
+repayment_fid,
 ROW_NUMBER() OVER (
 PARTITION BY COALESCE(CAST(repayment_uid AS VARCHAR), CAST(repayment_fid AS VARCHAR))
 ORDER BY repayment_ts, repayment_fid
-) rn
-FROM :validation_schema.vw_bh_repay_dedup r
+) AS rn
+FROM :validation_schema.vw_bh_repay_dedup
 )
 WHERE rn = 1
 ),
-attributed AS (
-SELECT w.disbursement_fid, r.repayment_amount
-FROM uid_deduped r
-JOIN :validation_schema.vw_bh_disb_windows w
-ON r.phonenumber = w.phonenumber
-AND r.repayment_ts >= w.disbursement_ts
-AND (w.next_disbursement_ts IS NULL OR r.repayment_ts < w.next_disbursement_ts)
-WHERE w.disbursement_fid IN (SELECT disbursement_fid FROM :validation_schema.vw_bh_surviving_loans)
+surviving_windows AS (
+SELECT
+w.disbursement_fid,
+w.phonenumber,
+w.disbursement_ts,
+w.next_disbursement_ts,
+s.disbursed_amount
+FROM :validation_schema.vw_bh_disb_windows w
+JOIN :validation_schema.vw_bh_surviving_loans s
+ON s.disbursement_fid = w.disbursement_fid
 ),
 per_loan_attributed AS (
 SELECT
 w.disbursement_fid,
 w.disbursed_amount,
-COALESCE(SUM(ABS(a.repayment_amount)), 0) AS attributed_repaid_abs
-FROM :validation_schema.vw_bh_surviving_loans w
-LEFT JOIN attributed a ON a.disbursement_fid = w.disbursement_fid
+COALESCE(SUM(ABS(r.repayment_amount)), 0) AS attributed_repaid_abs
+FROM surviving_windows w
+LEFT JOIN uid_deduped r
+ON r.phonenumber = w.phonenumber
+AND r.repayment_ts >= w.disbursement_ts
+AND (w.next_disbursement_ts IS NULL OR r.repayment_ts < w.next_disbursement_ts)
 GROUP BY w.disbursement_fid, w.disbursed_amount
 ),
 joined AS (
@@ -105,12 +121,12 @@ ON lsl.disbursement_fid = pla.disbursement_fid
 )
 SELECT
 COUNT(*) AS n_total,
-SUM(CASE WHEN state_only = 0 AND disbursement_only = 0 THEN 1 ELSE 0 END) AS n_matched,
-SUM(CASE WHEN state_only = 0 AND disbursement_only = 0
-AND ABS(attributed_repaid_abs - lifetime_repaid_ugx) <= 1 THEN 1 ELSE 0 END) AS n_exact_match,
-ROUND(100.0 * SUM(CASE WHEN state_only = 0 AND disbursement_only = 0
-AND ABS(attributed_repaid_abs - lifetime_repaid_ugx) <= 1 THEN 1 ELSE 0 END)
-/ NULLIF(SUM(CASE WHEN state_only = 0 AND disbursement_only = 0 THEN 1 ELSE 0 END), 0), 2) AS pct_exact_match_after_uid_dedup
+COUNT_IF(state_only = 0 AND disbursement_only = 0) AS n_matched,
+COUNT_IF(state_only = 0 AND disbursement_only = 0
+AND ABS(attributed_repaid_abs - lifetime_repaid_ugx) <= 1) AS n_exact_match,
+ROUND(100.0 * COUNT_IF(state_only = 0 AND disbursement_only = 0
+AND ABS(attributed_repaid_abs - lifetime_repaid_ugx) <= 1)
+/ NULLIF(COUNT_IF(state_only = 0 AND disbursement_only = 0), 0), 2) AS pct_exact_match_after_uid_dedup
 FROM joined;
 -- RESULT:
 -- INTERPRETATION: compare pct_exact_match_after_uid_dedup against the 68.6%
