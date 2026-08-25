@@ -1006,6 +1006,25 @@ FROM joined;
 -- scale despite being exactly correct for the two hand-traced examples
 -- that motivated it. repayment_uid stays selected on vw_bh_repay_dedup for
 -- diagnostic purposes only, not as a production dedup key.
+--
+-- MONTHLY BREAKDOWN (data/b2b_monthly_breakdown.sql, from the same live
+-- run): the 68.6%/6.28% blended figures above are NOT uniform over time --
+-- they're dragged down by a specific, dateable incident. Grouped by each
+-- loan's disbursement month: Jan/Feb/Mar 2026 sit in a tight, healthy band
+-- (70.4%/73.7%/71.0% exact match, 4.59%/4.74%/5.11% volume error -- pooled
+-- Jan-Mar: 71.8% exact match, materially better than the blended average).
+-- April 2026 collapses to 55.6% exact match with 14.53% volume error
+-- (~3x the Jan-Mar baseline); May 2026 is still elevated (63.3%/8.76%),
+-- consistent with a recovery tail bleeding out of April. This lines up
+-- exactly with every mismatch example traced by hand in this
+-- investigation -- 256772/256773's duplicate-posting repayment bursts and
+-- 256774's 7-way disbursement merge plus catch-up repayment all landed in
+-- the April 1-4/8 window -- confirming at population scale (not just
+-- those two/three examples) that April 2026 was a genuine, bounded
+-- incident, not evidence of an ongoing structural gap in the attribution
+-- logic. Worth raising to the table owner as a dateable question ("what
+-- happened in early April 2026") rather than continuing to treat the
+-- blended 68.6% as the steady-state accuracy of this approach.
 
 -- N/A FOR XTRAFLOAT, CONFIRMED BY THE TABLE OWNER -- NOT A BLOCKING GATE:
 -- B3's eligibility filter requires interest_and_penalty_ugx > 0 (comparable
