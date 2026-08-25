@@ -1,6 +1,6 @@
 @echo off
 
-echo === Step 1/4: Auditing retail filter against activity signal ===
+echo === Step 1/6: Auditing retail filter against activity signal ===
 python scripts\audit_retail_filter_via_activity.py ^
     --transaction-file data\mfs_daily_agent_mart_20260731.csv
 
@@ -15,7 +15,7 @@ if %ERRORLEVEL% neq 0 (
 )
 
 echo.
-echo === Step 2/4: Classifying agents and filtering the transaction file ===
+echo === Step 2/6: Classifying agents and filtering the transaction file ===
 python scripts\apply_retail_agent_filter.py ^
     --transaction-file data\mfs_daily_agent_mart_20260731.csv ^
     --out-retail retail_agents_filtered.csv ^
@@ -30,7 +30,7 @@ if %ERRORLEVEL% neq 0 (
 )
 
 echo.
-echo === Step 3/4: Filtering the borrower file to the same retail-agent set ===
+echo === Step 3/6: Filtering the borrower file to the same retail-agent set ===
 python scripts\filter_borrower_file_by_retail_agents.py ^
     --retail-agents-file retail_agents_filtered.csv ^
     --borrower-file data\borrower_history.csv ^
@@ -44,12 +44,42 @@ if %ERRORLEVEL% neq 0 (
 )
 
 echo.
-echo === Step 4/4: Running the credit risk pipeline on the retail-only population ===
+echo === Step 4/6: Filtering the loan-summary file to the same retail-agent set ===
+python scripts\filter_borrower_file_by_retail_agents.py ^
+    --retail-agents-file retail_agents_filtered.csv ^
+    --borrower-file data\loan_summary.csv ^
+    --out data\loan_summary_retail_filtered.csv ^
+    --label "Loan-summary file"
+
+if %ERRORLEVEL% neq 0 (
+    echo.
+    echo ERROR: filter_borrower_file_by_retail_agents.py failed with exit code %ERRORLEVEL%
+    pause
+    exit /b %ERRORLEVEL%
+)
+
+echo.
+echo === Step 5/6: Filtering the loan-history-snapshot file to the same retail-agent set ===
+python scripts\filter_borrower_file_by_retail_agents.py ^
+    --retail-agents-file retail_agents_filtered.csv ^
+    --borrower-file data\loan_history_snapshot_20260619.csv ^
+    --out data\loan_history_snapshot_20260619_retail_filtered.csv ^
+    --label "Loan-history-snapshot file"
+
+if %ERRORLEVEL% neq 0 (
+    echo.
+    echo ERROR: filter_borrower_file_by_retail_agents.py failed with exit code %ERRORLEVEL%
+    pause
+    exit /b %ERRORLEVEL%
+)
+
+echo.
+echo === Step 6/6: Running the credit risk pipeline on the retail-only population ===
 python run_credit_risk_pipeline.py ^
     --transaction-file retail_agents_filtered.csv ^
-    --loan-file data/loan_summary.csv ^
+    --loan-file data\loan_summary_retail_filtered.csv ^
     --borrower-file borrower_history_retail_filtered.csv ^
-    --loan-history-file data/loan_history_snapshot_20260619.csv ^
+    --loan-history-file data\loan_history_snapshot_20260619_retail_filtered.csv ^
     --snapshot-date 20260731 ^
     --artifacts-dir pd_model/artifacts/ ^
     --scorecard-path scorecards/capacity_scorecard_v1.json ^
@@ -63,5 +93,6 @@ if %ERRORLEVEL% neq 0 (
 )
 
 echo.
-echo Pipeline complete (retail-agents-only). Output written to output/engine_test_output.csv
+echo Pipeline complete (retail-agents-only, every input file filtered).
+echo Output written to output/engine_test_output.csv
 pause
