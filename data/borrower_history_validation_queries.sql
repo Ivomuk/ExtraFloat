@@ -983,6 +983,29 @@ FROM joined;
 -- gates, not n_exact_match_abs / n_matched.
 -- Use B2b (not B2a) against the acceptance thresholds -- it's the
 -- population that actually determines what ships.
+--
+-- FIFTH HYPOTHESIS TESTED AND REJECTED (data/repayment_uid_dedup_test.sql,
+-- data/repayment_uid_same_amount_dedup_test.sql): repayment_full_schema_
+-- check.sql found the two examples behind mechanism (4) above shared one
+-- repayment_uid across many repayment_fid rows, suggesting repayment_uid
+-- (never previously selected) might be a reliable exact dedup key beyond
+-- the fuzzy amount/time-window proxy. It is NOT, at population scale.
+-- Deduping by repayment_uid alone collapses 40.6% of all repayment rows
+-- but DROPS the exact-match rate to 67.4% (worse than baseline) -- because
+-- most repayment_uid values are shared by many rows with DIFFERING
+-- amounts (15,758 multi-row uid clusters average ~179 rows each; only 982
+-- of them, 988 rows total, have every row at the same amount). repayment_
+-- uid is therefore not a per-transaction identifier for the bulk of the
+-- table -- it looks like a coarser batch/session-level grouping key, and
+-- collapsing rows that merely share it discards real distinct repayments.
+-- A narrower composite key (repayment_uid AND repayment_amount both equal)
+-- still underperforms baseline (67.6%), since it also collapses coincidental
+-- same-amount sub-groups within otherwise-mixed uid clusters. CONCLUSION:
+-- do not add repayment_uid-based dedup to vw_bh_repay_dedup or
+-- borrower_history.txt's repay_raw/repay_dedup -- it is net-harmful at
+-- scale despite being exactly correct for the two hand-traced examples
+-- that motivated it. repayment_uid stays selected on vw_bh_repay_dedup for
+-- diagnostic purposes only, not as a production dedup key.
 
 -- N/A FOR XTRAFLOAT, CONFIRMED BY THE TABLE OWNER -- NOT A BLOCKING GATE:
 -- B3's eligibility filter requires interest_and_penalty_ugx > 0 (comparable
