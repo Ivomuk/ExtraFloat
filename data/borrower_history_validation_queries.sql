@@ -1025,6 +1025,28 @@ FROM joined;
 -- logic. Worth raising to the table owner as a dateable question ("what
 -- happened in early April 2026") rather than continuing to treat the
 -- blended 68.6% as the steady-state accuracy of this approach.
+--
+-- MATERIALITY BY PERIOD (data/b2b_diff_distribution_by_period.sql, same
+-- live run): "exact match" is a strict to-the-UGX identity test, so even
+-- Jan-Mar's 71.8% pooled exact-match rate is far from 100% on its own --
+-- this checks whether that gap is genuinely small/immaterial like the
+-- blended population (87.9%/92.3% within 1%/5% of principal), or whether
+-- averaging in April was hiding a real chunk of large mismatches even in
+-- the "clean" months. It was not: Jan-Mar's own materiality-adjusted rates
+-- (91.1%/95.1% within 1%/5% of principal) are BETTER than the blended
+-- figures, and its large-mismatch rate (loans off by >100K UGX) is only
+-- 3.19% of matched loans. April's materiality-adjusted rates collapse to
+-- 70.4%/79.2%, with an 8.54% large-mismatch rate -- nearly 3x Jan-Mar's --
+-- confirming April is a qualitatively different, genuinely larger-scale
+-- misattribution event, not just the same background noise occurring more
+-- often. May+ sits in between (85.9%/89.1% materiality-adjusted, 5.44%
+-- large-mismatch rate), consistent with a fading recovery tail. CONCLUSION:
+-- the "mostly immaterial noise" characterization of B2b's gap holds
+-- cleanly for Jan-Mar specifically (even more so than the blended number
+-- suggested), and April is where the genuinely material problem is
+-- concentrated -- reinforces raising April 2026 to the table owner as a
+-- specific, dateable incident rather than treating the whole snapshot
+-- window as uniformly imprecise.
 
 -- N/A FOR XTRAFLOAT, CONFIRMED BY THE TABLE OWNER -- NOT A BLOCKING GATE:
 -- B3's eligibility filter requires interest_and_penalty_ugx > 0 (comparable
