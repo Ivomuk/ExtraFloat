@@ -14,24 +14,33 @@
 -- clean read on the current, real behavior.
 -- ============================================================================
 
-WITH attributed AS (
-SELECT w.disbursement_fid, r.repayment_amount
-FROM :validation_schema.vw_bh_repay_dedup r
-JOIN :validation_schema.vw_bh_disb_windows w
-ON r.phonenumber = w.phonenumber
-AND r.repayment_ts >= w.disbursement_ts
-AND (w.next_disbursement_ts IS NULL OR r.repayment_ts < w.next_disbursement_ts)
-WHERE w.disbursement_fid IN (SELECT disbursement_fid FROM :validation_schema.vw_bh_surviving_loans)
+WITH surviving_windows AS (
+-- Cheap equi-join (disb_windows to surviving_loans) BEFORE the expensive
+-- phonenumber+timestamp range join below, same fix already applied in
+-- repayment_uid_dedup_test.sql -- missed here on the first pass.
+-- disbursed_amount deliberately not selected: nothing downstream reads it
+-- (not even the final SELECT), so there's no reason to carry it through
+-- the join or the GROUP BY below.
+SELECT
+w.disbursement_fid,
+w.phonenumber,
+w.disbursement_ts,
+w.next_disbursement_ts
+FROM :validation_schema.vw_bh_disb_windows w
+JOIN :validation_schema.vw_bh_surviving_loans s
+ON s.disbursement_fid = w.disbursement_fid
 ),
 per_loan_attributed AS (
 SELECT
 w.disbursement_fid,
 w.disbursement_ts,
-w.disbursed_amount,
-COALESCE(SUM(ABS(a.repayment_amount)), 0) AS attributed_repaid_abs
-FROM :validation_schema.vw_bh_surviving_loans w
-LEFT JOIN attributed a ON a.disbursement_fid = w.disbursement_fid
-GROUP BY w.disbursement_fid, w.disbursement_ts, w.disbursed_amount
+COALESCE(SUM(ABS(r.repayment_amount)), 0) AS attributed_repaid_abs
+FROM surviving_windows w
+LEFT JOIN :validation_schema.vw_bh_repay_dedup r
+ON r.phonenumber = w.phonenumber
+AND r.repayment_ts >= w.disbursement_ts
+AND (w.next_disbursement_ts IS NULL OR r.repayment_ts < w.next_disbursement_ts)
+GROUP BY w.disbursement_fid, w.disbursement_ts
 ),
 joined AS (
 SELECT
