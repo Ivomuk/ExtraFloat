@@ -1047,6 +1047,39 @@ FROM joined;
 -- concentrated -- reinforces raising April 2026 to the table owner as a
 -- specific, dateable incident rather than treating the whole snapshot
 -- window as uniformly imprecise.
+--
+-- WORKED EXAMPLE, ROOT MECHANISM CONFIRMED (phonenumber 256774,
+-- disbursement_fid 39645290153, principal 1,000,000, disbursed
+-- 2026-04-01 20:33:51, next disbursement 2026-04-05 08:35:48): every raw
+-- repayment/disbursement row for this window was manually reconciled.
+-- Seven repayment postings land in this loan's window -- five of
+-- 1,000,000 (2026-04-02 20:38:54-56) and two of 10,000
+-- (2026-04-03 20:39:00) -- summing to our attributed 5,020,000 against a
+-- true principal of 1,000,000 (the tracker's own lifetime_repaid_ugx,
+-- correctly netted; lifetime_gross_repaid_ugx=5,000,000,
+-- repayment_event_count=6). Gap: 4,020,000, exactly as expected from the
+-- mechanism already documented above. NEW: all seven postings share
+-- repayment_uid 1609381785765 -- the SAME repayment_uid already found on
+-- an unrelated phonenumber's (256772) 10 duplicate postings from the
+-- PREVIOUS day (2026-04-01 17:00). One repayment_uid value spanning two
+-- unrelated customers across three days and 8+ rows is direct confirmation
+-- that repayment_uid is a batch/settlement-run identifier, not a
+-- per-transaction or even per-customer key -- explains why the
+-- repayment_uid dedup hypothesis above was net-harmful (it groups
+-- genuinely unrelated repayments together). SEPARATE ISSUE SURFACED: four
+-- days later (2026-04-05 08:35:48) the overcharge is refunded via a NEW
+-- disbursement (disbursement_fid 39732292913, 4,010,000 -- exactly the
+-- 4,020,000 overcharge minus a 10,000 = 1% late-repayment penalty on the
+-- 1,000,000 principal). disbursements_daily has no field distinguishing
+-- "real new float lent to the agent" from "refund/correction of an
+-- overcharge" -- this refund is indistinguishable from a normal
+-- disbursement in our pipeline and in loan_summary_query.txt's
+-- disbursement-volume features, which would count it as new lending.
+-- Worth raising to the table owner as a second, distinct question
+-- alongside the repayment_uid batching one. No change made to
+-- borrower_history.txt for this -- purely explanatory/diagnostic, per
+-- explicit instruction to validate without modifying the production
+-- query.
 
 -- N/A FOR XTRAFLOAT, CONFIRMED BY THE TABLE OWNER -- NOT A BLOCKING GATE:
 -- B3's eligibility filter requires interest_and_penalty_ugx > 0 (comparable
