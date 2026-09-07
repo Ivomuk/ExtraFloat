@@ -48,11 +48,15 @@
 -- (`-1 * amount`), confirming devdata.xtrafloat_daily_trans stored
 -- repayments as negative debits. Whether
 -- momo_loan_book_tracker_repayments_daily.repayment_amount_ugx uses the
--- same convention is an open question already flagged (unresolved) in
--- borrower_history_validation_queries.sql's Section B0 diagnostic --
--- this file uses abs() like borrower_history.txt settled on, rather than
--- assuming a sign flip is still needed. Re-check both files together if
--- that question is ever resolved.
+-- same convention was flagged as an open question in borrower_history_
+-- validation_queries.sql's Section B0 diagnostic -- since then, dozens of
+-- raw repayment_amount_ugx rows pulled directly from the warehouse during
+-- the B2b reconciliation investigation (e.g. data/repayment_full_schema_
+-- check.sql, data/loan_state_sharing_trace.sql) have been consistently
+-- POSITIVE, never negative. Not yet a formal confirmation from the table
+-- owner, but strong accumulated evidence the negative-debit convention
+-- does NOT carry over to this table -- abs() here is very likely a no-op
+-- on genuinely positive values, not compensating for a sign flip.
 --
 -- EXECUTION: as_of_load_ts bounds inserted_ts across both source tables,
 -- same reproducibility rationale as borrower_history.txt's snapshots CTE --
@@ -191,21 +195,66 @@ from repay_raw r
 )
 where rn = 1
 ),
+attribution_timeline as (
+-- Forward-fill attribution instead of a phonenumber + timestamp-range JOIN:
+-- interleave each phonenumber's disbursements and repayments into one
+-- sorted timeline, then carry the most recent disbursement_fid forward
+-- onto each repayment (attribution_filled below). Logically identical to
+-- a range join (r.repayment_ts >= disbursement_ts AND r.repayment_ts <
+-- next_disbursement_ts) but avoids the O(disbursements x repayments)
+-- pairwise comparison per phonenumber bucket -- the same join shape that
+-- caused borrower_history_validation_queries.sql's B2b/B3 600GB memory
+-- failures before borrower_history.txt's repay_attributed was rewritten
+-- this same way; this file inherited the original, unfixed range-join
+-- form and is ported to match. is_repayment orders same-instant
+-- disbursement/repayment ties so the repayment picks up the JUST-
+-- disbursed loan (inclusive >= on the disbursement side, exclusive < on
+-- the next-disbursement side); disbursement_fid is a second tiebreak for
+-- two disbursements at the identical instant.
+select
+phonenumber,
+disbursement_ts as event_ts,
+disbursed_amount as raw_amount,
+0 as is_repayment,
+disbursement_fid
+from disb_windows
+union all
+select
+phonenumber,
+repayment_ts as event_ts,
+repayment_amount as raw_amount,
+1 as is_repayment,
+null as disbursement_fid
+from repay_dedup
+),
+attribution_filled as (
+select
+phonenumber,
+event_ts,
+raw_amount,
+is_repayment,
+LAST_VALUE(disbursement_fid) IGNORE NULLS OVER (
+partition by phonenumber
+order by event_ts, is_repayment, disbursement_fid
+rows between unbounded preceding and current row
+) as disbursement_fid
+from attribution_timeline
+),
 repay_attributed as (
 -- Attribute each repayment to the most recent prior disbursement for that
 -- customer, bounded by the next disbursement (if any) -- same heuristic as
 -- borrower_history.txt's repay_attributed; a proxy for an exact loan-key
 -- match, since repayments carry no disbursement_fid of their own.
+-- Repayments with no matching prior disbursement (disbursement_fid IS
+-- NULL) are dropped, same semantics as the old INNER JOIN.
 select
-w.disbursement_fid,
-w.phonenumber,
-r.repayment_ts,
-abs(r.repayment_amount) as repayment_amount
-from repay_dedup r
-join disb_windows w
-on r.phonenumber = w.phonenumber
-and r.repayment_ts >= w.disbursement_ts
-and (w.next_disbursement_ts is null or r.repayment_ts < w.next_disbursement_ts)
+disbursement_fid,
+phonenumber,
+event_ts as repayment_ts,
+abs(raw_amount) as repayment_amount
+from attribution_filled
+where is_repayment = 1
+and disbursement_fid is not null
 ),
 loan_cure as (
 -- principal_cure_ts: first attributed-repayment timestamp at which
@@ -432,31 +481,31 @@ then 1 else 0 end
 ) as repayment_vol_6M__flag,
 sum(case
 when tbl_dt > dt_m1 and tbl_dt <= snapshot_dt and tranname = 'XtraFloat Payment'
-then cast(amount as double) end) as repayment_val_1M__l1,
+then try_cast(amount as double) end) as repayment_val_1M__l1,
 sum(case
 when tbl_dt > dt_d30 and tbl_dt <= snapshot_dt and tranname = 'XtraFloat Payment'
-then cast(amount as double) end) as Repayment_val_M1__l1,
+then try_cast(amount as double) end) as Repayment_val_M1__l1,
 sum(case
 when tbl_dt > dt_d60 and tbl_dt <= dt_d30 and tranname = 'XtraFloat Payment'
-then cast(amount as double) end) as Repayment_val_M2__l1,
+then try_cast(amount as double) end) as Repayment_val_M2__l1,
 sum(case
 when tbl_dt > dt_d90 and tbl_dt <= dt_d60 and tranname = 'XtraFloat Payment'
-then cast(amount as double) end) as Repayment_val_M3__l1,
+then try_cast(amount as double) end) as Repayment_val_M3__l1,
 sum(case
 when tbl_dt > dt_d120 and tbl_dt <= dt_d90 and tranname = 'XtraFloat Payment'
-then cast(amount as double) end) as Repayment_val_M4__l1,
+then try_cast(amount as double) end) as Repayment_val_M4__l1,
 sum(case
 when tbl_dt > dt_d150 and tbl_dt <= dt_d120 and tranname = 'XtraFloat Payment'
-then cast(amount as double) end) as Repayment_val_M5__l1,
+then try_cast(amount as double) end) as Repayment_val_M5__l1,
 sum(case
 when tbl_dt > dt_d180 and tbl_dt <= dt_d150 and tranname = 'XtraFloat Payment'
-then cast(amount as double) end) as Repayment_val_M6__l1,
+then try_cast(amount as double) end) as Repayment_val_M6__l1,
 sum(case
 when tbl_dt > dt_m3 and tbl_dt <= snapshot_dt and tranname = 'XtraFloat Payment'
-then cast(amount as double) end) as repayment_val_3M__l1,
+then try_cast(amount as double) end) as repayment_val_3M__l1,
 sum(case
 when tbl_dt > dt_m6 and tbl_dt <= snapshot_dt and tranname = 'XtraFloat Payment'
-then cast(amount as double) end) as repayment_val_6M__l1
+then try_cast(amount as double) end) as repayment_val_6M__l1
 from t_pull
 group by
 msisdn,
