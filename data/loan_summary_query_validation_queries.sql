@@ -155,12 +155,26 @@ AND inserted_ts <= :as_of_load_ts;
 -- The production query itself, as a view -- gives a real compile check
 -- (CREATE VIEW fails if it doesn't parse/analyze) and a queryable target
 -- for GATE 1. ACTION REQUIRED: do NOT hand-paste data/loan_summary_
--- query.txt here -- paste the file's actual current content verbatim,
--- from its opening "select * from" line through its closing "> 0;" line,
--- so this always validates the checked-in revision, not a hand-
--- transcribed copy that can drift.
+-- query.txt here -- manual assembly risks validating a different revision
+-- than what's actually checked in. Instead run:
+--   python scripts/build_vw_ls_output.py <validation_schema> > vw_ls_output.sql
+-- and execute the generated vw_ls_output.sql. Unlike borrower_history.txt's
+-- build_vw_bh_output.py, this produces a SINGLE statement (loan_summary_
+-- query.txt has no checkpoint markers and runs as one statement -- see the
+-- header of this file), so there's nothing to split: just
+--   CREATE OR REPLACE VIEW :validation_schema.vw_ls_output AS
+--   <data/loan_summary_query.txt's query body, verbatim>
+--   ;
+-- The generated file also stamps the git commit SHA of data/loan_summary_
+-- query.txt as a comment, and echoes the exact :snapshot_dt/:as_of_load_ts
+-- literals baked into that file -- use those SAME values everywhere else in
+-- this validation file (GATE 0's views above), or GATE 0 and vw_ls_output
+-- silently validate two different cutoffs with no error raised. Record the
+-- SHA in GATE 6. The statement below is a structural placeholder only,
+-- showing what the generated file's shape looks like -- it is NOT meant to
+-- be run as written.
 -- CREATE OR REPLACE VIEW :validation_schema.vw_ls_output AS
--- <paste data/loan_summary_query.txt's full query body here>
+-- <generated from data/loan_summary_query.txt by scripts/build_vw_ls_output.py>
 -- ;
 
 
@@ -391,7 +405,8 @@ WHERE principal_cure_ts IS NOT NULL AND principal_cure_ts < disbursement_ts;
 -- validation_queries.sql's own GATE 6.
 --
 --   Execution date:                    ____________________
---   loan_summary_query.txt git SHA:    ____________________
+--   loan_summary_query.txt git SHA:    ____________________ (from scripts/build_vw_ls_output.py's
+--                                       output comment -- proves which revision was actually validated)
 --   snapshot_dt used:                  ____________________
 --   as_of_load_ts used:                ____________________
 --   Query engine/version:              ____________________
