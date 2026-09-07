@@ -406,6 +406,42 @@ WHERE principal_cure_ts IS NOT NULL AND principal_cure_ts < disbursement_ts;
 -- ============================================================================
 -- GATE 6 -- Record approval evidence
 -- ============================================================================
+-- TEST RUN RECORD (2026-09-07) -- NOT a production sign-off. Run against
+-- the partial reload available at the time (data loaded only through
+-- 2026-04-14; real snapshot_dt=20260731 not yet reachable), using
+-- build_vw_ls_output.py's --snapshot-dt/--as-of-load-ts overrides so
+-- loan_summary_query.txt's checked-in production literals were never
+-- touched. Two real bugs were found and fixed as a direct result of this
+-- run (neither was catchable without live data):
+--   1. GATE 1b compared Last_disbursement_date/Last_repayment_date (bigint
+--      YYYYMMDD, same encoding as tbl_dt/snapshot_dt throughout
+--      loan_summary_query.txt) against a date_parse()'d timestamp --
+--      fixed to compare bigint-to-bigint directly.
+--   2. The live engine hit "Number of stages... exceeds the soft limit
+--      (50)", traced to this file's two SELECT DISTINCT statements;
+--      resolved for this run via SET SESSION use_mark_distinct = false
+--      (no query rewrite needed -- the checkpoint-materialization split
+--      anticipated in loan_summary_query.txt's own EXECUTION comment was
+--      NOT required).
+-- Every check below passed or was explained as a data-availability
+-- artifact of the partial reload, not a defect -- see the interpretation
+-- notes: Execution date 2026-09-07 | git SHA feb5b4b7851e7ad95357cd90232866b0346190c5
+-- | snapshot_dt 20260414 | as_of_load_ts '2026-09-08 00:00:00.000' |
+-- GATE 1a: 0 violations (120,147 rows = 120,147 distinct msisdns) | GATE
+-- 1b: 0/9 bad_* columns flagged | GATE 1c: pass, all 12 required columns
+-- present | Section A: 3M sum matches exactly (structurally guaranteed --
+-- Jan+Feb+Mar = 90 days in a non-leap year for this snapshot_dt); 6M sum
+-- also matches exactly, confirmed via raw-table spot check to be because
+-- the warehouse's loaded history starts January 2026 -- both the 6M
+-- window and the M1-M6 sum see zero activity before that, not a query bug
+-- (this DOES mean 6M/3M are shallower than a true 180/90-day window for
+-- this test; expected to resolve once full history is loaded) | Section
+-- B: 4.2% of repayment rows are repayment_uid duplicates, consistent with
+-- repayment_uid_rebuild_verification.sql's 4.1% Jan-Mar figure | Section
+-- C: 0 violations | Section D: 0.
+-- This record does NOT substitute for re-running GATE 6 below once the
+-- production snapshot_dt=20260731 is reachable against full history.
+--
 -- Fill this in every time this file is actually run. An unfilled template
 -- is not evidence, per the same point made in borrower_history_
 -- validation_queries.sql's own GATE 6.
