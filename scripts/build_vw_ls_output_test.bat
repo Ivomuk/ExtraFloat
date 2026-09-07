@@ -8,6 +8,13 @@ REM loan_summary_query.txt's checked-in production snapshot_dt of 20260731).
 REM data/loan_summary_query.txt itself is never modified -- see that
 REM script's own header for why the override exists.
 REM
+REM as_of_load_ts is the WAREHOUSE LOAD timestamp (inserted_ts), not an
+REM event-date cutoff -- confirmed via MIN/MAX(inserted_ts) against both
+REM source tables that this reload actually landed 2026-09-05 to
+REM 2026-09-07, long after the April event dates it contains. If a later
+REM reload changes that, update AS_OF_LOAD_TS below to something past the
+REM new MAX(inserted_ts), or this will silently return 0 rows again.
+REM
 REM Run this from the repo root (the folder containing scripts\ and data\):
 REM     scripts\build_vw_ls_output_test.bat your_schema
 REM
@@ -23,7 +30,11 @@ set SCHEMA=%1
 if "%SCHEMA%"=="" set SCHEMA=xtrafloat_validation
 
 set SNAPSHOT_DT=20260414
-set AS_OF_LOAD_TS=2026-04-15 00:00:00.000
+REM inserted_ts is the WAREHOUSE LOAD timestamp, not the event date -- the
+REM April-cutoff data was actually loaded on 2026-09-05/07 (confirmed via
+REM MIN/MAX(inserted_ts) against both source tables), so as_of_load_ts must
+REM be set past that load time, not near the April event dates themselves.
+set AS_OF_LOAD_TS=2026-09-08 00:00:00.000
 set OUT_FILE=vw_ls_output_test.sql
 
 set PYTHON_CMD=
