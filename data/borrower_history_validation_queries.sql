@@ -1007,6 +1007,24 @@ FROM joined;
 -- that motivated it. repayment_uid stays selected on vw_bh_repay_dedup for
 -- diagnostic purposes only, not as a production dedup key.
 --
+-- SOURCE TABLE REBUILT, ROOT CAUSE APPEARS FIXED (data/repayment_uid_
+-- rebuild_verification.sql): analytics.momo_loan_book_tracker_repayments_
+-- daily was rebuilt and reloaded with data through March 2026. Re-checked
+-- against the rebuilt table (date_key <= 20260331, i.e. what's actually
+-- been reloaded): duplicate-by-repayment_uid rate dropped from 40.6% to
+-- 4.1%, cross-customer repayment_uid sharing dropped from 43.8% of rows to
+-- 2.9%, and max_customers_sharing_one_uid collapsed from 68,489 to 4 --
+-- a completely different regime, consistent with a healthy dedup key
+-- rather than the batch/settlement-run mistagging found before. This
+-- covers Jan-Mar only, since that's what's reloaded so far -- it does NOT
+-- yet confirm April 2026 (the dateable incident documented above) behaves
+-- the same way once that period is reloaded, and the repayment_uid-based
+-- dedup hypothesis (rejected above as net-harmful) should be RE-TESTED
+-- once April is reloaded, since the root cause that made it harmful
+-- (mass multi-customer batch tagging) appears to be resolved at the
+-- source -- do not assume the earlier rejection still holds without
+-- re-running it against the rebuilt table.
+--
 -- MONTHLY BREAKDOWN (data/b2b_monthly_breakdown.sql, from the same live
 -- run): the 68.6%/6.28% blended figures above are NOT uniform over time --
 -- they're dragged down by a specific, dateable incident. Grouped by each
