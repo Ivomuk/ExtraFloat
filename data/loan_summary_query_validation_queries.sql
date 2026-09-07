@@ -201,9 +201,15 @@ FROM :validation_schema.vw_ls_output;
 -- so vol/val/penalty counts should be monotonically non-decreasing from
 -- 1M to 3M to 6M for every agent -- a violation means the window
 -- boundaries in win/t_by_txn have drifted apart from each other.
+-- Last_disbursement_date/Last_repayment_date are bigint YYYYMMDD (same
+-- encoding as tbl_dt/snapshot_dt throughout loan_summary_query.txt --
+-- see t_pull's `cast(date_format(..., '%Y%m%d') as bigint) as tbl_dt` --
+-- NOT a real date/timestamp column), so compare directly against the
+-- equally-bigint snapshot_dt column rather than date_parse()'ing either
+-- side -- comparing bigint to timestamp fails to even compile.
 SELECT
-SUM(CASE WHEN Last_disbursement_date > date_parse(cast(snapshot_dt AS varchar), '%Y%m%d') THEN 1 ELSE 0 END) AS bad_last_disbursement_date,
-SUM(CASE WHEN Last_repayment_date > date_parse(cast(snapshot_dt AS varchar), '%Y%m%d') THEN 1 ELSE 0 END) AS bad_last_repayment_date,
+SUM(CASE WHEN Last_disbursement_date > snapshot_dt THEN 1 ELSE 0 END) AS bad_last_disbursement_date,
+SUM(CASE WHEN Last_repayment_date > snapshot_dt THEN 1 ELSE 0 END) AS bad_last_repayment_date,
 SUM(CASE WHEN disbursement_vol_1M < 0 OR repayment_vol_1M < 0 OR penalties_1M < 0 THEN 1 ELSE 0 END) AS bad_negative_counts,
 SUM(CASE WHEN disbursement_val_1M < 0 OR repayment_val_1M < 0 THEN 1 ELSE 0 END) AS bad_negative_values,
 SUM(CASE WHEN disbursement_vol_1M > disbursement_vol_3M OR disbursement_vol_3M > disbursement_vol_6M THEN 1 ELSE 0 END) AS bad_disbursement_vol_monotonicity,
