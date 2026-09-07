@@ -19,8 +19,35 @@ Usage:
     # then run vw_ls_output.sql in Athena/Trino -- it contains one
     # statement: CREATE OR REPLACE VIEW <schema>.vw_ls_output AS
     # <loan_summary_query.txt's query body, verbatim>.
+
+Testing against a partial/in-progress reload
+---------------------------------------------
+The checked-in snapshot_dt/as_of_load_ts are PRODUCTION values -- they may
+be later than what's actually been reloaded into the warehouse (e.g. data
+loaded only through 2026-04-14 while the file's snapshot_dt is 20260731).
+Running the production literals against partial data does not error --
+it silently produces truncated/empty recent-activity windows for
+everything after the load cutoff, which looks like "no activity" rather
+than "not loaded yet."
+
+Rather than hand-edit the checked-in file to test against partial data
+(reintroducing the exact drift risk this script exists to avoid), pass
+--snapshot-dt / --as-of-load-ts to substitute test-time values ONLY in the
+generated output -- data/loan_summary_query.txt itself is never modified.
+The header comment records both the production literals and the override
+actually used, so GATE 6 can capture which cutoff was really validated.
+
+    python scripts/build_vw_ls_output.py <validation_schema> \\
+        --snapshot-dt 20260414 \\
+        --as-of-load-ts "2026-04-15 00:00:00.000" \\
+        > vw_ls_output_test.sql
+
+Use the SAME overridden values for :snapshot_dt / :as_of_load_ts when
+running loan_summary_query_validation_queries.sql's GATE 0 views for this
+test -- otherwise GATE 0 and vw_ls_output validate different cutoffs.
 """
 
+import argparse
 import re
 import subprocess
 import sys
@@ -58,14 +85,46 @@ def _git(*args: str) -> str:
 
 
 def main() -> None:
-    if len(sys.argv) != 2:
-        sys.exit(f"Usage: python {Path(__file__).name} <validation_schema>")
-    schema = sys.argv[1]
+    parser = argparse.ArgumentParser(
+        description=(
+            "Assemble the vw_ls_output CREATE VIEW statement from the "
+            "checked-in data/loan_summary_query.txt."
+        ),
+    )
+    parser.add_argument("validation_schema")
+    parser.add_argument(
+        "--snapshot-dt",
+        metavar="YYYYMMDD",
+        help=(
+            "Override snapshot_dt (plain integer, e.g. 20260414) for THIS "
+            "generated output only -- data/loan_summary_query.txt is never "
+            "modified. Use when testing against a partial/in-progress "
+            "reload that doesn't yet reach the file's checked-in "
+            "production snapshot_dt."
+        ),
+    )
+    parser.add_argument(
+        "--as-of-load-ts",
+        metavar="'YYYY-MM-DD HH:MM:SS.fff'",
+        help=(
+            "Override as_of_load_ts (unquoted, e.g. '2026-04-15 "
+            "00:00:00.000') for THIS generated output only -- "
+            "data/loan_summary_query.txt is never modified."
+        ),
+    )
+    args = parser.parse_args()
+
+    schema = args.validation_schema
     if not _VALID_SCHEMA.match(schema):
         sys.exit(
             f"ERROR: '{schema}' is not a valid unquoted SQL identifier "
             "(letters/digits/underscore, not starting with a digit). "
             "Refusing to interpolate it into a CREATE VIEW statement."
+        )
+    if args.snapshot_dt is not None and not re.fullmatch(r"\d+", args.snapshot_dt):
+        sys.exit(
+            f"ERROR: --snapshot-dt must be a plain integer like 20260414, "
+            f"got {args.snapshot_dt!r}."
         )
 
     if not SRC.exists():
@@ -97,16 +156,16 @@ def main() -> None:
     # retyping them from memory or a stale note -- the generated
     # vw_ls_output and the hand-run GATE 0 views silently drifting onto
     # different cutoffs would invalidate every check without necessarily
-    # looking wrong.
-    matches = _SNAPSHOT_PARAM.findall(body)
-    counts: dict[str, list[str]] = {"snapshot_dt": [], "as_of_load_ts": []}
-    for value, name in matches:
-        counts[name.lower()].append(value)
+    # looking wrong. Matched within query_body (not the header comment)
+    # since that's the text actually spliced/emitted below.
+    matches_by_name: dict[str, list[re.Match]] = {"snapshot_dt": [], "as_of_load_ts": []}
+    for m in _SNAPSHOT_PARAM.finditer(query_body):
+        matches_by_name[m.group(2).lower()].append(m)
 
     errors = [
-        f"  {name}: found {len(values)} matches ({values!r}), expected exactly 1"
-        for name, values in counts.items()
-        if len(values) != 1
+        f"  {name}: found {len(ms)} matches, expected exactly 1"
+        for name, ms in matches_by_name.items()
+        if len(ms) != 1
     ]
     if errors:
         sys.exit(
@@ -117,18 +176,45 @@ def main() -> None:
             + "\nThe snapshots CTE has changed shape -- update _SNAPSHOT_PARAM "
             "in this script."
         )
-    params = {name: values[0] for name, values in counts.items()}
+    production_params = {name: ms[0].group(1) for name, ms in matches_by_name.items()}
+
+    # Splice overrides into the exact matched literal spans (not a blind
+    # string replace) so nothing else in the query body that happens to
+    # contain the same digits/text is touched. Apply in descending start
+    # order so earlier spans' offsets stay valid after later substitutions.
+    override_values = {
+        "snapshot_dt": args.snapshot_dt,
+        "as_of_load_ts": f"'{args.as_of_load_ts}'" if args.as_of_load_ts is not None else None,
+    }
+    effective_params = dict(production_params)
+    spans = []
+    for name, new_text in override_values.items():
+        if new_text is None:
+            continue
+        m = matches_by_name[name][0]
+        spans.append((m.start(1), m.end(1), new_text))
+        effective_params[name] = new_text
+    for start, end, new_text in sorted(spans, key=lambda s: s[0], reverse=True):
+        query_body = query_body[:start] + new_text + query_body[end:]
 
     print("-- Auto-generated by scripts/build_vw_ls_output.py -- DO NOT EDIT BY HAND.")
     print(f"-- Built from data/loan_summary_query.txt @ commit {sha}{dirty_note}")
     print("-- Record this commit SHA in GATE 6 of loan_summary_query_validation_queries.sql.")
     print("--")
+    if spans:
+        print("-- OVERRIDE IN EFFECT -- this view does NOT use loan_summary_query.txt's")
+        print("-- checked-in PRODUCTION cutoff (e.g. for testing against a partial/")
+        print("-- in-progress reload). data/loan_summary_query.txt itself is unmodified:")
+        for name in ("snapshot_dt", "as_of_load_ts"):
+            if name in [n for n, v in override_values.items() if v is not None]:
+                print(f"--   {name}: production {production_params[name]} -> used {effective_params[name]}")
+        print("--")
     print("-- Use these EXACT values for :snapshot_dt / :as_of_load_ts when")
     print("-- running loan_summary_query_validation_queries.sql -- if they don't")
     print("-- match what you substitute there, GATE 0's views and this production")
     print("-- view are validating two different cutoffs without any error raised.")
     for name in ("snapshot_dt", "as_of_load_ts"):
-        print(f"--   {name}: {params[name]}")
+        print(f"--   {name}: {effective_params[name]}")
     print("--")
     print(f"CREATE OR REPLACE VIEW {schema}.vw_ls_output AS")
     print(query_body.rstrip().rstrip(";"))
