@@ -1,18 +1,20 @@
 -- ============================================================================
 -- repayment_uid_rebuild_verification.sql -- ad-hoc diagnostic, not part of
 -- the committed validation suite. analytics.momo_loan_book_tracker_
--- repayments_daily has been rebuilt and reloaded with data through March
--- 2026. This re-checks the two headline repayment_uid problems found
--- against the OLD table -- (1) raw duplicate-posting rate (repayment_uid_
--- dedup_test.sql: 40.6% of all rows, driven by a small number of huge
--- multi-customer clusters) and (2) cross-customer repayment_uid sharing
--- (repayment_uid_cross_customer_prevalence.sql: 43.8% of rows, one uid
--- shared by up to 68,489 distinct customers) -- against the REBUILT table,
--- scoped to date_key <= 20260331 to match what's actually been reloaded so
--- far. Queries the raw table directly (mirrors vw_bh_repay_dedup's own
--- fid-level dedup logic inline) rather than depending on the validation
--- schema's GATE 0 views, so this can be run immediately without first
--- rebuilding those views against the new load.
+-- repayments_daily has been rebuilt; the warehouse now has data through
+-- 2026-06-09, which for the first time includes April 2026 -- the actual
+-- incident period this whole investigation started from. This re-checks
+-- the two headline repayment_uid problems found against the OLD table --
+-- (1) raw duplicate-posting rate (repayment_uid_dedup_test.sql: 40.6% of
+-- all rows, driven by a small number of huge multi-customer clusters) and
+-- (2) cross-customer repayment_uid sharing (repayment_uid_cross_customer_
+-- prevalence.sql: 43.8% of rows, one uid shared by up to 68,489 distinct
+-- customers) -- against the REBUILT table, scoped to date_key <= 20260609
+-- to match what's actually been reloaded so far. Queries the raw table
+-- directly (mirrors vw_bh_repay_dedup's own fid-level dedup logic inline)
+-- rather than depending on the validation schema's GATE 0 views, so this
+-- can be run immediately without first rebuilding those views against the
+-- new load.
 -- ============================================================================
 
 WITH repay_fid_deduped AS (
@@ -33,7 +35,7 @@ WHERE ova = 'XTRAFLOAT-AGENT'
 AND repayment_fid IS NOT NULL
 AND customer_msisdn IS NOT NULL
 AND try_cast(repayment_ts AS timestamp) IS NOT NULL
-AND date_key <= 20260331
+AND date_key <= 20260609
 )
 WHERE rn = 1
 ),
@@ -86,7 +88,10 @@ FROM dup_check d;
 -- problem (or reloaded the same underlying batch-tagging behavior), and
 -- B2b's reconciliation approach should stay as documented (materiality-
 -- based gate, no repayment_uid-based dedup) rather than assuming a fix.
--- Note this only covers Jan-Mar 2026 (date_key <= 20260331) since that's
--- what's been reloaded -- it does NOT yet tell us whether the April 2026
--- incident itself would reconcile differently once that period is
--- reloaded too.
+-- This now covers Jan-Jun 2026 (date_key <= 20260609), which INCLUDES
+-- April 2026 -- the actual incident period this investigation started
+-- from. Unlike the earlier Jan-Mar-only run, a clean result here is
+-- direct evidence the fix covers the incident window itself, not just an
+-- adjacent period. If elevated, isolate April specifically (date_key
+-- BETWEEN 20260401 AND 20260430) to see whether it's disproportionately
+-- affected relative to the rest of the window.
