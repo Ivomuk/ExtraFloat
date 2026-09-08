@@ -110,8 +110,15 @@ from pd_model.preprocessing.transformations import (
     get_and_classify_pd_features,
 )
 from pd_model.scoring.iv_selector import iv_filter_phase_2
+from pd_model.validation.schema import compute_agent_overlap
 
 logger = get_logger(__name__)
+
+# Above this, train/validation agent overlap is high enough that OOT
+# validation is no longer testing on a materially different population --
+# see compute_agent_overlap()'s docstring. A warning, not a hard failure:
+# overlap alone is expected for a cross-sectional model, not a defect.
+AGENT_OVERLAP_WARN_THRESHOLD = 0.95
 
 
 # ======================================================================== #
@@ -322,6 +329,28 @@ def run_pipeline(args: argparse.Namespace) -> None:
         logger.info("=== Step 2: Phase 2.1 -- transaction behaviour features (frozen per-split date) ===")
         train_snap_df = _load_snapshot(args.train_file, args.train_snapshot_date, "train")
         val_snap_df = _load_snapshot(args.val_file, args.val_snapshot_date, "validation")
+
+        overlap = compute_agent_overlap(train_snap_df, val_snap_df, id_col=feature_config.AGENT_KEY)
+        logger.info(
+            "Phase 2.1 train/val agent overlap: %d of %d val agents (%.1f%%) also appear "
+            "in train (%d train agents, %d val agents)",
+            overlap["n_overlap"],
+            overlap["n_val"],
+            100 * overlap["overlap_pct_of_val"],
+            overlap["n_train"],
+            overlap["n_val"],
+        )
+        if overlap["overlap_pct_of_val"] > AGENT_OVERLAP_WARN_THRESHOLD:
+            logger.warning(
+                "Phase 2.1 train/val agent overlap is %.1f%% of validation agents (> %.0f%% "
+                "threshold) -- OOT validation is not testing on a materially different "
+                "population. Not a hard failure (expected for a cross-sectional model), but "
+                "worth weighing alongside the known flat-snapshot join limitation (see Step 2 "
+                "comment above) when interpreting validation AUC.",
+                100 * overlap["overlap_pct_of_val"],
+                100 * AGENT_OVERLAP_WARN_THRESHOLD,
+            )
+
         snap_df = pd.concat([train_snap_df, val_snap_df], ignore_index=True, sort=False)
         snap_df = _parse_dates(snap_df)
         snap_df = run_phase_2_1_richer_tx_behaviour(snap_df, cfg=cfg)

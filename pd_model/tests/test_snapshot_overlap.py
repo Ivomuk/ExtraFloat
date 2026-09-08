@@ -19,30 +19,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-
-def compute_agent_overlap(
-    df_train: pd.DataFrame,
-    df_val: pd.DataFrame,
-    id_col: str = "agent_msisdn",
-) -> dict:
-    """Compute agent overlap between training and validation DataFrames.
-
-    Returns dict with:
-        n_train, n_val, n_overlap,
-        overlap_pct_of_train, overlap_pct_of_val
-    """
-    train_ids = set(df_train[id_col].dropna().astype(str))
-    val_ids = set(df_val[id_col].dropna().astype(str))
-    overlap = train_ids & val_ids
-    n_train = len(train_ids)
-    n_val = len(val_ids)
-    return {
-        "n_train": n_train,
-        "n_val": n_val,
-        "n_overlap": len(overlap),
-        "overlap_pct_of_train": len(overlap) / n_train if n_train else 0.0,
-        "overlap_pct_of_val": len(overlap) / n_val if n_val else 0.0,
-    }
+from pd_model.validation.schema import compute_agent_overlap
 
 
 class TestComputeAgentOverlap:

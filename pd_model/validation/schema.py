@@ -114,3 +114,43 @@ def require_index_alignment(
             f"df_a has {len(df_a)} rows, df_b has {len(df_b)} rows; "
             "indices are not identical."
         )
+
+
+def compute_agent_overlap(
+    df_train: pd.DataFrame,
+    df_val: pd.DataFrame,
+    id_col: str = "agent_msisdn",
+) -> dict:
+    """Compute agent overlap between training and validation DataFrames.
+
+    An agent appearing in both training and validation snapshots is
+    expected and acceptable for a cross-sectional model -- it is the same
+    entity measured at two different points in time. Very high overlap
+    (>95%) is worth a second look, since it means OOT validation is not
+    testing on a materially different population; combined with labels
+    that are persistent across periods (e.g. a delinquent agent tends to
+    stay delinquent), high overlap can inflate OOT AUC. This function only
+    reports the numbers -- it does not raise, since overlap alone is not
+    a defect.
+
+    Args:
+        df_train: Training DataFrame.
+        df_val:   Validation DataFrame.
+        id_col:   Column identifying the agent (default ``"agent_msisdn"``).
+
+    Returns:
+        dict with n_train, n_val, n_overlap, overlap_pct_of_train,
+        overlap_pct_of_val.
+    """
+    train_ids = set(df_train[id_col].dropna().astype(str))
+    val_ids = set(df_val[id_col].dropna().astype(str))
+    overlap = train_ids & val_ids
+    n_train = len(train_ids)
+    n_val = len(val_ids)
+    return {
+        "n_train": n_train,
+        "n_val": n_val,
+        "n_overlap": len(overlap),
+        "overlap_pct_of_train": len(overlap) / n_train if n_train else 0.0,
+        "overlap_pct_of_val": len(overlap) / n_val if n_val else 0.0,
+    }
