@@ -33,8 +33,37 @@ Usage:
     # (built from checkpoint 0), DROP TABLE/CREATE TABLE ... AS SELECT for
     # checkpoint 2 (built from checkpoint 1), then CREATE OR REPLACE VIEW
     # for vw_bh_output (built from checkpoint 2).
+
+Testing against a partial/in-progress reload
+---------------------------------------------
+The checked-in snapshot_dt/as_of_load_ts/snapshot_ts are PRODUCTION values
+-- they may be later than what's actually been reloaded (e.g. the file
+says snapshot_dt=20260731 while the warehouse only has data through
+20260609). Running the production literals against partial data does not
+error -- it silently produces truncated/empty results for everything
+after the load cutoff.
+
+Pass --snapshot-dt / --as-of-load-ts / --snapshot-ts to substitute
+test-time values ONLY in the generated output -- data/borrower_history.txt
+itself is never modified. Since the snapshots CTE is legitimately
+redefined twice in this file (checkpoint 0 and checkpoint 1 each need
+their own copy, as checkpoint 1 is a separate SQL statement that can't
+see checkpoint 0's CTEs), an override replaces BOTH occurrences of that
+parameter, not just the first.
+
+    python scripts/build_vw_bh_output.py <validation_schema> \\
+        --snapshot-dt 20260609 \\
+        --as-of-load-ts "2026-09-09 00:00:00.000" \\
+        --snapshot-ts "2026-09-09 00:00:00.000" \\
+        > vw_bh_output_test.sql
+
+Use the SAME overridden values for :snapshot_dt / :as_of_load_ts /
+:snapshot_ts when running borrower_history_validation_queries.sql's GATE 0
+views for this test -- otherwise GATE 0 and vw_bh_output validate
+different cutoffs.
 """
 
+import argparse
 import re
 import subprocess
 import sys
@@ -111,14 +140,52 @@ def _require_placeholder(part: str, placeholder: str, label: str) -> None:
 
 
 def main() -> None:
-    if len(sys.argv) != 2:
-        sys.exit(f"Usage: python {Path(__file__).name} <validation_schema>")
-    schema = sys.argv[1]
+    parser = argparse.ArgumentParser(
+        description=(
+            "Assemble the four vw_bh_output statements from the checked-in "
+            "data/borrower_history.txt."
+        ),
+    )
+    parser.add_argument("validation_schema")
+    parser.add_argument(
+        "--snapshot-dt",
+        metavar="YYYYMMDD",
+        help=(
+            "Override snapshot_dt (plain integer, e.g. 20260609) for THIS "
+            "generated output only -- data/borrower_history.txt is never "
+            "modified. Replaces BOTH occurrences (checkpoint 0 and "
+            "checkpoint 1 each redefine the snapshots CTE)."
+        ),
+    )
+    parser.add_argument(
+        "--as-of-load-ts",
+        metavar="'YYYY-MM-DD HH:MM:SS.fff'",
+        help=(
+            "Override as_of_load_ts (unquoted) for THIS generated output "
+            "only. Replaces both occurrences."
+        ),
+    )
+    parser.add_argument(
+        "--snapshot-ts",
+        metavar="'YYYY-MM-DD HH:MM:SS.fff'",
+        help=(
+            "Override snapshot_ts (unquoted) for THIS generated output "
+            "only. Replaces both occurrences."
+        ),
+    )
+    args = parser.parse_args()
+
+    schema = args.validation_schema
     if not _VALID_SCHEMA.match(schema):
         sys.exit(
             f"ERROR: '{schema}' is not a valid unquoted SQL identifier "
             "(letters/digits/underscore, not starting with a digit). "
             "Refusing to interpolate it into a CREATE TABLE/VIEW statement."
+        )
+    if args.snapshot_dt is not None and not re.fullmatch(r"\d+", args.snapshot_dt):
+        sys.exit(
+            f"ERROR: --snapshot-dt must be a plain integer like 20260609, "
+            f"got {args.snapshot_dt!r}."
         )
 
     if not SRC.exists():
@@ -129,6 +196,52 @@ def main() -> None:
     dirty_note = " -- WORKING TREE HAS UNCOMMITTED CHANGES TO THIS FILE, SHA ABOVE IS STALE" if dirty else ""
 
     body = SRC.read_text()
+
+    # Extract + validate the literal snapshot_dt/as_of_load_ts/snapshot_ts
+    # baked into THIS file BEFORE any override is applied, so drift between
+    # the file's own two redefinitions is still caught even when overriding.
+    matches = list(_SNAPSHOT_PARAM.finditer(body))
+    matches_by_name: dict[str, list[re.Match]] = {"snapshot_dt": [], "as_of_load_ts": [], "snapshot_ts": []}
+    for m in matches:
+        matches_by_name[m.group(2)].append(m)
+
+    errors = [
+        f"  {name}: found {len(ms)} matches ({[m.group(1) for m in ms]!r}), expected at least 1 and all equal"
+        for name, ms in matches_by_name.items()
+        if len(ms) == 0 or len({m.group(1) for m in ms}) != 1
+    ]
+    if errors:
+        sys.exit(
+            "ERROR: could not unambiguously extract snapshot_dt/as_of_load_ts/"
+            "snapshot_ts from data/borrower_history.txt's snapshots CTE -- "
+            "refusing to generate SQL against a mismatched or guessed cutoff.\n"
+            + "\n".join(errors)
+            + "\nEither the snapshots CTE has changed shape (update "
+            "_SNAPSHOT_PARAM in this script) or its redefinitions have drifted "
+            "out of sync with each other."
+        )
+    production_params = {name: ms[0].group(1) for name, ms in matches_by_name.items()}
+
+    # Splice overrides into every matched span for the overridden param(s)
+    # (both occurrences, since the CTE is legitimately redefined twice) --
+    # not a blind string replace, so nothing else in the file that happens
+    # to contain the same digits/text is touched. Apply in descending start
+    # order so earlier spans' offsets stay valid after later substitutions.
+    override_values = {
+        "snapshot_dt": args.snapshot_dt,
+        "as_of_load_ts": f"'{args.as_of_load_ts}'" if args.as_of_load_ts is not None else None,
+        "snapshot_ts": f"'{args.snapshot_ts}'" if args.snapshot_ts is not None else None,
+    }
+    effective_params = dict(production_params)
+    spans = []
+    for name, new_text in override_values.items():
+        if new_text is None:
+            continue
+        for m in matches_by_name[name]:
+            spans.append((m.start(1), m.end(1), new_text))
+        effective_params[name] = new_text
+    for start, end, new_text in sorted(spans, key=lambda s: s[0], reverse=True):
+        body = body[:start] + new_text + body[end:]
 
     part_a0, rest0 = _split_once(body, CHECKPOINT_MARKER_0, "checkpoint 0")
     part_a1, rest = _split_once(rest0, CHECKPOINT_MARKER_1, "checkpoint 1")
@@ -145,58 +258,24 @@ def main() -> None:
     part_a2 = part_a2.replace(CHECKPOINT_PLACEHOLDER_1, checkpoint_table_1)
     part_a3 = part_a3.replace(CHECKPOINT_PLACEHOLDER_2, checkpoint_table_2)
 
-    # Extract the literal snapshot_dt/as_of_load_ts/snapshot_ts baked into
-    # THIS file, so whoever runs the validation queries copies the exact
-    # values instead of retyping them from memory or a stale note -- the
-    # generated vw_bh_output and the hand-run validation queries silently
-    # drifting onto different cutoffs would invalidate every reconciliation
-    # result without necessarily looking wrong.
-    #
-    # Fail closed: if borrower_history.txt's snapshots CTE has changed shape
-    # such that a parameter is missing, or the file's copies of it disagree
-    # (e.g. one got hand-edited and the others didn't), silently picking one
-    # match via a dict comprehension would let a wrong or stale value flow
-    # into a runnable CREATE TABLE/VIEW statement with no warning that
-    # anything went wrong. Refuse to emit SQL at all in that case instead.
-    #
-    # NOTE: the snapshots CTE is legitimately redefined twice in this file --
-    # once in checkpoint 0's own WITH clause, and again at the start of
-    # checkpoint 1's remainder, since checkpoint 1 is a separate SQL
-    # statement that can't see checkpoint 0's CTEs. So each param is expected
-    # to match at least once and every match must agree, not "exactly one
-    # match total".
-    matches = _SNAPSHOT_PARAM.findall(body)
-    counts: dict[str, list[str]] = {"snapshot_dt": [], "as_of_load_ts": [], "snapshot_ts": []}
-    for value, name in matches:
-        counts[name].append(value)
-
-    errors = [
-        f"  {name}: found {len(values)} matches ({values!r}), expected at least 1 and all equal"
-        for name, values in counts.items()
-        if len(values) == 0 or len(set(values)) != 1
-    ]
-    if errors:
-        sys.exit(
-            "ERROR: could not unambiguously extract snapshot_dt/as_of_load_ts/"
-            "snapshot_ts from data/borrower_history.txt's snapshots CTE -- "
-            "refusing to generate SQL against a mismatched or guessed cutoff.\n"
-            + "\n".join(errors)
-            + "\nEither the snapshots CTE has changed shape (update "
-            "_SNAPSHOT_PARAM in this script) or its redefinitions have drifted "
-            "out of sync with each other."
-        )
-    params = {name: values[0] for name, values in counts.items()}
-
     print("-- Auto-generated by scripts/build_vw_bh_output.py -- DO NOT EDIT BY HAND.")
     print(f"-- Built from data/borrower_history.txt @ commit {sha}{dirty_note}")
     print("-- Record this commit SHA in GATE 6 of borrower_history_validation_queries.sql.")
     print("--")
+    if spans:
+        print("-- OVERRIDE IN EFFECT -- this does NOT use borrower_history.txt's checked-in")
+        print("-- PRODUCTION cutoff (e.g. for testing against a partial/in-progress reload).")
+        print("-- data/borrower_history.txt itself is unmodified:")
+        for name in ("snapshot_dt", "as_of_load_ts", "snapshot_ts"):
+            if override_values[name] is not None:
+                print(f"--   {name}: production {production_params[name]} -> used {effective_params[name]}")
+        print("--")
     print("-- Use these EXACT values for :snapshot_dt / :as_of_load_ts / :snapshot_ts")
     print("-- when running borrower_history_validation_queries.sql -- if they don't match")
     print("-- what you substitute there, GATE 0's views and this production view are")
     print("-- validating two different cutoffs without any error being raised.")
     for name in ("snapshot_dt", "as_of_load_ts", "snapshot_ts"):
-        print(f"--   {name}: {params[name]}")
+        print(f"--   {name}: {effective_params[name]}")
     print("--")
     print("-- Runs as seven statements: checkpoint 0 is dropped and rebuilt first,")
     print("-- then checkpoint 1 (built from checkpoint 0), then checkpoint 2 (built")
