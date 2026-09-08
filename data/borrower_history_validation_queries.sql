@@ -1025,6 +1025,78 @@ FROM joined;
 -- source -- do not assume the earlier rejection still holds without
 -- re-running it against the rebuilt table.
 --
+-- APRIL RELOADED, GAP EXPLAINED BUT NOT BY repayment_uid (2026-09,
+-- data/repayment_uid_rebuild_verification.sql,
+-- data/b2b_reconciliation_april.sql, data/anomaly_open_*.sql,
+-- data/repayment_uid_and_anomaly_overlap_test.sql): the warehouse now
+-- loads through 2026-06-09, finally covering the April incident.
+-- repayment_uid_rebuild_verification.sql re-run through this window shows
+-- the fix holds (5.9% duplicate rate, 4.5% cross-customer sharing, max 5
+-- customers/uid -- a small uptick from the Jan-Mar-only 4.1%/2.9%/4, but
+-- nowhere near the pre-rebuild 40.6%/43.8%/68,489). Yet
+-- b2b_reconciliation_april.sql shows April-disbursed loans reconcile
+-- WORSE than Jan-Mar even after the rebuild (59% exact match, 75.9%/87.8%
+-- within 1%/5% of principal, 8.27% volume error, vs Jan-Mar's 72.5%/
+-- 91.1%/94.7%/5.20%) -- so the batch-tagging fix and April's actual
+-- reconciliation outcome have decoupled: something else drove the
+-- incident.
+--
+-- That something else is a rising loan-overlap/rollover rate
+-- (loan_concurrency_by_month.sql): the ANOMALY_OPEN rate climbs from 0.3%
+-- in January to 10.6% in June, a real accelerating trend, not a one-off
+-- April spike. Raw daily loan_state_daily timelines
+-- (anomaly_open_raw_timeline_examples.sql, real examples incl.
+-- phonenumber 256779214623) show the documented mechanism ("outstanding
+-- balance was transferred to the new loan") does NOT hold as described:
+-- the flagged loan's OWN lifetime_repaid_ugx keeps climbing after the
+-- flag is set and usually reaches its own disbursed_amount within 1-6
+-- days (occasionally much longer -- one example ran 43 days), at which
+-- point loan_status moves to CLOSED. anomaly_open_balance_transfer_
+-- test.sql confirms this holds in aggregate: 97.2% of ANOMALY_OPEN loans
+-- show zero inflation in the next loan's lifetime_disbursed_ugx.
+-- anomaly_open_aging_only_test.sql confirms a second loan really is a
+-- necessary precondition for the flag (0 of 63,130 loans with no second
+-- loan ever became ANOMALY_OPEN, even aged up to 159 days) -- so the
+-- flag's true mechanism is: a second loan gets disbursed while the first
+-- is still unpaid, and repayment continues to be tracked against the
+-- ORIGINAL loan, not transferred. The reconciliation-breaking
+-- consequence is that borrower_history.txt's phonenumber-window
+-- attribution heuristic uses the second loan's disbursement as this
+-- loan's window boundary, so any repayment landing after that boundary
+-- (which the source table correctly still credits to the original loan)
+-- gets mis-attributed by the heuristic to the new loan instead.
+--
+-- Quantified via anomaly_open_b2b_correlation_test.sql and repayment_uid_
+-- and_anomaly_overlap_test.sql (same surviving-loan population
+-- b2b_reconciliation_*.sql scores, cross-tabulated against exact-match
+-- rate): loans EVER ANOMALY_OPEN (17% of the surviving population, much
+-- larger than the ~90,730-loan "currently anomalous" count, since most
+-- resolve to CLOSED and re-enter "surviving") show 61.6% exact match vs
+-- 70.3% unexposed -- an 8.7-point gap, smaller per-loan than the
+-- repayment_uid cross-customer effect (52.7% vs 69.9%, 6.3% of loans,
+-- 17.2-point gap) but touching ~2.7x more loans. The two exposures
+-- overlap only modestly more than chance (54,112 loans hit both vs
+-- ~49,406 expected under independence), and their effects on mismatch are
+-- roughly ADDITIVE, not redundant (71.3% neither -> 62.9% anomaly-only ->
+-- 54.5% uid-only -> 44.6% both, close to the 46.1% a simple sum of the
+-- two individual point-drops predicts) -- genuinely two separate,
+-- compounding mechanisms. Correctly combined without double-counting the
+-- overlap: loans touched by EITHER mechanism account for ~2.5 points of
+-- the overall pooled exact-match rate (71.3% neither-exposed vs 68.8%
+-- pooled across all four groups). This is concentrated much more heavily
+-- in April onward than this pooled Jan-Jun figure suggests, consistent
+-- with the ANOMALY_OPEN rate's continuing rise through June.
+--
+-- Two loose ends flagged but not yet resolved: (1) a genuinely silent
+-- population -- 6,734 of 63,130 loans with no second loan ever taken and
+-- aged 7+ days (up to 159 days) never resolve to CLOSED/SETTLED and never
+-- get flagged ANOMALY_OPEN either, since that requires a second loan --
+-- these loans are untracked by any existing status mechanism, worth its
+-- own investigation. (2) the repayment_uid-based dedup hypothesis (still
+-- rejected above as net-harmful against the pre-rebuild table) has not
+-- actually been re-run against the rebuilt table per the note above --
+-- that re-test is still outstanding.
+--
 -- MONTHLY BREAKDOWN (data/b2b_monthly_breakdown.sql, from the same live
 -- run): the 68.6%/6.28% blended figures above are NOT uniform over time --
 -- they're dragged down by a specific, dateable incident. Grouped by each
