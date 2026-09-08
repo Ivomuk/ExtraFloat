@@ -252,10 +252,19 @@ WHERE rn = 1
 )
 WHERE rn2 = 1;
 
+-- POPULATION-STABILITY FIX (2026-09, mirrors borrower_history.txt's
+-- loan_state_anomalies CTE after the ANOMALY_OPEN fix): only excludes a
+-- loan if it is currently ANOMALY_OPEN AND days_aging > 7 -- was: any
+-- current ANOMALY_OPEN loan regardless of age. See the ANOMALY_OPEN FIX
+-- IMPLEMENTED note further below for the full rationale. Kept in sync here
+-- so vw_bh_surviving_loans (and everything downstream of it, including the
+-- repayment_uid dedup re-test) scores against the same population
+-- borrower_history.txt actually produces post-fix.
 CREATE OR REPLACE VIEW :validation_schema.vw_bh_loan_state_anomalies AS
 SELECT disbursement_fid
 FROM :validation_schema.vw_bh_loan_state_snapshot
-WHERE loan_status = 'ANOMALY_OPEN' OR is_anomaly_open = true;
+WHERE (loan_status = 'ANOMALY_OPEN' OR is_anomaly_open = true)
+AND days_aging > 7;
 
 -- Surviving loan-level population: exactly what feeds classified/loan_core
 -- in borrower_history.txt (disbursements, ANOMALY_OPEN excluded). Every
