@@ -15,18 +15,10 @@
 --     at the time of payment -- see repay_attributed below. This is a proxy
 --     for the exact requestid match the old transaction log provided.
 --   analytics.momo_loan_book_tracker_loan_state_daily     -- daily snapshot
---     of loan state, keyed by disbursement_fid. Used to (a) detect loans
---     that were EVER ANOMALY_OPEN at any point in their history (see
---     ever_anomaly_open in checkpoint 1) and correct their total_recovered/
---     total_cure_cashflow to the authoritative lifetime_repaid_ugx -- NOT to
---     exclude them from the population (a loan flagged ANOMALY_OPEN is not a
---     system error: its own lifetime_repaid_ugx keeps climbing normally and
---     it typically resolves to CLOSED within days -- confirmed via
---     data/anomaly_open_balance_transfer_test.sql; the population is instead
---     gated on days_aging so only a loan stuck ANOMALY_OPEN well past
---     normal resolution time is excluded -- see loan_state_anomalies below),
---     and (b) enrich the output with authoritative lifecycle/charge fields
---     for the borrower's latest loan.
+--     of loan state, keyed by disbursement_fid. Used to (a) exclude
+--     ANOMALY_OPEN loans -- system errors, not real borrower behavior -- from
+--     the loan-level population entirely, and (b) enrich the output with
+--     authoritative lifecycle/charge fields for the borrower's latest loan.
 --
 -- EXECUTION: this file is NOT a single runnable statement -- it is split by
 -- the ##BORROWER_HISTORY_CHECKPOINT_0##/_1##/_2## markers below into four
@@ -59,23 +51,6 @@
 -- change -- verified that NULL flags already propagate through those SUM/
 -- CASE expressions as a correct no-op (an unseasoned loan neither breaks
 -- nor extends a streak).
--- A second deliberate behavior change: loan_state_anomalies (checkpoint 0)
--- no longer excludes a loan purely because its LATEST snapshot shows
--- ANOMALY_OPEN -- that was based on a "system error/balance transfer"
--- theory since confirmed false, and was unstable (the same loan flipped
--- included/excluded across re-runs depending on incidental query-run
--- timing relative to its own resolution). It is now gated on days_aging, so
--- a freshly-flagged loan -- overwhelmingly likely to resolve within days --
--- stays in the population, and only a loan stuck ANOMALY_OPEN well past
--- normal resolution time is excluded. Separately, loan_final now computes
--- ever_anomaly_open (from the full loan_state_daily history, not just the
--- latest snapshot) and overrides total_recovered/total_cure_cashflow with
--- the authoritative lifetime_repaid_ugx for any loan that was ever
--- ANOMALY_OPEN, correcting a confirmed attribution-window misattribution
--- (repayments landing after a second loan's disbursement were being
--- credited to the wrong loan by the phonenumber-window heuristic below).
--- The cure-timing flags (on_time_24h_flag etc.) are NOT corrected by this
--- change -- see the KNOWN LIMITATION comment near their definition.
 -- ============================================================================
 WITH snapshots AS (
 -- as_of_load_ts bounds inserted_ts across all three source tables so that a
@@ -309,26 +284,12 @@ FROM loan_state_loads_dedup lsld
 WHERE rn2 = 1
 ),
 loan_state_anomalies AS (
--- POPULATION-STABILITY FIX: previously excluded ANY current ANOMALY_OPEN
--- loan, based on a "system error" theory since confirmed false (an
--- ANOMALY_OPEN loan's own lifetime_repaid_ugx keeps climbing normally and
--- it typically resolves to CLOSED within 1-6 days -- see
--- data/anomaly_open_raw_timeline_examples.sql,
--- data/anomaly_open_balance_transfer_test.sql). That current-status-only
--- exclusion was unstable: the same loan flipped between included/excluded
--- across re-runs purely from incidental query-run timing relative to its
--- own resolution. Gated on days_aging so normal, fast-resolving cases stay
--- IN the population; only a loan still stuck in ANOMALY_OPEN well past the
--- time a normal case takes to resolve is treated as a genuine long-running
--- anomaly and excluded. Threshold of 7 days matches this project's
--- existing aging-bucket convention (see
--- data/anomaly_open_aging_only_test.sql,
--- data/silently_stuck_loans_characterization.sql); tune if warehouse data
--- shows normal resolution routinely exceeding this.
+-- ANOMALY_OPEN = system error, not real borrower behavior. Excluded from
+-- the loan-level population entirely (see classified below) so a data
+-- glitch can't masquerade as a borrower default in the risk features.
 SELECT disbursement_fid
 FROM loan_state_snapshot
-WHERE (loan_status = 'ANOMALY_OPEN' OR is_anomaly_open = true)
-AND days_aging > 7
+WHERE loan_status = 'ANOMALY_OPEN' OR is_anomaly_open = true
 ),
 classified AS (
 SELECT
@@ -416,21 +377,6 @@ ORDER BY date_key DESC
 FROM loan_state_loads_dedup lsld
 )
 WHERE rn2 = 1
-),
-loan_ever_anomaly_open AS (
--- Per-loan flag: was this disbursement_fid EVER ANOMALY_OPEN at ANY
--- date_key in its own history -- not just its LATEST snapshot (all
--- loan_state_snapshot exposes). Computed from loan_state_loads_dedup's
--- one-row-per-(disbursement_fid, date_key) history so a loan that has since
--- resolved to CLOSED still carries the fact that it passed through
--- ANOMALY_OPEN. Used ONLY to correct total_recovered/total_cure_cashflow in
--- loan_final below -- population exclusion is handled separately by the
--- aging-gated loan_state_anomalies in checkpoint 0.
-SELECT
-disbursement_fid,
-bool_or(loan_status = 'ANOMALY_OPEN' OR is_anomaly_open = true) AS ever_anomaly_open
-FROM loan_state_loads_dedup
-GROUP BY disbursement_fid
 ),
 loan_core AS (
 -- Combines what used to be two separate GROUP BY requestid, phonenumber
@@ -541,32 +487,10 @@ l.requestid,
 l.phonenumber,
 l.disbursement_ts,
 l.disbursed_amount,
--- ANOMALY-ATTRIBUTION FIX: for a loan that was EVER ANOMALY_OPEN
--- (ever_anomaly_open below), the phonenumber-window repayment-attribution
--- heuristic (attribution_timeline/attribution_filled in checkpoint 0)
--- misattributes repayments landing after a SECOND loan's disbursement to
--- that second loan instead of this one, even though the source system
--- correctly keeps crediting THIS loan's own lifetime_repaid_ugx. Confirmed
--- empirically: ever-ANOMALY_OPEN loans show a 70.3% vs 61.6% exact-match
--- rate against lifetime_repaid_ugx ground truth (~8.7-point gap, ~17% of
--- the surviving population -- see data/anomaly_open_b2b_correlation_test.sql).
--- For these loans, trust loan_state_daily's own authoritative
--- lifetime_repaid_ugx (ls_lifetime_repaid_ugx below) over the
--- attribution-derived total from {{CHECKPOINT_TABLE_0}}; COALESCE falls
--- back to the attribution-derived figure if lifetime_repaid_ugx itself is
--- NULL (e.g. the loan has no loan_state_daily row at all).
-CASE
-WHEN COALESCE(eao.ever_anomaly_open, false)
-THEN COALESCE(ls.lifetime_repaid_ugx, l.total_recovered, 0)
-ELSE COALESCE(l.total_recovered, 0)
-END AS total_recovered,
+COALESCE(l.total_recovered,0) AS total_recovered,
 COALESCE(l.total_reimbursed,0) AS total_reimbursed,
 COALESCE(l.total_penalty,0) AS total_penalty,
-CASE
-WHEN COALESCE(eao.ever_anomaly_open, false)
-THEN COALESCE(ls.lifetime_repaid_ugx, l.total_recovered, 0)
-ELSE COALESCE(l.total_recovered, 0)
-END + COALESCE(l.total_reimbursed,0) AS total_cure_cashflow,
+COALESCE(l.total_recovered,0) + COALESCE(l.total_reimbursed,0) AS total_cure_cashflow,
 m.principal_cure_ts,
 m.full_balance_cure_ts,
 -- CAST(... AS DOUBLE) required for the same reason as cure_progress_base's
@@ -590,19 +514,6 @@ m.recovery_24h / NULLIF(l.disbursed_amount,0) AS pct_recovered_24h,
 (l.disbursed_amount - m.recovery_24h) / NULLIF(l.disbursed_amount,0) AS pct_unpaid_24h,
 (l.disbursed_amount - m.recovery_26h) AS unpaid_amount_26h,
 (l.disbursed_amount - m.recovery_26h) / NULLIF(l.disbursed_amount,0) AS pct_unpaid_26h,
--- KNOWN LIMITATION (in-scope decision, not an oversight): for loans that
--- were EVER ANOMALY_OPEN, total_recovered/total_cure_cashflow are corrected
--- to loan_state_daily's authoritative lifetime_repaid_ugx (see above), but
--- on_time_24h_flag/on_time_26h_flag/default_24h_flag/default_26h_flag/
--- severe_default_48h_flag below are NOT corrected. Those flags need the
--- precise TIMESTAMP each cure milestone was reached, itself derived
--- per-transaction from the same phonenumber-window attribution heuristic
--- responsible for the misattribution in the first place -- unlike the
--- scalar total, there is no equivalently authoritative replacement VALUE
--- for WHEN a transaction should have been attributed. This is a bounded,
--- accepted limitation. A real fix would need per-transaction requestid
--- matching (a separate, out-of-scope problem -- see the repayment_uid
--- cross-customer-collision work in data/repayment_uid_*.sql).
 -- Maturity-gated: NULL until the loan has actually had this many hours to
 -- cure, so an unseasoned loan reads as "not yet observable" rather than a
 -- default. See the snapshot_ts comment in the snapshots CTE above.
@@ -689,13 +600,10 @@ END AS loan_status,
 -- window-function cascade -- these ls_* columns are pure pass-through for
 -- everything between here and the final output (nothing in
 -- borrower_history_base/streaks/exposure_features reads or filters on them),
--- EXCEPT ls_lifetime_repaid_ugx, which this same CTE (loan_final) already
--- consumes above to correct total_recovered/total_cure_cashflow for
--- ever-ANOMALY_OPEN loans -- so joining earlier vs. later produces identical
--- final values per row, keyed only by requestid = disbursement_fid either
--- way. Joining here lets the ##BORROWER_HISTORY_CHECKPOINT_1##
--- materialization below carry these columns forward without a second read
--- of loan_state_snapshot downstream.
+-- so joining earlier vs. later produces identical final values per row,
+-- keyed only by requestid = disbursement_fid either way. Joining here lets
+-- the ##BORROWER_HISTORY_CHECKPOINT_1## materialization below carry these
+-- columns forward without a second read of loan_state_snapshot downstream.
 --
 -- KNOWN LIMITATION (confirmed via data/spot_check_loan_trace.sql, not a
 -- guess): when a borrower takes a second disbursement on the SAME calendar
@@ -709,7 +617,6 @@ END AS loan_status,
 -- back NULL, no error -- but expect NULL ls_loan_status/ls_aging_bucket/etc.
 -- for any loan that isn't the first disbursement a borrower took that day.
 -- Prevalence across the full loan book is not yet quantified.
-ls.lifetime_repaid_ugx AS ls_lifetime_repaid_ugx,
 ls.loan_status AS ls_loan_status,
 ls.aging_bucket AS ls_aging_bucket,
 ls.days_aging AS ls_days_aging,
@@ -738,8 +645,6 @@ ON l.requestid = m.requestid
 AND l.phonenumber = m.phonenumber
 LEFT JOIN loan_state_snapshot ls
 ON l.requestid = ls.disbursement_fid
-LEFT JOIN loan_ever_anomaly_open eao
-ON l.requestid = eao.disbursement_fid
 )
 SELECT * FROM loan_final
 -- ##BORROWER_HISTORY_CHECKPOINT_1##
