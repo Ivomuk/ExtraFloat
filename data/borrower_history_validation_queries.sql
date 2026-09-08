@@ -1170,6 +1170,53 @@ FROM joined;
 -- borrower_history.txt for this -- purely explanatory/diagnostic, per
 -- explicit instruction to validate without modifying the production
 -- query.
+--
+-- ANOMALY_OPEN FIX IMPLEMENTED (2026-09): unlike the repayment_uid/refund
+-- issues above (flagged as explanatory-only), the ANOMALY_OPEN population-
+-- stability and attribution findings above WERE acted on in
+-- borrower_history.txt (backed up first as
+-- data/borrower_history_pretablerebuild.txt). Two changes: (1)
+-- loan_state_anomalies now only excludes a loan from the population if it
+-- is currently ANOMALY_OPEN AND days_aging > 7 (was: any current
+-- ANOMALY_OPEN loan, regardless of age) -- closes the query-run-timing
+-- population instability while still excluding genuine long-running cases;
+-- (2) loan_final now computes ever_anomaly_open from the full
+-- loan_state_daily history and overrides total_recovered/
+-- total_cure_cashflow with the authoritative lifetime_repaid_ugx for any
+-- loan ever flagged ANOMALY_OPEN -- directly fixes the 70.3%/61.6%
+-- exact-match gap quantified above for that population. Cure-timing flags
+-- (on_time_24h_flag etc.) were deliberately NOT touched -- documented in
+-- the file itself as a bounded, accepted limitation, since there's no
+-- authoritative replacement VALUE for exactly when a misattributed
+-- transaction should have posted (unlike the scalar total, where
+-- lifetime_repaid_ugx is directly substitutable). Verified via
+-- scripts/build_vw_bh_output.py that vw_bh_output's final 50-column
+-- contract (names, order, count) is byte-identical before/after this
+-- change -- only checkpoint-1-internal SQL and comments differ.
+--
+-- SILENTLY-STUCK LOANS (loose end #1 above), STEP 2 RESULT
+-- (data/silently_stuck_loans_characterization.sql, live run): NOT a flat
+-- baseline rate. By disbursement month, pct_stuck (of all single-loan-
+-- customer loans aged 7+ days, i.e. not just the population that also
+-- lacks a second loan) is Jan 11.4%, Feb 11.3%, Mar 6.9%, Apr 13.7%
+-- (peak), May 10.7%, Jun 7.7% (partial month -- only 2 days/2,103 eligible
+-- loans, treat as noisy, not a real June decline). No clean monotonic
+-- trend like ANOMALY_OPEN's 0.3%->10.6% climb; instead it fluctuates in a
+-- roughly 7-14% band, with April as the clear high point -- consistent
+-- with April already being independently identified as a bounded incident
+-- window for the other two mechanisms above, though this population is
+-- untouched by either of those (single-loan customers have no attribution
+-- ambiguity). total_outstanding_ugx roughly doubles from the Jan-Mar band
+-- (~102-112M UGX/month) to Apr-May (~215-222M UGX/month), driven by both
+-- the higher stuck rate and the growing eligible population (6,802 in
+-- Jan -> 19,966 in May). This remains a genuine, separate status/
+-- monitoring gap from the ANOMALY_OPEN fix above (these loans can never be
+-- flagged ANOMALY_OPEN by construction, since that requires a second
+-- loan) -- worth escalating to the table owner as its own item, not
+-- something borrower_history.txt can fix by adjusting attribution logic.
+--
+-- STILL OUTSTANDING: loose end #2 above (repayment_uid dedup re-test
+-- against the rebuilt table) has not yet been re-run.
 
 -- N/A FOR XTRAFLOAT, CONFIRMED BY THE TABLE OWNER -- NOT A BLOCKING GATE:
 -- B3's eligibility filter requires interest_and_penalty_ugx > 0 (comparable
