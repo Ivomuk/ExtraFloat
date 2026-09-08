@@ -50,7 +50,7 @@ WHERE rn = 1
 ),
 loan_state_dedup AS (
 SELECT disbursement_fid, loan_uid, loan_status, is_anomaly_open,
-lifetime_disbursed_ugx, lifetime_repaid_ugx, current_loan_start_date, state_date
+lifetime_disbursed_ugx, lifetime_repaid_ugx, current_loan_start_date, date_key
 FROM (
 SELECT lsld.*,
 ROW_NUMBER() OVER (PARTITION BY disbursement_fid ORDER BY date_key DESC) rn2
@@ -95,7 +95,7 @@ ls.is_anomaly_open,
 ls.lifetime_disbursed_ugx,
 ls.lifetime_repaid_ugx,
 ls.current_loan_start_date,
-ls.state_date
+ls.date_key
 FROM loan_state_dedup ls
 JOIN disb_dedup d ON d.disbursement_fid = ls.disbursement_fid
 WHERE ls.loan_uid IN (SELECT loan_uid FROM sampled)
