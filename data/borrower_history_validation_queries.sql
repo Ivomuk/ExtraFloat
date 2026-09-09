@@ -1223,6 +1223,20 @@ FROM joined;
 -- rather than an arbitrary cutoff chosen before this population-level data
 -- existed.
 --
+-- STILL OUTSTANDING: the FIX CONFIRMED IN PRACTICE and MATERIALITY-ADJUSTED
+-- RESULT sections immediately below (100% exact match / 91.5%-95.3%
+-- materiality for ever_anomaly_open loans) were both measured against
+-- tbl_bh_loan_final built on the OLD 7-day threshold's population, not the
+-- current 30-day one. The total_recovered override logic itself is
+-- unchanged by the threshold value (it only affects which loans are
+-- excluded from the population entirely, not the correction applied to
+-- included ones), so these results should hold directionally, but they
+-- have not been re-run against the 30-day rebuild to confirm. Re-run
+-- data/anomaly_open_fix_verification.sql and
+-- data/attribution_materiality_verification.sql against a fresh
+-- tbl_bh_loan_final (rebuilt via scripts/build_vw_bh_output.py from the
+-- current file) to close this out.
+--
 -- FIX CONFIRMED IN PRACTICE, NOT JUST STRUCTURALLY SAFE (2026-09,
 -- data/anomaly_open_fix_verification.sql, run against the rebuilt
 -- tbl_bh_loan_final on :snapshot_dt=20260609/:as_of_load_ts=2026-09-09):
