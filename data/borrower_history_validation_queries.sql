@@ -1224,8 +1224,47 @@ FROM joined;
 -- loan) -- worth escalating to the table owner as its own item, not
 -- something borrower_history.txt can fix by adjusting attribution logic.
 --
--- STILL OUTSTANDING: loose end #2 above (repayment_uid dedup re-test
--- against the rebuilt table) has not yet been re-run.
+-- LOOSE END #2 RESOLVED (2026-09, data/repayment_uid_dedup_test.sql +
+-- data/repayment_uid_phonenumber_scoped_dedup_test.sql, re-run against the
+-- current rebuilt table, :snapshot_dt=20260609, and the aging-gated
+-- vw_bh_surviving_loans): repayment_uid-based dedup is REJECTED again,
+-- this time in TWO forms, closing this hypothesis out for good rather than
+-- leaving it open.
+--
+-- Global-key dedup (PARTITION BY COALESCE(repayment_uid, repayment_fid),
+-- no phonenumber) is net-harmful on the current population too: 66.9% exact
+-- match vs a 68.41% same-population no-dedup baseline (n_matched=4,629,962
+-- both ways -- a clean apples-to-apples comparison against GATE 0's B2b
+-- block, not the stale pre-fix 68.6%/68.7% figures). The mechanism is now
+-- precisely diagnosed, not just observed: the global key's ROW_NUMBER()
+-- has no phonenumber in its PARTITION BY, so when a repayment_uid spans
+-- multiple customers (the already-confirmed batch/settlement-tag
+-- behavior), dedup doesn't merge duplicate rows -- it DELETES every
+-- customer's row except whichever wins the ORDER BY tie-break.
+-- repayment_uid_phonenumber_scoped_dedup_test.sql's Step 1 quantified this
+-- directly: of the 416,312 rows the global key called "duplicates," 50.5%
+-- (~210,250 rows) were actually a different real customer's repayment
+-- being deleted, not a true retry of the same transaction.
+--
+-- Phonenumber-scoped dedup (adding phonenumber to the same PARTITION BY,
+-- so a row can only ever be deduplicated against another row from the SAME
+-- customer -- structurally incapable of the deletion bug above) recovers
+-- most of the damage (66.9% -> 68.4%) but still does not beat doing
+-- nothing: its n_matched (4,629,962) and n_exact_match (3,167,268) are
+-- BIT-IDENTICAL to the plain no-dedup baseline. Removing the 206,062
+-- genuine same-customer duplicate-uid rows flipped zero loans across the
+-- exact-match threshold -- the loans carrying those duplicates are
+-- apparently already mismatched for unrelated reasons (or the duplicate
+-- amounts don't move the needle), so there is no exact-match benefit to
+-- capture even with a structurally safe key.
+--
+-- CONCLUSION: do not add repayment_uid-based dedup to vw_bh_repay_dedup or
+-- borrower_history.txt's repay_raw/repay_dedup in any form -- the global
+-- key actively hurts via cross-customer row deletion, and the safer
+-- phonenumber-scoped key has zero measured benefit. This closes out the
+-- repayment_uid dedup hypothesis entirely; it should not be re-opened
+-- again without new evidence, unlike the ANOMALY_OPEN thread above, which
+-- WAS acted on.
 
 -- N/A FOR XTRAFLOAT, CONFIRMED BY THE TABLE OWNER -- NOT A BLOCKING GATE:
 -- B3's eligibility filter requires interest_and_penalty_ugx > 0 (comparable
