@@ -1203,6 +1203,28 @@ FROM joined;
 -- contract (names, order, count) is byte-identical before/after this
 -- change -- only checkpoint-1-internal SQL and comments differ.
 --
+-- FIX CONFIRMED IN PRACTICE, NOT JUST STRUCTURALLY SAFE (2026-09,
+-- data/anomaly_open_fix_verification.sql, run against the rebuilt
+-- tbl_bh_loan_final on :snapshot_dt=20260609/:as_of_load_ts=2026-09-09):
+-- the original diagnostic (anomaly_open_b2b_correlation_test.sql) could
+-- only prove the underlying mismatch existed in the data, since it
+-- re-derived attribution standalone from raw tables rather than reading
+-- borrower_history.txt's own output. This re-test queries production's own
+-- corrected total_recovered/ls_lifetime_repaid_ugx/ever_anomaly_open
+-- directly off checkpoint 1. Result: ever_anomaly_open = true --
+-- 810,589 loans, 100% exact match (n_no_loan_state_row = 0 -- the
+-- documented same-day-second-disbursement fallback case did not even occur
+-- in this population on this run) -- the original 61.6% is now fully
+-- closed, not just narrowed. ever_anomaly_open = false -- 70.3% exact
+-- match when a loan_state_daily row is available, matching the original
+-- unexposed baseline almost exactly -- confirms no regression and that the
+-- standalone diagnostic's methodology faithfully modeled production's real
+-- attribution logic. Pooled across both groups (n_total = 4,791,983,
+-- matching B2b's no-dedup baseline exactly): exact-match rate rises from
+-- the pre-fix ~68.8% pooled figure to 72.9% -- entirely attributable to
+-- this fix, since the unexposed segment's rate is unchanged. This closes
+-- the ANOMALY_OPEN thread as verified, not merely structurally sound.
+--
 -- SILENTLY-STUCK LOANS (loose end #1 above), STEP 2 RESULT
 -- (data/silently_stuck_loans_characterization.sql, live run): NOT a flat
 -- baseline rate. By disbursement month, pct_stuck (of all single-loan-
