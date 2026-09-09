@@ -1201,13 +1201,20 @@ prior_loan_state_candidates AS (
             OR
 
             -- For target loan 2 on a customer-day, permit the closed
-            -- state of loan 1 from that same day.
+            -- state of loan 1 from that same day. loan_status IN (...) is
+            -- required alongside closure_date IS NOT NULL -- confirmed
+            -- elsewhere in this file (see closed_prior_loans_ranked) that
+            -- the source table populates closure_date on genuinely
+            -- non-terminal rows too (e.g. ANOMALY_OPEN rows carrying a
+            -- stale/unrelated date), so closure_date alone is not reliable
+            -- evidence loan 1 actually closed.
             (
                 ls.current_loan_start_date = d.loan_date
                 AND ls.state_date <= d.loan_date
                 AND ls.loan_seq < d.target_loan_seq
                 AND ls.closure_date IS NOT NULL
                 AND ls.closure_date <= d.loan_date
+                AND ls.loan_status IN ('SETTLED', 'CLOSED', 'OVERPAID')
             )
          )
 ),
