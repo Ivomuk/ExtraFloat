@@ -709,6 +709,7 @@ END AS loan_status,
 -- back NULL, no error -- but expect NULL ls_loan_status/ls_aging_bucket/etc.
 -- for any loan that isn't the first disbursement a borrower took that day.
 -- Prevalence across the full loan book is not yet quantified.
+COALESCE(eao.ever_anomaly_open, false) AS ever_anomaly_open,
 ls.lifetime_repaid_ugx AS ls_lifetime_repaid_ugx,
 ls.loan_status AS ls_loan_status,
 ls.aging_bucket AS ls_aging_bucket,
