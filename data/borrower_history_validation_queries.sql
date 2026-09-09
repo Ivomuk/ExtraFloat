@@ -254,17 +254,19 @@ WHERE rn2 = 1;
 
 -- POPULATION-STABILITY FIX (2026-09, mirrors borrower_history.txt's
 -- loan_state_anomalies CTE after the ANOMALY_OPEN fix): only excludes a
--- loan if it is currently ANOMALY_OPEN AND days_aging > 7 -- was: any
--- current ANOMALY_OPEN loan regardless of age. See the ANOMALY_OPEN FIX
--- IMPLEMENTED note further below for the full rationale. Kept in sync here
--- so vw_bh_surviving_loans (and everything downstream of it, including the
--- repayment_uid dedup re-test) scores against the same population
--- borrower_history.txt actually produces post-fix.
+-- loan if it is currently ANOMALY_OPEN AND days_aging > 30 -- was: any
+-- current ANOMALY_OPEN loan regardless of age. Threshold revised from an
+-- initial 7 days to 30 days (see data/open_loan_aging_risk_tiers.sql) --
+-- see the ANOMALY_OPEN FIX IMPLEMENTED note further below for the full
+-- rationale, including the correction to the original 7-day assumption.
+-- Kept in sync here so vw_bh_surviving_loans (and everything downstream of
+-- it, including the repayment_uid dedup re-test) scores against the same
+-- population borrower_history.txt actually produces post-fix.
 CREATE OR REPLACE VIEW :validation_schema.vw_bh_loan_state_anomalies AS
 SELECT disbursement_fid
 FROM :validation_schema.vw_bh_loan_state_snapshot
 WHERE (loan_status = 'ANOMALY_OPEN' OR is_anomaly_open = true)
-AND days_aging > 7;
+AND days_aging > 30;
 
 -- Surviving loan-level population: exactly what feeds classified/loan_core
 -- in borrower_history.txt (disbursements, ANOMALY_OPEN excluded). Every
@@ -1186,7 +1188,7 @@ FROM joined;
 -- borrower_history.txt (backed up first as
 -- data/borrower_history_pretablerebuild.txt). Two changes: (1)
 -- loan_state_anomalies now only excludes a loan from the population if it
--- is currently ANOMALY_OPEN AND days_aging > 7 (was: any current
+-- is currently ANOMALY_OPEN AND days_aging > 30 (was: any current
 -- ANOMALY_OPEN loan, regardless of age) -- closes the query-run-timing
 -- population instability while still excluding genuine long-running cases;
 -- (2) loan_final now computes ever_anomaly_open from the full
@@ -1202,6 +1204,24 @@ FROM joined;
 -- scripts/build_vw_bh_output.py that vw_bh_output's final 50-column
 -- contract (names, order, count) is byte-identical before/after this
 -- change -- only checkpoint-1-internal SQL and comments differ.
+--
+-- THRESHOLD CORRECTED FROM 7 TO 30 DAYS (2026-09,
+-- data/open_loan_aging_risk_tiers.sql, business-provided risk-tiering
+-- convention: 1-7 days normal, 7-30 days business challenges, 30+ days
+-- serious): the initial 7-day threshold above was chosen assuming most
+-- ANOMALY_OPEN loans resolve quickly, based on a handful of hand-traced
+-- examples (anomaly_open_raw_timeline_examples.sql) -- that assumption was
+-- WRONG at the population level. A live run of the full current
+-- ANOMALY_OPEN book (90,730 loans) showed it split roughly evenly across
+-- all three tiers: 31.7% at 1-7 days, 32.4% at 7-30 days, 35.9% at 30+
+-- days. A 7-day threshold therefore excluded 68.3% of currently-
+-- ANOMALY_OPEN loans (~8.02B UGX across the 7-30 and 30+ day tiers) --
+-- the majority, not the rare long-running tail it was intended to catch.
+-- Revised to 30 days to align with the business's own "serious" boundary:
+-- keeps both the 1-7 and 7-30 day tiers in the population and excludes
+-- only the 30+ day tier, a smaller and genuinely outlier-shaped exclusion,
+-- rather than an arbitrary cutoff chosen before this population-level data
+-- existed.
 --
 -- FIX CONFIRMED IN PRACTICE, NOT JUST STRUCTURALLY SAFE (2026-09,
 -- data/anomaly_open_fix_verification.sql, run against the rebuilt

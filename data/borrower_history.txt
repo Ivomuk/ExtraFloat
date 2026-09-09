@@ -20,11 +20,12 @@
 --     ever_anomaly_open in checkpoint 1) and correct their total_recovered/
 --     total_cure_cashflow to the authoritative lifetime_repaid_ugx -- NOT to
 --     exclude them from the population (a loan flagged ANOMALY_OPEN is not a
---     system error: its own lifetime_repaid_ugx keeps climbing normally and
---     it typically resolves to CLOSED within days -- confirmed via
+--     system error: its own lifetime_repaid_ugx keeps climbing normally
+--     rather than being abandoned -- confirmed via
 --     data/anomaly_open_balance_transfer_test.sql; the population is instead
---     gated on days_aging so only a loan stuck ANOMALY_OPEN well past
---     normal resolution time is excluded -- see loan_state_anomalies below),
+--     gated on days_aging so only a loan stuck ANOMALY_OPEN past the
+--     business's own 30-day "serious" threshold is excluded -- see
+--     loan_state_anomalies below),
 --     and (b) enrich the output with authoritative lifecycle/charge fields
 --     for the borrower's latest loan.
 --
@@ -64,10 +65,14 @@
 -- ANOMALY_OPEN -- that was based on a "system error/balance transfer"
 -- theory since confirmed false, and was unstable (the same loan flipped
 -- included/excluded across re-runs depending on incidental query-run
--- timing relative to its own resolution). It is now gated on days_aging, so
--- a freshly-flagged loan -- overwhelmingly likely to resolve within days --
--- stays in the population, and only a loan stuck ANOMALY_OPEN well past
--- normal resolution time is excluded. Separately, loan_final now computes
+-- timing relative to its own resolution). It is now gated on days_aging at
+-- a 30-day threshold -- matching the business's own risk-tiering
+-- convention for open loans (1-7 days normal, 7-30 days business
+-- challenges, 30+ days serious -- see data/open_loan_aging_risk_tiers.sql)
+-- rather than an assumption that most ANOMALY_OPEN loans resolve quickly:
+-- a live run showed the current ANOMALY_OPEN population split roughly
+-- evenly across all three tiers, so only a loan past the "serious"
+-- threshold is excluded, not the majority. Separately, loan_final now computes
 -- ever_anomaly_open (from the full loan_state_daily history, not just the
 -- latest snapshot) and overrides total_recovered/total_cure_cashflow with
 -- the authoritative lifetime_repaid_ugx for any loan that was ever
@@ -312,23 +317,31 @@ loan_state_anomalies AS (
 -- POPULATION-STABILITY FIX: previously excluded ANY current ANOMALY_OPEN
 -- loan, based on a "system error" theory since confirmed false (an
 -- ANOMALY_OPEN loan's own lifetime_repaid_ugx keeps climbing normally and
--- it typically resolves to CLOSED within 1-6 days -- see
+-- some resolve to CLOSED within days -- see
 -- data/anomaly_open_raw_timeline_examples.sql,
 -- data/anomaly_open_balance_transfer_test.sql). That current-status-only
 -- exclusion was unstable: the same loan flipped between included/excluded
 -- across re-runs purely from incidental query-run timing relative to its
--- own resolution. Gated on days_aging so normal, fast-resolving cases stay
--- IN the population; only a loan still stuck in ANOMALY_OPEN well past the
--- time a normal case takes to resolve is treated as a genuine long-running
--- anomaly and excluded. Threshold of 7 days matches this project's
--- existing aging-bucket convention (see
--- data/anomaly_open_aging_only_test.sql,
--- data/silently_stuck_loans_characterization.sql); tune if warehouse data
--- shows normal resolution routinely exceeding this.
+-- own resolution. Gated on days_aging so normal, still-resolving cases
+-- stay IN the population; only a loan still stuck in ANOMALY_OPEN well
+-- past normal resolution time is treated as a genuine long-running anomaly
+-- and excluded. Threshold of 30 days matches the business's own risk-
+-- tiering convention for open loans (1-7 days normal, 7-30 days business
+-- challenges, 30+ days serious -- see
+-- data/open_loan_aging_risk_tiers.sql), NOT an assumption that most
+-- ANOMALY_OPEN loans resolve quickly: a live run showed the current
+-- ANOMALY_OPEN population split roughly evenly across all three tiers
+-- (31.7% at 1-7 days, 32.4% at 7-30 days, 35.9% at 30+ days) -- a 7-day
+-- threshold would have excluded the majority (68.3%) of currently-
+-- ANOMALY_OPEN loans, not the rare tail it was originally intended to
+-- catch. 30 days keeps both the 1-7 and 7-30 day tiers in the population
+-- (only the 30+ day "serious" tier, a smaller and genuinely outlier-shaped
+-- exclusion, is dropped) and aligns the cutoff with a boundary the
+-- business already treats as meaningful, rather than an arbitrary value.
 SELECT disbursement_fid
 FROM loan_state_snapshot
 WHERE (loan_status = 'ANOMALY_OPEN' OR is_anomaly_open = true)
-AND days_aging > 7
+AND days_aging > 30
 ),
 classified AS (
 SELECT
