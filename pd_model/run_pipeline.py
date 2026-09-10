@@ -313,6 +313,17 @@ def run_pipeline(args: argparse.Namespace) -> None:
 
         _reduce_object_column_memory(df_pd)
 
+        # Downcast here, before Step 2's merge below -- that merge's
+        # reindex-then-concat internals deep-copy df_pd's consolidated
+        # float64 block as part of the join (pandas does this even for a
+        # column-preserving left join), and at loan grain (one row per
+        # loan, can be several million rows) that copy is the single
+        # largest allocation in the whole pipeline. Downcasting only at
+        # Step 5 (this function's other call site, below) is one full-frame
+        # copy too late to help with it. Safe/idempotent -- see the
+        # function's own docstring.
+        _downcast_float64_to_float32(df_pd)
+
         logger.info("Combined DataFrame: %d rows, %d cols", *df_pd.shape)
 
         # ------------------------------------------------------------------ #
@@ -354,6 +365,13 @@ def run_pipeline(args: argparse.Namespace) -> None:
         snap_df = pd.concat([train_snap_df, val_snap_df], ignore_index=True, sort=False)
         snap_df = _parse_dates(snap_df)
         snap_df = run_phase_2_1_richer_tx_behaviour(snap_df, cfg=cfg)
+        # Downcast snap_df's new float64 feature columns too -- the merge
+        # below produces an output block sized at df_pd's full (loan-grain)
+        # row count for these columns as well, so a float64 snap_df doubles
+        # that side of the join's memory cost for no benefit downstream
+        # (everything gets cast to float32 again in build_transformed_dataframe
+        # regardless).
+        _downcast_float64_to_float32(snap_df)
 
         snap_df[feature_config.AGENT_KEY] = snap_df[feature_config.AGENT_KEY].astype(str).str.strip()
         df_pd[feature_config.AGENT_KEY] = df_pd[feature_config.AGENT_KEY].astype(str).str.strip()
