@@ -646,6 +646,15 @@ def run_pipeline(args: argparse.Namespace) -> None:
         if using_loan_level_grain
         else None
     )
+    # df_train_raw/df_val_raw/df_train_trans/df_val_trans are now fully folded
+    # into df_pd_raw/df_pd_transformed above and never read again (confirmed
+    # by grep) -- prepare_pd_training_and_validation_data() re-derives the
+    # identical split from precomputed_train_mask/train_cutoff instead of
+    # reusing these. At loan grain, this is 4 extra full-size frames sitting
+    # alive for no reason right before that call's own row-selection copies --
+    # this was the peak-memory moment the MemoryError above pointed at.
+    del df_train_raw, df_val_raw, df_train_trans, df_val_trans
+    gc.collect()
 
     # After the prepare_pd_training_and_validation_data() call below, df_pd_raw
     # is only ever needed again for one thing further down (building df_sc_thin
@@ -699,11 +708,12 @@ def run_pipeline(args: argparse.Namespace) -> None:
         precomputed_train_mask=precomputed_train_mask,
     )
 
-    # df_pd_raw/df_pd_transformed/df_train_raw/df_val_raw/df_train_trans/
-    # df_val_trans are never read again -- everything needed going forward
-    # is in the X_*/y_*/candidate_features/thin_*/agent_* return values above,
-    # plus df_thin_lookup (extracted just above) for the one remaining need.
-    del df_pd_raw, df_pd_transformed, df_train_raw, df_val_raw, df_train_trans, df_val_trans
+    # df_pd_raw/df_pd_transformed are never read again -- everything needed
+    # going forward is in the X_*/y_*/candidate_features/thin_*/agent_*
+    # return values above, plus df_thin_lookup (extracted just above) for the
+    # one remaining need. (df_train_raw/df_val_raw/df_train_trans/df_val_trans
+    # were already freed above, before this call.)
+    del df_pd_raw, df_pd_transformed
     gc.collect()
 
     # ------------------------------------------------------------------ #
