@@ -284,32 +284,32 @@ DROP TABLE IF EXISTS hive.analytics.tmp_target_loans;
 -- cohort_end values below must satisfy cohort_end + 30 days <= max_state_date
 -- in hive.analytics.tmp_loan_state (see the DATE_ADD guard further down and
 -- state_data_availability), or that entire split comes back empty. UPDATED
--- (2026-09) for the data reload extending through 2026-07-31: train pushed
--- from 2026-04-30 to 2026-05-31 to capture the much higher loan volume in
--- May (and April's incident + recovery, which the model should see, not
--- just its aftermath); validation widened from a 20-day window
--- (2026-05-01 to 2026-05-20) to a full month (2026-06-01 to 2026-06-30) --
--- both a larger, more robust out-of-time holdout and the most recent slice
--- now safely labelable. cohort_end = 2026-06-30 deliberately leaves a
--- 1-day margin below the theoretical 2026-07-01 ceiling (2026-07-31 -
--- 30 days), since max_state_date has not been independently reconfirmed
--- here -- RE-CHECK max_state_date (SELECT MAX(state_date) FROM
--- hive.analytics.tmp_loan_state, after rebuilding it from the reloaded
--- data) before trusting these dates; if it comes back below 2026-07-30,
--- the validation split will return empty and cohort_end needs pulling in
--- further.
+-- AGAIN (2026-09) once the data reload was confirmed to actually extend
+-- through 2026-08-14, not 2026-07-31 as first stated -- theoretical ceiling
+-- is therefore 2026-08-14 - 30 days = 2026-07-15. Both windows shifted
+-- forward two more weeks versus the prior revision: train now runs through
+-- 2026-06-14 (captures still more volume/recency), and validation is the
+-- most recent full month available (2026-06-15 to 2026-07-14), keeping the
+-- same 30-day validation-window length as the prior revision rather than
+-- widening or narrowing it. cohort_end = 2026-07-14 deliberately leaves a
+-- 1-day margin below the 2026-07-15 theoretical ceiling, since
+-- max_state_date has not been independently reconfirmed here -- RE-CHECK
+-- max_state_date (SELECT MAX(state_date) FROM hive.analytics.tmp_loan_state,
+-- after rebuilding it from the reloaded data) before trusting these dates;
+-- if it comes back below 2026-08-13, the validation split will return empty
+-- and cohort_end needs pulling in further.
 CREATE TABLE hive.analytics.tmp_target_loans AS
 WITH cohorts AS (
     SELECT
         DATE '2026-01-01' AS cohort_start,
-        DATE '2026-05-31' AS cohort_end,
+        DATE '2026-06-14' AS cohort_end,
         'train' AS split
 
     UNION ALL
 
     SELECT
-        DATE '2026-06-01' AS cohort_start,
-        DATE '2026-06-30' AS cohort_end,
+        DATE '2026-06-15' AS cohort_start,
+        DATE '2026-07-14' AS cohort_end,
         'validation' AS split
 ),
 
