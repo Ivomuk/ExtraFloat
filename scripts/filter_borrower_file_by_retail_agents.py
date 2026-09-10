@@ -90,6 +90,20 @@ from pathlib import Path
 import pandas as pd
 
 
+def _read_csv_fast(path: Path) -> pd.DataFrame:
+    """pd.read_csv, preferring the multi-threaded pyarrow engine (pandas>=2
+    ships it as an optional dep; pandas 3.x requires it -- see
+    requirements-lock.txt's pandas==3.0.5) since --loan-training-file can be
+    several GB and the default single-threaded C engine is the dominant cost
+    on a file that size. Falls back to the default engine if pyarrow isn't
+    importable in the running environment, so this never hard-fails on a
+    slower read instead of not running at all."""
+    try:
+        return pd.read_csv(path, sep=",", encoding="utf-8-sig", engine="pyarrow")
+    except (ImportError, ValueError):
+        return pd.read_csv(path, sep=",", encoding="utf-8-sig")
+
+
 def _norm_msisdn(s: pd.Series) -> pd.Series:
     """Byte-identical to run_credit_risk_pipeline.py's _norm_msisdn
     (lines ~200-209) -- THE normalizer that actually drives the
@@ -124,7 +138,7 @@ def main():
     if not borrower_path.exists():
         sys.exit(f"ERROR: {label_lower} not found: {borrower_path}")
 
-    retail_df = pd.read_csv(retail_path, sep=",", encoding="utf-8-sig")
+    retail_df = _read_csv_fast(retail_path)
     if args.agent_msisdn_col not in retail_df.columns:
         sys.exit(
             f"ERROR: '{args.agent_msisdn_col}' column not found in retail-agents file. "
@@ -135,7 +149,7 @@ def main():
     n_allowlist = len(allowlist_set)
     print(f"Retail-agent allowlist: {n_allowlist:,} unique agents (from {retail_path})\n")
 
-    bor = pd.read_csv(borrower_path, sep=",", encoding="utf-8-sig")
+    bor = _read_csv_fast(borrower_path)
     bor_msisdn_col = next(
         (c for c in ("msisdn", "phonenumber", "agent_msisdn") if c in bor.columns), None
     )
