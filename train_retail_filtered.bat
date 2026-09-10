@@ -33,8 +33,8 @@ echo.
 echo === Step 3/6: Filtering the loan-training file to the same retail-agent set ===
 python scripts\filter_borrower_file_by_retail_agents.py ^
     --retail-agents-file retail_agents_filtered.csv ^
-    --borrower-file data\state_data_202608131214.csv ^
-    --out data\state_data_202608131214_retail_filtered.csv ^
+    --borrower-file data\state_data_20260910.csv ^
+    --out data\state_data_20260910_retail_filtered.csv ^
     --label "Loan-training file"
 
 if %ERRORLEVEL% neq 0 (
@@ -85,7 +85,7 @@ echo === Step 6/6: Training the PD model on the retail-only population ===
 python -m pd_model.run_pipeline ^
   --train-file            data/mfs_daily_agent_mart_20260531_retail_filtered.csv ^
   --val-file              data/mfs_daily_agent_mart_20260731_retail_filtered.csv ^
-  --loan-training-file    data/state_data_202608131214_retail_filtered.csv ^
+  --loan-training-file    data/state_data_20260910_retail_filtered.csv ^
   --train-snapshot-date   20260531 ^
   --val-snapshot-date     20260731 ^
   --output-dir            pd_model/artifacts ^
