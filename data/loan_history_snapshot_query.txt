@@ -535,6 +535,104 @@ on_time_streak AS (
 ),
 
 -- ---------------------------------------------------------------------
+-- Late-payment penalty history, sourced from the authoritative penalty
+-- ledger (analytics.momo_loan_book_tracker_xtrafloat_loan_state_daily,
+-- a separate, XtraFloat-only table -- NOT
+-- momo_loan_book_tracker_loan_state_daily used elsewhere in this file).
+-- Identical to loan_state_query_updated_materialized.txt's CTEs of the
+-- same name -- a loan's "was it ever penalized" summary doesn't depend
+-- on which file consumes it. This is a daily-snapshot table (one row per
+-- (disbursement_fid, date_key)) -- dedup to one row per (disbursement_fid,
+-- date_key) first, then collapse to one row per disbursement_fid.
+-- penalty_1_due/penalty_2_due are confirmed (via live warehouse checks)
+-- to genuinely vary -- true once a loan misses the 24h/48h deadline and
+-- is charged a real penalty, not a universal per-loan flag -- and to
+-- stay true across a loan's later daily rows even after that specific
+-- penalty amount is paid, so bool_or here correctly captures "was this
+-- loan EVER penalized," not just its most recent day's state.
+-- ---------------------------------------------------------------------
+xtrafloat_penalty_loan_daily_ranked AS (
+    SELECT
+        pen.disbursement_fid,
+        pen.date_key,
+        pen.penalty_1_due,
+        pen.penalty_1_owed_ugx,
+        pen.penalty_2_due,
+        pen.penalty_2_owed_ugx,
+
+        ROW_NUMBER() OVER (
+            PARTITION BY
+                pen.disbursement_fid,
+                pen.date_key
+            ORDER BY
+                pen.inserted_ts DESC
+        ) AS penalty_day_rn
+
+    FROM analytics.momo_loan_book_tracker_xtrafloat_loan_state_daily pen
+    WHERE pen.ova = 'XTRAFLOAT-AGENT'
+      AND pen.date_key >= 20260101
+),
+
+xtrafloat_penalty_loan_summary AS (
+    SELECT
+        disbursement_fid,
+
+        bool_or(penalty_1_due) AS ever_penalty_1_due,
+        bool_or(penalty_2_due) AS ever_penalty_2_due,
+        MAX(penalty_1_owed_ugx) AS penalty_1_owed_ugx,
+        MAX(penalty_2_owed_ugx) AS penalty_2_owed_ugx
+
+    FROM xtrafloat_penalty_loan_daily_ranked
+    WHERE penalty_day_rn = 1
+    GROUP BY disbursement_fid
+),
+
+-- ---------------------------------------------------------------------
+-- Late-payment penalty history, anchored at snapshot_date -- the
+-- scoring-time mirror of loan_state_query_updated_materialized.txt's
+-- prior_penalty_features. This file has no per-target-loan concept (one
+-- row per msisdn "as of" snapshot_date), so this is keyed the same way
+-- disbursement_history_features below is: every loan on or before
+-- snapshot_date counts, not "prior to a specific target loan."
+--
+-- Named late_fee_*, not penalty_*, matching this file's own unprefixed
+-- naming convention (vs. the training file's prior_* prefix -- see the
+-- SNAPSHOT_TO_TRAINING_COLUMN_MAP mapping in
+-- pd_model/preprocessing/loan_history_features.py) -- this also avoids
+-- colliding with LEAKAGE_PATTERNS's blanket "penalt" substring block in
+-- pd_model/config/feature_config.py, same reasoning as the training file.
+-- ---------------------------------------------------------------------
+penalty_history_features AS (
+    SELECT
+        b.msisdn,
+
+        COUNT_IF(pen.ever_penalty_1_due)
+            AS late_fee_1_count,
+
+        COUNT_IF(pen.ever_penalty_2_due)
+            AS late_fee_2_count,
+
+        COALESCE(
+            SUM(
+                COALESCE(pen.penalty_1_owed_ugx, 0)
+                + COALESCE(pen.penalty_2_owed_ugx, 0)
+            ),
+            0
+        ) AS total_late_fee_owed_ugx
+
+    FROM base b
+
+    LEFT JOIN hive.analytics.tmp_disbursements pd
+      ON pd.msisdn = b.msisdn
+     AND pd.loan_date <= b.snapshot_date
+
+    LEFT JOIN xtrafloat_penalty_loan_summary pen
+      ON pen.disbursement_fid = pd.disbursement_fid
+
+    GROUP BY b.msisdn
+),
+
+-- ---------------------------------------------------------------------
 -- 6. Disbursement frequency and amount, anchored at snapshot_date
 --    (mirrors prior_disbursement_features).
 -- ---------------------------------------------------------------------
@@ -782,7 +880,22 @@ SELECT
     COALESCE(dh.disbursed_ugx_180d, 0)
         AS disbursed_ugx_180d,
 
-    dh.months_since_first_observed_loan
+    dh.months_since_first_observed_loan,
+
+    -- Late-payment penalty history (see penalty_history_features above --
+    -- sourced from analytics.momo_loan_book_tracker_xtrafloat_loan_state_
+    -- daily's penalty ledger, mapped to prior_late_fee_1_count/
+    -- prior_late_fee_2_count/prior_total_late_fee_owed_ugx at training-time
+    -- naming via SNAPSHOT_TO_TRAINING_COLUMN_MAP in
+    -- pd_model/preprocessing/loan_history_features.py)
+    COALESCE(ph.late_fee_1_count, 0)
+        AS late_fee_1_count,
+
+    COALESCE(ph.late_fee_2_count, 0)
+        AS late_fee_2_count,
+
+    COALESCE(ph.total_late_fee_owed_ugx, 0)
+        AS total_late_fee_owed_ugx
 
 FROM base b
 
@@ -802,4 +915,7 @@ LEFT JOIN on_time_streak ots
   ON ots.msisdn = b.msisdn
 
 LEFT JOIN disbursement_history_features dh
-  ON dh.msisdn = b.msisdn;
+  ON dh.msisdn = b.msisdn
+
+LEFT JOIN penalty_history_features ph
+  ON ph.msisdn = b.msisdn;

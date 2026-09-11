@@ -156,6 +156,9 @@ SNAPSHOT_TO_TRAINING_COLUMN_MAP: dict[str, str] = {
     "disbursed_ugx_30d": "prior_disbursed_ugx_30d",
     "disbursed_ugx_90d": "prior_disbursed_ugx_90d",
     "disbursed_ugx_180d": "prior_disbursed_ugx_180d",
+    "late_fee_1_count": "prior_late_fee_1_count",
+    "late_fee_2_count": "prior_late_fee_2_count",
+    "total_late_fee_owed_ugx": "prior_total_late_fee_owed_ugx",
 }
 
 
