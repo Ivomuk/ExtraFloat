@@ -80,7 +80,7 @@ python run_credit_risk_pipeline.py ^
     --loan-file data\loan_summary_retail_filtered.csv ^
     --borrower-file borrower_history_retail_filtered.csv ^
     --loan-history-file data\loan_history_snapshot_20260817_retail_filtered.csv ^
-    --snapshot-date 20260731 ^
+    --snapshot-date 20260817 ^
     --artifacts-dir pd_model/artifacts/ ^
     --scorecard-path scorecards/capacity_scorecard_v1.json ^
     --output output/engine_test_output.csv
