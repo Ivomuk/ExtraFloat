@@ -60,7 +60,15 @@ NUMERIC_CANDIDATES = [
 # history confounds duration with prior_max_loan_seq's own tenure/safety
 # signal.
 BUCKET_CANDIDATE = "most_recent_prior_dpd_bucket_within_30d"
-BUCKET_ORDER = ["NEVER_PAST_DUE", "1-2", "3-6", "7-13", "14-29", "30+"]
+# NO_PRIOR_LOAN / NEVER_PAST_DUE_CONFIRMED / NEVER_PAST_DUE_CENSORED replace
+# the old single NEVER_PAST_DUE bucket -- that combined bucket's blacklist
+# rate (32%) sat above the mild-lateness buckets (11-12%), and splitting it
+# tests whether that was a censoring artifact rather than a genuine "never
+# late" signal (see the SQL's NEVER_PAST_DUE SPLIT comment).
+BUCKET_ORDER = [
+    "NO_PRIOR_LOAN", "NEVER_PAST_DUE_CONFIRMED", "NEVER_PAST_DUE_CENSORED",
+    "1-2", "3-6", "7-13", "14-29", "30+",
+]
 
 
 def _mann_whitney_auc(scores: np.ndarray, labels: np.ndarray) -> float:

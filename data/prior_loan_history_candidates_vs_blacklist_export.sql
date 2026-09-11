@@ -44,7 +44,13 @@
 -- This version tests two framings that don't have that confound:
 --   5a. most_recent_prior_dpd_within_30d (bucketed)
 --         The dpd outcome of the single most recent PRIOR loan only --
---         no aggregation across a variable-length history.
+--         no aggregation across a variable-length history. NULL outcomes
+--         are further split into NO_PRIOR_LOAN / NEVER_PAST_DUE_CONFIRMED /
+--         NEVER_PAST_DUE_CENSORED (see the NEVER_PAST_DUE SPLIT comment
+--         below) -- an earlier run folded all three together and the
+--         combined bucket's blacklist rate (32%) sat above the mild-
+--         lateness buckets (11-12%), breaking the otherwise-monotonic
+--         pattern from 1-2 through 30+.
 --   5b. prior_dpd_exceed_3_rate
 --         COUNT(prior loans with max_dpd_within_30d > 3) /
 --         COUNT(all prior loans) -- a rate, not a raw count, so it isn't
@@ -136,13 +142,23 @@ prior_loans_ranked AS (
      AND prior_loan.disbursement_ts < current_loan.disbursement_ts
 ),
 
+-- Also pulls the most recent PRIOR loan's own label_eligible_30d (queried
+-- directly against tmp_loan_label_assessment, NOT pre-filtered the way
+-- max_dpd_within_30d is) so a NULL dpd outcome can be split into "genuinely
+-- confirmed never past due" vs. "we don't actually know" (censored, or
+-- never sampled as a target loan at all -- see the NEVER_PAST_DUE SPLIT
+-- note below).
 most_recent_prior_dpd AS (
     SELECT
         r.target_disbursement_fid,
-        dpd.max_dpd_within_30d AS most_recent_prior_dpd_within_30d
+        dpd.max_dpd_within_30d AS most_recent_prior_dpd_within_30d,
+        COALESCE(pla.label_eligible_30d, 0)
+            AS most_recent_prior_loan_label_eligible_30d
     FROM prior_loans_ranked r
     LEFT JOIN max_dpd_within_30d dpd
       ON dpd.disbursement_fid = r.prior_disbursement_fid
+    LEFT JOIN hive.analytics.tmp_loan_label_assessment pla
+      ON pla.disbursement_fid = r.prior_disbursement_fid
     WHERE r.recency_rn = 1
 ),
 
@@ -231,8 +247,20 @@ SELECT
         AS prior_principal_unsettled_count,
     c.prior_dpd_exceed_3_rate,
 
+    -- NEVER_PAST_DUE SPLIT: a NULL dpd outcome above previously meant
+    -- either "genuinely never late" or "we have no confirmed outcome for
+    -- this loan at all" (censored, or the prior loan was never itself
+    -- sampled as a target loan in tmp_target_loans -- both leave no row in
+    -- max_dpd_within_30d). Collapsing those together inflated the
+    -- "NEVER_PAST_DUE" bucket's blacklist rate above the mild-lateness
+    -- buckets in the first version of this query -- split them explicitly.
     CASE
-        WHEN mrd.most_recent_prior_dpd_within_30d IS NULL THEN 'NEVER_PAST_DUE'
+        WHEN mrd.target_disbursement_fid IS NULL THEN 'NO_PRIOR_LOAN'
+        WHEN mrd.most_recent_prior_dpd_within_30d IS NULL
+         AND mrd.most_recent_prior_loan_label_eligible_30d = 1
+            THEN 'NEVER_PAST_DUE_CONFIRMED'
+        WHEN mrd.most_recent_prior_dpd_within_30d IS NULL
+            THEN 'NEVER_PAST_DUE_CENSORED'
         WHEN mrd.most_recent_prior_dpd_within_30d <= 2 THEN '1-2'
         WHEN mrd.most_recent_prior_dpd_within_30d <= 6 THEN '3-6'
         WHEN mrd.most_recent_prior_dpd_within_30d <= 13 THEN '7-13'
