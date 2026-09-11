@@ -23,6 +23,18 @@ days purely from exposure.
 Input: CSV export of
 data/prior_loan_history_candidates_vs_blacklist_export.sql.
 
+Also reports every signal against the "Defaulter not paid back in the last
+30 days" blacklist reason specifically (whitelist vs. that reason only,
+dropping every other blacklisted agent from the comparison) -- mirrors
+check_whitelist_blacklist_eval.py's Part C and check_defaulter_visibility_
+at_snapshot.py's cohort split. The full blacklist mixes reasons that have
+nothing to do with repayment (e.g. "Average Monthly Commission below 20K",
+"Agent active less than 3 months" -- together far outnumbering "Defaulter"),
+and prior_max_loan_seq's own inverted result (more prior loans = safer) is
+exactly the kind of thing an activity/tenure-driven blacklist reason would
+produce independent of actual default risk. The Defaulter-only comparison
+is what actually answers whether a candidate predicts default.
+
 Reuses pd_model.postprocessing.whitelist_eval's tested MSISDN normalization
 and blacklist>whitelist dedup priority -- same machinery as every other
 blacklist-cross-reference script this session.
@@ -70,6 +82,8 @@ BUCKET_ORDER = [
     "1-2", "3-6", "7-13", "14-29", "30+",
 ]
 
+DEFAULTER_REASON = "Defaulter not paid back in the last 30 days"
+
 
 def _mann_whitney_auc(scores: np.ndarray, labels: np.ndarray) -> float:
     """Mirrors pd_model.postprocessing.whitelist_eval._mann_whitney_auc exactly."""
@@ -80,6 +94,46 @@ def _mann_whitney_auc(scores: np.ndarray, labels: np.ndarray) -> float:
         return np.nan
     sum_ranks_pos = float(ranks[labels == 1].sum())
     return (sum_ranks_pos - n_pos * (n_pos + 1) / 2.0) / (n_pos * n_neg)
+
+
+def _report(sub_df: pd.DataFrame, label_col: str, out_prefix: str, title: str) -> None:
+    print("\n" + "#" * 78)
+    print(f"# {title}  (n={len(sub_df):,}, positives={int(sub_df[label_col].sum()):,})")
+    print("#" * 78)
+
+    print("=" * 78)
+    print(f"AUC per numeric candidate signal vs. {label_col} (0.5 = no discrimination)")
+    print("=" * 78)
+    auc_rows = []
+    for col in NUMERIC_CANDIDATES:
+        sub = sub_df[[col, label_col]].dropna()
+        auc = _mann_whitney_auc(sub[col].to_numpy(), sub[label_col].to_numpy())
+        pct_nonzero = float((sub[col] != 0).mean()) if len(sub) else np.nan
+        auc_rows.append({
+            "candidate": col,
+            "n": len(sub),
+            f"auc_vs_{label_col}": round(auc, 4) if not np.isnan(auc) else np.nan,
+            "pct_nonzero": round(pct_nonzero, 4),
+        })
+    auc_df = pd.DataFrame(auc_rows).set_index("candidate")
+    print(auc_df.to_string())
+
+    print(f"\n{'=' * 78}")
+    print(f"{label_col} rate by {BUCKET_CANDIDATE}")
+    print("=" * 78)
+    sub_df = sub_df.copy()
+    sub_df[BUCKET_CANDIDATE] = pd.Categorical(
+        sub_df[BUCKET_CANDIDATE], categories=BUCKET_ORDER, ordered=True
+    )
+    bucket_summary = sub_df.groupby(BUCKET_CANDIDATE, observed=True).agg(
+        n=(label_col, "size"),
+        **{f"{label_col}_rate": (label_col, "mean")},
+    ).round(4)
+    print(bucket_summary.to_string())
+
+    auc_df.to_csv(f"{out_prefix}.csv")
+    bucket_summary.to_csv(f"{out_prefix}_dpd_bucket.csv")
+    print(f"\nWritten to: {out_prefix}.csv and {out_prefix}_dpd_bucket.csv")
 
 
 def main():
@@ -110,53 +164,40 @@ def main():
 
     merged = df.merge(wl_bl, on="agent_msisdn_key", how="inner")
     merged["is_blacklisted"] = (merged["xtrafloat_list_type"] == "blacklist").astype(int)
+    merged["reason"] = merged["reason"].fillna("(whitelist / no reason)")
 
     print(f"Matched {len(merged):,} of {len(df):,} agents against the whitelist/blacklist ({len(merged)/max(1,len(df)):.1%})\n")
 
-    print("=" * 78)
-    print("AUC per numeric candidate signal (cal_pd-style: 0.5 = no discrimination)")
-    print("=" * 78)
-    auc_rows = []
-    for col in NUMERIC_CANDIDATES:
-        sub = merged[[col, "is_blacklisted"]].dropna()
-        auc = _mann_whitney_auc(sub[col].to_numpy(), sub["is_blacklisted"].to_numpy())
-        pct_nonzero = float((sub[col] != 0).mean()) if len(sub) else np.nan
-        auc_rows.append({
-            "candidate": col,
-            "n": len(sub),
-            "auc_vs_blacklist": round(auc, 4) if not np.isnan(auc) else np.nan,
-            "pct_nonzero": round(pct_nonzero, 4),
-        })
-    auc_df = pd.DataFrame(auc_rows).set_index("candidate")
-    print(auc_df.to_string())
+    _report(
+        merged, "is_blacklisted", args.out,
+        "FULL BLACKLIST (all reasons mixed -- activity/commission reasons dominate)",
+    )
     print(
         "\nRead this as: AUC near 0.5 or pct_nonzero near 0%/100% (near-universal, "
         "like ever_penalty_1_due/2_due already ruled out) means the signal doesn't "
-        "separate blacklisted agents from whitelisted ones. AUC well above 0.5 with "
-        "meaningful variation (pct_nonzero well inside 0-100%) means it does."
+        "separate blacklisted agents from whitelisted ones. A monotonic bucket-rate "
+        "climb (and no bucket anomalously high) is what a genuinely discriminating "
+        "duration threshold looks like -- but see the Defaulter-only section below "
+        "for whether that's actually about repayment risk or just activity/tenure."
     )
 
-    print("\n" + "=" * 78)
-    print(f"Blacklist rate by {BUCKET_CANDIDATE}")
-    print("=" * 78)
-    merged[BUCKET_CANDIDATE] = pd.Categorical(
-        merged[BUCKET_CANDIDATE], categories=BUCKET_ORDER, ordered=True
+    defaulter_or_wl = merged[
+        (merged["is_blacklisted"] == 0) | (merged["reason"] == DEFAULTER_REASON)
+    ].copy()
+    defaulter_or_wl["is_defaulter"] = (defaulter_or_wl["reason"] == DEFAULTER_REASON).astype(int)
+
+    out_prefix_defaulter = f"{Path(args.out).stem}_defaulter_only"
+    _report(
+        defaulter_or_wl, "is_defaulter", out_prefix_defaulter,
+        f'DEFAULTER-ONLY ("{DEFAULTER_REASON}" vs. whitelist, other blacklist reasons dropped)',
     )
-    bucket_summary = merged.groupby(BUCKET_CANDIDATE, observed=True).agg(
-        n=("is_blacklisted", "size"),
-        blacklist_rate=("is_blacklisted", "mean"),
-    ).round(4)
-    print(bucket_summary.to_string())
     print(
-        "\nRead this as: a monotonic increase in blacklist_rate across buckets "
-        "(and no bucket anomalously high, unlike the raw dpd_bucket_distribution "
-        "diagnostic's old-label result) is what a genuinely discriminating "
-        "duration threshold looks like."
+        "\nRead this as: compare each candidate's AUC/bucket pattern here against "
+        "its full-blacklist counterpart above. A candidate that looks strong above "
+        "but weak/flat here (e.g. if prior_max_loan_seq's inversion shrinks toward "
+        "0.5) is picking up activity/tenure blacklist reasons, not default risk -- "
+        "drop it. A candidate that holds up here is a genuine repayment-risk signal."
     )
-
-    auc_df.to_csv(args.out)
-    bucket_summary.to_csv(f"{Path(args.out).stem}_dpd_bucket.csv")
-    print(f"\nWritten to: {args.out} and {Path(args.out).stem}_dpd_bucket.csv")
 
 
 if __name__ == "__main__":
