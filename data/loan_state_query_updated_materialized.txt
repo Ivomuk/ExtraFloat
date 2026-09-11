@@ -553,14 +553,39 @@ WHERE b.mapping_is_unambiguous = 1
 --   not here.
 --
 -- PRIMARY LABEL
---   bad_state_3dpd_30d = 1 if the mapped target loan, during days 1-30:
---     - reaches days_aging > 3; or
---     - becomes ANOMALY_OPEN / is_anomaly_open.
+--   bad_state_3dpd_30d = 1 if the mapped target loan, during days 1-30,
+--   reaches days_aging > 3.
 --
 -- SECONDARY LABEL
---   bad_state_1dpd_7d = 1 if the mapped target loan, during days 1-7:
---     - reaches days_aging >= 1; or
---     - becomes ANOMALY_OPEN / is_anomaly_open.
+--   bad_state_1dpd_7d = 1 if the mapped target loan, during days 1-7,
+--   reaches days_aging >= 1.
+--
+-- ANOMALY_OPEN LABEL DECISION
+--   ANOMALY_OPEN (a second loan disbursed while this one is still open)
+--   used to OR into both labels above. Removed after this session's
+--   investigation found it mislabels good agents as bad, not the
+--   reverse:
+--     - borrower_history.txt's ANOMALY_OPEN fix (this session) confirmed
+--       no debt transfer occurs -- the flagged loan's own
+--       lifetime_repaid_ugx keeps climbing normally under its own
+--       disbursement_fid, and it typically resolves to CLOSED within
+--       1-6 days like any other loan.
+--     - Within loans where days_aging could not possibly have exceeded 3
+--       (max_dpd_within_30d <= 2, checked directly against the source
+--       penalty ledger), rollover_observed_30d=1 predicted the old
+--       bad_state_3dpd_30d=1 with ZERO exceptions across ~3.4M loans --
+--       737,726 of the then-1,072,897 "bad" loans (68.8%) were bad ONLY
+--       via this branch, with no elevated repayment lateness at all.
+--     - Cross-referenced against the business's own August
+--       whitelist/blacklist: agents whose only bad loans were
+--       rollover-only blacklisted at 10.47% -- LOWER than agents with NO
+--       bad loans at all (17.71%), and less than half the rate of agents
+--       with genuinely aging-bad loans (25.44%). The clause was flagging
+--       some of the safest agents in the population as failures.
+--   rollover_observed_7d/rollover_observed_30d are still computed below
+--   (useful audit/diagnostic columns, already excluded from PD features
+--   via LABEL_DIAGNOSTIC_COLUMNS) -- only their use inside the two label
+--   formulas changed.
 --
 -- LABEL-ELIGIBILITY POLICY (asymmetric censoring, standard for
 -- credit-risk problems with incomplete follow-up)
@@ -616,14 +641,18 @@ WHERE b.mapping_is_unambiguous = 1
 --   validation queries later in this file; a nonzero count there is a
 --   build-blocking failure, not ordinary censoring.
 --
--- ROLLOVER LIMITATION
---   The first ANOMALY_OPEN state on the mapped loan_uid is detected.
---   If the transferred debt later continues under a regenerated loan_uid,
---   subsequent aging on the successor loan is not attributed to the
---   original loan unless the source supplies a predecessor/root-loan
---   relationship. Therefore, rollover detection should remain part of
---   the binary label, while post-rollover max aging requires warehouse
---   validation.
+-- ROLLOVER LIMITATION (historical -- superseded by ANOMALY_OPEN LABEL
+-- DECISION above)
+--   This section previously argued rollover detection should stay part of
+--   the binary label: if the transferred debt later continues under a
+--   regenerated loan_uid, subsequent aging on the successor loan is not
+--   attributed to the original loan unless the source supplies a
+--   predecessor/root-loan relationship. That argument assumed debt
+--   actually transfers on an ANOMALY_OPEN event -- this session confirmed
+--   it does not (see ANOMALY_OPEN LABEL DECISION above), so the concern
+--   this section raised does not apply. Left here for history rather than
+--   deleted outright, since a future source-system change could
+--   reintroduce a real rollover/transfer mechanism worth re-checking for.
 -- =====================================================================
 
 CREATE TABLE hive.analytics.tmp_loan_label_assessment AS
@@ -851,9 +880,14 @@ loan_labels_raw AS (
     SELECT
         c.*,
 
-        CASE WHEN COALESCE(c.max_days_aging_7d, 0) >= 1 OR c.rollover_observed_7d = 1
+        -- rollover_observed_7d/30d deliberately NOT OR'd in here (see the
+        -- ANOMALY_OPEN LABEL DECISION comment above) -- ANOMALY_OPEN
+        -- reflects a second loan being disbursed while this one is still
+        -- open, not a repayment failure on this loan. The columns
+        -- themselves are still computed above for audit.
+        CASE WHEN COALESCE(c.max_days_aging_7d, 0) >= 1
              THEN 1 ELSE 0 END AS bad_state_1dpd_7d,
-        CASE WHEN COALESCE(c.max_days_aging_30d, 0) > 3 OR c.rollover_observed_30d = 1
+        CASE WHEN COALESCE(c.max_days_aging_30d, 0) > 3
              THEN 1 ELSE 0 END AS bad_state_3dpd_30d,
 
         DATE_DIFF('day', c.loan_date, c.required_observation_end_date_30d)
