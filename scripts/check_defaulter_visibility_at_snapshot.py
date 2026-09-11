@@ -184,10 +184,15 @@ def main():
                 f"'ever_anomaly_open'. Found: {list(eao.columns)}"
             )
         eao["agent_msisdn_key"] = _normalize_msisdn(eao[phone_col])
-        if "agent_msisdn_key" not in df.columns:
-            if "msisdn" not in df.columns:
-                sys.exit("ERROR: matched file has no 'msisdn' column to key the ever_anomaly_open join on.")
-            df["agent_msisdn_key"] = _normalize_msisdn(df["msisdn"])
+        # Always recompute fresh from msisdn, even if agent_msisdn_key already
+        # exists in df -- it does (check_whitelist_blacklist_eval.py wrote it
+        # into wl_bl_eval_matched_agents.csv), but a plain read_csv round-trip
+        # silently re-infers a digit-only object column as int64 (CSV carries
+        # no dtype metadata), which would then fail to merge against eao's
+        # freshly-str-cast version ("int64 and object columns").
+        if "msisdn" not in df.columns:
+            sys.exit("ERROR: matched file has no 'msisdn' column to key the ever_anomaly_open join on.")
+        df["agent_msisdn_key"] = _normalize_msisdn(df["msisdn"])
         df2 = df.merge(
             eao[["agent_msisdn_key", "ever_anomaly_open"]].drop_duplicates("agent_msisdn_key"),
             on="agent_msisdn_key", how="left",
