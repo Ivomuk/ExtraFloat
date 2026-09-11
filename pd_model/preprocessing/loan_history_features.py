@@ -159,6 +159,15 @@ SNAPSHOT_TO_TRAINING_COLUMN_MAP: dict[str, str] = {
     "late_fee_1_count": "prior_late_fee_1_count",
     "late_fee_2_count": "prior_late_fee_2_count",
     "total_late_fee_owed_ugx": "prior_total_late_fee_owed_ugx",
+    "max_loan_seq": "prior_max_loan_seq",
+    "max_principal_outstanding_ugx": "prior_max_principal_outstanding_ugx",
+    "max_total_outstanding_ugx": "prior_max_total_outstanding_ugx",
+    "avg_repayment_ratio": "prior_avg_repayment_ratio",
+    "principal_unsettled_count": "prior_principal_unsettled_count",
+    "most_recent_days_past_due_within_30d": "most_recent_prior_days_past_due_within_30d",
+    "loan_has_no_history_flag": "prior_loan_has_no_history_flag",
+    "loan_confirmed_no_lateness_flag": "prior_loan_confirmed_no_lateness_flag",
+    "loan_censored_flag": "prior_loan_censored_flag",
 }
 
 

@@ -1641,6 +1641,180 @@ prior_penalty_features AS (
 ),
 
 -- ---------------------------------------------------------------------
+-- Prior-loan magnitude-of-loss and duration history
+--
+-- Validated via data/prior_loan_history_candidates_vs_blacklist_export.sql
+-- + scripts/check_prior_loan_history_candidates_vs_blacklist.py against the
+-- "Defaulter not paid back in the last 30 days" blacklist reason
+-- specifically (the full blacklist is dominated by activity/commission
+-- reasons unrelated to repayment, which distorts some candidates'
+-- apparent signal): prior_max_principal_outstanding_ugx AUC=0.730,
+-- prior_principal_unsettled_count AUC=0.709, prior_max_total_outstanding_
+-- ugx AUC=0.640, prior_avg_repayment_ratio AUC=0.786 (inverted/
+-- protective -- high repayment ratio predicts safety), prior_max_loan_seq
+-- AUC=0.573 (weak, inverted -- kept for possible interaction effects).
+-- The duration signal (most_recent_prior_days_past_due_within_30d) climbs
+-- monotonically from 2.25% (1-2 days) to 29.24% (30+ days) Defaulter rate
+-- when measured on the single most recent PRIOR loan -- an earlier
+-- version that took MAX(days_past_due) across every prior loan produced a
+-- backwards, non-monotonic pattern, confounded by prior_max_loan_seq's
+-- own finding that agents with more prior loans are safer (more loans
+-- means more chances for one to have drifted past 30 days by exposure
+-- alone, not because the agent is riskier).
+--
+-- Named prior_avg_repayment_ratio (not prior_avg_collection_ratio) and
+-- most_recent_prior_days_past_due_within_30d (not ..._dpd_within_30d) to
+-- avoid PD_FEATURE_BLACKLIST/LEAKAGE_PATTERNS's "collection" substring
+-- block and the DPD_ALLOW_PATTERNS/DPD_BLOCK_PATTERNS "dpd" substring
+-- check in pd_model/config/feature_config.py -- same sidestep-by-naming
+-- approach already used for prior_late_fee_* vs. the "penalt" block.
+--
+-- xtrafloat_loan_final_state: one row per loan, its most recently
+-- observed daily state (distinct from xtrafloat_penalty_loan_summary
+-- above, which aggregates ever/max across a loan's ENTIRE history --
+-- outstanding-balance and settlement columns need the loan's ENDING
+-- state, not a lifetime aggregate).
+-- ---------------------------------------------------------------------
+xtrafloat_loan_final_state_ranked AS (
+    SELECT
+        pen.disbursement_fid,
+        pen.loan_seq,
+        pen.principal_outstanding_ugx,
+        pen.total_outstanding_ugx,
+        pen.actual_collected_ugx,
+        pen.total_due_ugx,
+        pen.is_principal_settled,
+
+        ROW_NUMBER() OVER (
+            PARTITION BY pen.disbursement_fid
+            ORDER BY pen.date_key DESC, pen.inserted_ts DESC
+        ) AS final_state_rn
+
+    FROM analytics.momo_loan_book_tracker_xtrafloat_loan_state_daily pen
+    WHERE pen.ova = 'XTRAFLOAT-AGENT'
+      AND pen.date_key >= 20260101
+),
+
+xtrafloat_loan_final_state AS (
+    SELECT
+        disbursement_fid,
+        loan_seq,
+        principal_outstanding_ugx,
+        total_outstanding_ugx,
+        actual_collected_ugx,
+        total_due_ugx,
+        is_principal_settled
+    FROM xtrafloat_loan_final_state_ranked
+    WHERE final_state_rn = 1
+),
+
+-- Computed strictly from loans disbursed BEFORE the target loan, same
+-- join shape as prior_penalty_features -- genuinely non-leaky.
+prior_loan_history_features AS (
+    SELECT
+        current_loan.disbursement_fid AS target_disbursement_fid,
+
+        MAX(fs.loan_seq) AS prior_max_loan_seq,
+
+        MAX(fs.principal_outstanding_ugx)
+            AS prior_max_principal_outstanding_ugx,
+        MAX(fs.total_outstanding_ugx)
+            AS prior_max_total_outstanding_ugx,
+
+        AVG(
+            CASE WHEN COALESCE(fs.total_due_ugx, 0) > 0
+                 THEN fs.actual_collected_ugx / fs.total_due_ugx
+            END
+        ) AS prior_avg_repayment_ratio,
+
+        COUNT_IF(fs.is_principal_settled = false)
+            AS prior_principal_unsettled_count
+
+    FROM hive.analytics.tmp_target_loans current_loan
+
+    LEFT JOIN hive.analytics.tmp_disbursements prior_loan
+      ON prior_loan.msisdn = current_loan.msisdn
+     AND prior_loan.disbursement_ts
+            < current_loan.disbursement_ts
+
+    LEFT JOIN xtrafloat_loan_final_state fs
+      ON fs.disbursement_fid = prior_loan.disbursement_fid
+
+    GROUP BY current_loan.disbursement_fid
+),
+
+xtrafloat_penalty_dated AS (
+    SELECT
+        disbursement_fid,
+        days_past_due,
+        CAST(DATE_PARSE(CAST(date_key AS VARCHAR), '%Y%m%d') AS DATE) AS state_date
+    FROM analytics.momo_loan_book_tracker_xtrafloat_loan_state_daily
+    WHERE ova = 'XTRAFLOAT-AGENT'
+      AND date_key >= 20260101
+),
+
+-- Per-PRIOR-loan max days_past_due strictly after that loan's own
+-- loan_date and up to its label_horizon_30d_end -- same measurement-
+-- alignment discipline as bad_state_3dpd_30d itself.
+prior_loan_max_days_past_due_30d AS (
+    SELECT
+        l.disbursement_fid,
+        MAX(p.days_past_due) AS max_days_past_due_30d
+    FROM hive.analytics.tmp_loan_label_assessment l
+    LEFT JOIN xtrafloat_penalty_dated p
+      ON p.disbursement_fid = l.disbursement_fid
+     AND p.state_date > l.loan_date
+     AND p.state_date <= l.label_horizon_30d_end
+    WHERE l.label_eligible_30d = 1
+    GROUP BY l.disbursement_fid
+),
+
+-- Identifies, per target loan, which PRIOR loan is the most recent one --
+-- the duration signal must read a single specific loan's own outcome, not
+-- an aggregate across every prior loan (see the confound note above).
+-- Named prior_disbursements_recency_ranked, not prior_loans_ranked, to
+-- avoid colliding with the pre-existing prior_loans_ranked CTE above
+-- (line ~1292, a different ranking over prior_loan_state_candidates for
+-- the tenure/closed-loan features) -- two CTEs with the same name in one
+-- WITH clause is a compile error.
+prior_disbursements_recency_ranked AS (
+    SELECT
+        current_loan.disbursement_fid AS target_disbursement_fid,
+        prior_loan.disbursement_fid AS prior_disbursement_fid,
+
+        ROW_NUMBER() OVER (
+            PARTITION BY current_loan.disbursement_fid
+            ORDER BY prior_loan.disbursement_ts DESC
+        ) AS recency_rn
+
+    FROM hive.analytics.tmp_target_loans current_loan
+
+    JOIN hive.analytics.tmp_disbursements prior_loan
+      ON prior_loan.msisdn = current_loan.msisdn
+     AND prior_loan.disbursement_ts < current_loan.disbursement_ts
+),
+
+-- most_recent_prior_loan_label_eligible_30d is queried directly against
+-- tmp_loan_label_assessment (NOT pre-filtered the way
+-- prior_loan_max_days_past_due_30d is), so a NULL days-past-due outcome
+-- can be split into "genuinely confirmed never past due" (that prior loan
+-- was itself label_eligible_30d=1) vs. "we don't actually know" (censored,
+-- or that prior loan was never sampled as a target loan at all).
+most_recent_prior_loan_days_past_due AS (
+    SELECT
+        r.target_disbursement_fid,
+        dpd.max_days_past_due_30d AS most_recent_prior_days_past_due_within_30d,
+        COALESCE(pla.label_eligible_30d, 0)
+            AS most_recent_prior_loan_label_eligible_30d
+    FROM prior_disbursements_recency_ranked r
+    LEFT JOIN prior_loan_max_days_past_due_30d dpd
+      ON dpd.disbursement_fid = r.prior_disbursement_fid
+    LEFT JOIN hive.analytics.tmp_loan_label_assessment pla
+      ON pla.disbursement_fid = r.prior_disbursement_fid
+    WHERE r.recency_rn = 1
+),
+
+-- ---------------------------------------------------------------------
 -- Prior disbursement frequency and amount
 --
 -- The intraday timestamp condition correctly includes loan 1 as prior
@@ -2000,6 +2174,41 @@ SELECT
     COALESCE(pf.prior_total_late_fee_owed_ugx, 0)
         AS prior_total_late_fee_owed_ugx,
 
+    -- Prior-loan magnitude-of-loss, repayment ratio, and duration history
+    -- (see prior_loan_history_features / most_recent_prior_loan_days_
+    -- past_due above -- validated against the Defaulter-only blacklist
+    -- reason; see that CTE's header comment for AUCs). Magnitude/ratio
+    -- columns are left NULL (not 0) when no prior loan exists -- 0 would
+    -- mean "confirmed fully recovered/repaid," a different thing from
+    -- "unknown." Count-type columns default to 0, which is a genuine
+    -- value even at zero prior loans.
+    COALESCE(plh.prior_max_loan_seq, 0)
+        AS prior_max_loan_seq,
+
+    plh.prior_max_principal_outstanding_ugx,
+    plh.prior_max_total_outstanding_ugx,
+    plh.prior_avg_repayment_ratio,
+
+    COALESCE(plh.prior_principal_unsettled_count, 0)
+        AS prior_principal_unsettled_count,
+
+    mrd.most_recent_prior_days_past_due_within_30d,
+
+    CASE WHEN mrd.target_disbursement_fid IS NULL
+         THEN 1 ELSE 0
+    END AS prior_loan_has_no_history_flag,
+
+    CASE WHEN mrd.most_recent_prior_days_past_due_within_30d IS NULL
+          AND mrd.most_recent_prior_loan_label_eligible_30d = 1
+         THEN 1 ELSE 0
+    END AS prior_loan_confirmed_no_lateness_flag,
+
+    CASE WHEN mrd.most_recent_prior_days_past_due_within_30d IS NULL
+          AND mrd.target_disbursement_fid IS NOT NULL
+          AND COALESCE(mrd.most_recent_prior_loan_label_eligible_30d, 0) = 0
+         THEN 1 ELSE 0
+    END AS prior_loan_censored_flag,
+
     -- Targets
     l.bad_state_3dpd_30d,
     l.bad_state_1dpd_7d,
@@ -2064,6 +2273,12 @@ LEFT JOIN prior_disbursement_features p
 
 LEFT JOIN prior_penalty_features pf
   ON pf.target_disbursement_fid = d.disbursement_fid
+
+LEFT JOIN prior_loan_history_features plh
+  ON plh.target_disbursement_fid = d.disbursement_fid
+
+LEFT JOIN most_recent_prior_loan_days_past_due mrd
+  ON mrd.target_disbursement_fid = d.disbursement_fid
 
 LEFT JOIN current_loan_features c
   ON c.disbursement_fid = d.disbursement_fid;
