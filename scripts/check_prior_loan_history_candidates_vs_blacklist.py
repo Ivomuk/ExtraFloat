@@ -11,6 +11,15 @@ blacklist rate by bucket. Only signals that show real separation (not near-
 universal, not near-random) should become the actual feature set for the
 next SQL+training+scoring change.
 
+The duration candidates (prior_dpd_exceed_3_rate, most_recent_prior_dpd_
+bucket_within_30d) use a rate/recency framing rather than a raw MAX across
+every prior loan -- an earlier version's MAX-based bucket showed a
+non-monotonic, backwards pattern (the "30+" bucket had the LOWEST blacklist
+rate of all, while holding 72% of the population) because it was confounded
+by prior_max_loan_seq's own finding: agents with more prior loans are safer,
+so more prior loans also means more chances for one to have drifted past 30
+days purely from exposure.
+
 Input: CSV export of
 data/prior_loan_history_candidates_vs_blacklist_export.sql.
 
@@ -42,9 +51,15 @@ NUMERIC_CANDIDATES = [
     "prior_max_total_outstanding_ugx",
     "prior_avg_collection_ratio",
     "prior_principal_unsettled_count",
+    "prior_dpd_exceed_3_rate",
 ]
 
-BUCKET_CANDIDATE = "prior_max_dpd_bucket_within_30d"
+# Recency-based duration framing (the single most recent prior loan's own
+# dpd outcome), not a MAX across every prior loan -- see the diagnostic
+# SQL's DURATION FRAMING comment: aggregating MAX across a variable-length
+# history confounds duration with prior_max_loan_seq's own tenure/safety
+# signal.
+BUCKET_CANDIDATE = "most_recent_prior_dpd_bucket_within_30d"
 BUCKET_ORDER = ["NEVER_PAST_DUE", "1-2", "3-6", "7-13", "14-29", "30+"]
 
 

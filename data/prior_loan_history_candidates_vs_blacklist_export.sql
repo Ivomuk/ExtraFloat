@@ -1,51 +1,56 @@
 -- ============================================================================
 -- prior_loan_history_candidates_vs_blacklist_export.sql
 -- ============================================================================
--- Validates 5 candidate prior-loan-history signals against the business's
--- own blacklist ground truth BEFORE wiring any of them into training/scoring
+-- Validates candidate prior-loan-history signals against the business's own
+-- blacklist ground truth BEFORE wiring any of them into training/scoring
 -- SQL -- same discipline that caught the prior_late_fee_* feature hurting
 -- results (see loan_state_query_updated_materialized.txt's
 -- prior_penalty_features comment) and the OR ANOMALY_OPEN label bug: cheap
 -- SQL-only validation first, code changes only for what survives it.
 --
--- All 5 signals are computed strictly from loans disbursed BEFORE the
--- agent's most recent label-eligible loan -- mirrors prior_penalty_features's
--- join shape exactly (msisdn match, strict disbursement_ts < target's), so
--- none of them read the target loan's own outcome:
+-- All signals are computed strictly from loans disbursed BEFORE the agent's
+-- most recent label-eligible loan -- mirrors prior_penalty_features's join
+-- shape exactly (msisdn match, strict disbursement_ts < target's), so none
+-- of them read the target loan's own outcome:
 --
 --   1. prior_max_loan_seq
 --        Raw loan_seq (from analytics.momo_loan_book_tracker_xtrafloat_
 --        loan_state_daily itself, not the derived loan_seq_at_scoring /
 --        observed_prior_loan_count features already in the model) of the
---        agent's most recent PRIOR loan -- tests whether the raw sequence
---        number carries information the existing derived tenure features
---        don't.
+--        agent's most recent PRIOR loan.
 --   2. prior_max_principal_outstanding_ugx / prior_max_total_outstanding_ugx
 --        Magnitude of real, unrecovered loss on any prior loan (final
---        observed daily state) -- a continuous severity signal, unlike the
---        already-tested penalty-due/owed flags which turned out to be
---        near-universal (ever_penalty_1_due/2_due fire on ~92% of loans)
---        and uninformative.
+--        observed daily state).
 --   3. prior_avg_collection_ratio
---        actual_collected_ugx / total_due_ugx, averaged across prior loans
---        -- a continuous repayment-shortfall signal.
+--        actual_collected_ugx / total_due_ugx, averaged across prior loans.
 --   4. prior_principal_unsettled_count
---        Count of prior loans where is_principal_settled = false -- a
---        clean "real default occurred" count, sharper than penalty flags
---        (penalties frequently get paid in full even when principal never
---        does -- see prior_avg_collection_ratio's rationale).
---   5. prior_max_dpd_within_30d (bucketed)
---        Re-derives dpd_within_label_window_vs_label.sql's bucketing
---        against the now-corrected bad_state_3dpd_30d label (that file's
---        results are stale -- they ran against the old, ANOMALY_OPEN-
---        contaminated label).
+--        Count of prior loans where is_principal_settled = false.
+--   5. Duration (days_past_due), TWO framings -- see below.
 --
--- One row per agent, taking prior-history values as of their most recent
--- label-eligible loan (the point where the full accumulated prior history
--- is visible, matching what a live scoring feature would see). Cross-
--- reference against data/blacklist_aug_20260804.csv /
--- data/whitelist_aug_20260804.csv the same way
--- rollover_only_bad_vs_blacklist_export.sql already does.
+-- ---------------------------------------------------------------------------
+-- DURATION FRAMING -- rewritten after the first run
+-- ---------------------------------------------------------------------------
+-- The first version aggregated MAX(days_past_due) across EVERY prior loan.
+-- That result (blacklist rate: NEVER_PAST_DUE=36%, 1-2=30%, 3-6=29%,
+-- 7-13=39%, 14-29=42%, 30+=17% -- the "30+" bucket LOWEST of all, holding
+-- 72% of the population) was not a genuine duration signal -- it was
+-- confounded by prior_max_loan_seq's own finding (AUC=0.337, i.e. MORE
+-- prior loans => SAFER agent): an agent with many prior loans has more
+-- chances for at least one to have drifted past 30 days purely from
+-- exposure, even if that agent is otherwise a good, prolific repeat
+-- borrower. A raw MAX over an uncontrolled loan count conflates "duration
+-- of lateness" with "how many loans this agent has taken."
+--
+-- This version tests two framings that don't have that confound:
+--   5a. most_recent_prior_dpd_within_30d (bucketed)
+--         The dpd outcome of the single most recent PRIOR loan only --
+--         no aggregation across a variable-length history.
+--   5b. prior_dpd_exceed_3_rate
+--         COUNT(prior loans with max_dpd_within_30d > 3) /
+--         COUNT(all prior loans) -- a rate, not a raw count, so it isn't
+--         mechanically pulled toward 1 by having more prior loans.
+-- prior_loan_count is also exported for transparency/sanity-checking
+-- against prior_max_loan_seq.
 -- ============================================================================
 
 WITH xtrafloat_loan_final_state_ranked AS (
@@ -111,6 +116,36 @@ max_dpd_within_30d AS (
     GROUP BY l.disbursement_fid
 ),
 
+-- Identifies, per target loan, which PRIOR loan is the most recent one --
+-- needed for the recency-based duration framing (5a) so it isn't
+-- aggregated across a variable-length history.
+prior_loans_ranked AS (
+    SELECT
+        current_loan.disbursement_fid AS target_disbursement_fid,
+        prior_loan.disbursement_fid AS prior_disbursement_fid,
+
+        ROW_NUMBER() OVER (
+            PARTITION BY current_loan.disbursement_fid
+            ORDER BY prior_loan.disbursement_ts DESC
+        ) AS recency_rn
+
+    FROM hive.analytics.tmp_target_loans current_loan
+
+    JOIN hive.analytics.tmp_disbursements prior_loan
+      ON prior_loan.msisdn = current_loan.msisdn
+     AND prior_loan.disbursement_ts < current_loan.disbursement_ts
+),
+
+most_recent_prior_dpd AS (
+    SELECT
+        r.target_disbursement_fid,
+        dpd.max_dpd_within_30d AS most_recent_prior_dpd_within_30d
+    FROM prior_loans_ranked r
+    LEFT JOIN max_dpd_within_30d dpd
+      ON dpd.disbursement_fid = r.prior_disbursement_fid
+    WHERE r.recency_rn = 1
+),
+
 -- Mirrors prior_penalty_features's join shape exactly: computed strictly
 -- from loans disbursed BEFORE the target loan, so this is genuinely
 -- non-leaky (the target loan's own outcome is never read here).
@@ -119,6 +154,7 @@ prior_loan_history_candidates AS (
         current_loan.disbursement_fid AS target_disbursement_fid,
 
         MAX(fs.loan_seq) AS prior_max_loan_seq,
+        COUNT(prior_loan.disbursement_fid) AS prior_loan_count,
 
         MAX(fs.principal_outstanding_ugx)
             AS prior_max_principal_outstanding_ugx,
@@ -134,7 +170,13 @@ prior_loan_history_candidates AS (
         COUNT_IF(fs.is_principal_settled = false)
             AS prior_principal_unsettled_count,
 
-        MAX(dpd.max_dpd_within_30d) AS prior_max_dpd_within_30d
+        -- Rate, not raw count -- doesn't mechanically increase just from
+        -- having more prior loans (see DURATION FRAMING note above).
+        CASE
+            WHEN COUNT(prior_loan.disbursement_fid) > 0
+            THEN CAST(COUNT_IF(dpd.max_dpd_within_30d > 3) AS DOUBLE)
+                 / COUNT(prior_loan.disbursement_fid)
+        END AS prior_dpd_exceed_3_rate
 
     FROM hive.analytics.tmp_target_loans current_loan
 
@@ -181,24 +223,28 @@ SELECT
     bh.has_bad_loan_new_label,
 
     COALESCE(c.prior_max_loan_seq, 0) AS prior_max_loan_seq,
+    COALESCE(c.prior_loan_count, 0) AS prior_loan_count,
     c.prior_max_principal_outstanding_ugx,
     c.prior_max_total_outstanding_ugx,
     c.prior_avg_collection_ratio,
     COALESCE(c.prior_principal_unsettled_count, 0)
         AS prior_principal_unsettled_count,
+    c.prior_dpd_exceed_3_rate,
 
     CASE
-        WHEN c.prior_max_dpd_within_30d IS NULL THEN 'NEVER_PAST_DUE'
-        WHEN c.prior_max_dpd_within_30d <= 2 THEN '1-2'
-        WHEN c.prior_max_dpd_within_30d <= 6 THEN '3-6'
-        WHEN c.prior_max_dpd_within_30d <= 13 THEN '7-13'
-        WHEN c.prior_max_dpd_within_30d <= 29 THEN '14-29'
+        WHEN mrd.most_recent_prior_dpd_within_30d IS NULL THEN 'NEVER_PAST_DUE'
+        WHEN mrd.most_recent_prior_dpd_within_30d <= 2 THEN '1-2'
+        WHEN mrd.most_recent_prior_dpd_within_30d <= 6 THEN '3-6'
+        WHEN mrd.most_recent_prior_dpd_within_30d <= 13 THEN '7-13'
+        WHEN mrd.most_recent_prior_dpd_within_30d <= 29 THEN '14-29'
         ELSE '30+'
-    END AS prior_max_dpd_bucket_within_30d
+    END AS most_recent_prior_dpd_bucket_within_30d
 
 FROM latest_eligible_loan_ranked e
 JOIN agent_bad_history bh
   ON bh.msisdn = e.msisdn
 LEFT JOIN prior_loan_history_candidates c
   ON c.target_disbursement_fid = e.disbursement_fid
+LEFT JOIN most_recent_prior_dpd mrd
+  ON mrd.target_disbursement_fid = e.disbursement_fid
 WHERE e.latest_rn = 1;
