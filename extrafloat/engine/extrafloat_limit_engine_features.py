@@ -891,10 +891,29 @@ def build_extrafloat_limit_engine_features(
     # audit rather than used as a join key.
     if loan_history_df is not None:
         loan_history_df = loan_history_df.rename(columns={"snapshot_dt": "loan_history_snapshot_dt"})
-        merged = merged.merge(loan_history_df, on="msisdn", how="left")
-        logger.info("After loan history snapshot merge: %d rows", len(merged))
-
         _loan_history_cols = [c for c in loan_history_df.columns if c not in ("msisdn", "loan_history_snapshot_dt")]
+        # Some loan_history_snapshot_query.txt columns (e.g. has_pre_window_history,
+        # latest_loan_status) happen to share names with columns borrower_df
+        # already contributed to `merged` above. An unsuffixed merge would
+        # silently rename BOTH sides via pandas' default _x/_y suffixing,
+        # breaking the _loan_history_cols lookup below (it still holds the
+        # pre-merge names). Suffix explicitly so the loan-history-snapshot's
+        # own, independently-cadenced version of a colliding field survives
+        # under an unambiguous name instead.
+        _collisions = [c for c in _loan_history_cols if c in merged.columns]
+        merged = merged.merge(loan_history_df, on="msisdn", how="left", suffixes=("", "_loan_history_snapshot"))
+        logger.info("After loan history snapshot merge: %d rows", len(merged))
+        if _collisions:
+            logger.info(
+                "build_extrafloat_limit_engine_features: loan history snapshot column(s) "
+                "%s collide with existing borrower-derived columns; loan-history-snapshot's "
+                "version kept as '<name>_loan_history_snapshot'.",
+                _collisions,
+            )
+            _loan_history_cols = [
+                f"{c}_loan_history_snapshot" if c in _collisions else c for c in _loan_history_cols
+            ]
+
         if _loan_history_cols:
             _unmatched_lh = int(merged[_loan_history_cols].isna().all(axis=1).sum())
             if _unmatched_lh > 0:
