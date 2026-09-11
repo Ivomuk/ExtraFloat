@@ -62,8 +62,8 @@ echo.
 echo === Step 5/6: Filtering the loan-history-snapshot file to the same retail-agent set ===
 python scripts\filter_borrower_file_by_retail_agents.py ^
     --retail-agents-file retail_agents_filtered.csv ^
-    --borrower-file data\loan_history_snapshot_20260619.csv ^
-    --out data\loan_history_snapshot_20260619_retail_filtered.csv ^
+    --borrower-file data\loan_history_snapshot_20260817.csv ^
+    --out data\loan_history_snapshot_20260817_retail_filtered.csv ^
     --label "Loan-history-snapshot file"
 
 if %ERRORLEVEL% neq 0 (
@@ -79,7 +79,7 @@ python run_credit_risk_pipeline.py ^
     --transaction-file retail_agents_filtered.csv ^
     --loan-file data\loan_summary_retail_filtered.csv ^
     --borrower-file borrower_history_retail_filtered.csv ^
-    --loan-history-file data\loan_history_snapshot_20260619_retail_filtered.csv ^
+    --loan-history-file data\loan_history_snapshot_20260817_retail_filtered.csv ^
     --snapshot-date 20260731 ^
     --artifacts-dir pd_model/artifacts/ ^
     --scorecard-path scorecards/capacity_scorecard_v1.json ^
