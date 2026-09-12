@@ -814,6 +814,22 @@ def run_pipeline(args: argparse.Namespace) -> None:
     xgb_val_cal = xgb_val_scored.iloc[_idx_cal].reset_index(drop=True)
     lgb_val_cal = lgb_val_scored.iloc[_idx_cal].reset_index(drop=True)
 
+    # xgb_val_cal/lgb_val_cal are sliced from xgb_val_scored/lgb_val_scored
+    # with the identical positional _idx_cal array and both reset_index the
+    # same way, so row i of one corresponds to the exact same validation
+    # loan as row i of the other -- this is the only point in the pipeline
+    # where that alignment is this explicit. Stamp it into an actual column
+    # now, since run_locked_policy_pipeline's build_policy_tables() sorts
+    # each model's DataFrame independently by its own cal_pd and calls
+    # reset_index(drop=True) (loses any positional alignment), and
+    # agent_msisdn alone is not unique per row here -- an agent can have
+    # multiple loans in the calibration split. Without this, Step 13's
+    # merge (xgb_sorted x lgb_sorted on agent_msisdn) is a many-to-many
+    # fan-out for every agent with more than one calibration-split loan,
+    # which silently multiplies ops_scored's row count.
+    xgb_val_cal["_cal_row_id"] = np.arange(len(xgb_val_cal))
+    lgb_val_cal["_cal_row_id"] = np.arange(len(lgb_val_cal))
+
     del xgb_val_scored, lgb_val_scored
     gc.collect()
 
@@ -917,11 +933,28 @@ def run_pipeline(args: argparse.Namespace) -> None:
         xgb_sorted = xgb_sorted.rename(columns={feature_config.CAL_PD_COL: "xgb_cal_pd"})
         lgb_sorted = lgb_sorted.rename(columns={feature_config.CAL_PD_COL: "lgb_cal_pd"})
 
-        # Merge LGB columns onto XGB base (both cover the same thick-file val agents)
-        lgb_merge_cols = [feature_config.AGENT_KEY, "lgb_cal_pd"] + [
+        # Merge LGB columns onto XGB base (both cover the same thick-file val agents).
+        # Merging on agent_msisdn alone is a many-to-many fan-out whenever an
+        # agent has more than one loan in the calibration split -- xgb_sorted
+        # and lgb_sorted are loan-level, not agent-level, and build_policy_
+        # tables() sorts each independently by its own cal_pd and resets the
+        # index, so no positional alignment survives to lean on. _cal_row_id
+        # (stamped on xgb_val_cal/lgb_val_cal above, before either model's
+        # own sort) is the actual unique per-loan key here; agent_msisdn is
+        # kept in the merge key too purely as a fail-closed cross-check.
+        lgb_merge_cols = [feature_config.AGENT_KEY, "_cal_row_id", "lgb_cal_pd"] + [
             c for c in lgb_sorted.columns if c.startswith("lgb_approved")
         ]
-        thick_df = xgb_sorted.merge(lgb_sorted[lgb_merge_cols], on=feature_config.AGENT_KEY, how="left")
+        thick_df = xgb_sorted.merge(
+            lgb_sorted[lgb_merge_cols], on=[feature_config.AGENT_KEY, "_cal_row_id"], how="left"
+        )
+        if len(thick_df) != len(xgb_sorted):
+            raise DataAlignmentError(
+                f"[FATAL] xgb_sorted x lgb_sorted merge changed row count "
+                f"({len(xgb_sorted)} -> {len(thick_df)}) -- _cal_row_id/agent_msisdn "
+                f"are not uniquely aligned between the two models' calibration splits."
+            )
+        thick_df = thick_df.drop(columns=["_cal_row_id"])
 
         # Promote champion's cal_pd to shared cal_pd column
         thick_df[feature_config.CAL_PD_COL] = thick_df[f"{champion}_cal_pd"]
