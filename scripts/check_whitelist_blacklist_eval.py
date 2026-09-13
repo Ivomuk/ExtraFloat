@@ -233,6 +233,36 @@ def main():
                                       f"classified as loan-performance or eligibility -- excluded from numbers 3-5 "
                                       f"above. Review and add to LOAN_PERFORMANCE_BLACKLIST_REASONS or "
                                       f"KNOWN_ELIGIBILITY_BLACKLIST_REASONS: {unclassified_reasons}")
+
+                # -------------------------------------------------
+                # Whitelist has no "reason" column at all (confirmed: it
+                # collapses to a single NaN bucket above) -- nothing in the
+                # whitelist data says "this agent has definitely taken a
+                # loan" the way blacklist's "Defaulter..." reason does.
+                # "Whitelisted" most likely just means "currently eligible
+                # to borrow," which doesn't require having borrowed yet.
+                # agent_category (e.g. "New Bronze") is the best available
+                # proxy -- a newly-onboarded agent plausibly has no loan
+                # history yet, which would make their absence benign the
+                # same way blacklist's eligibility reasons are.
+                # -------------------------------------------------
+                if n_missing > 0 and list_type == "whitelist" and "agent_category" in sub.columns:
+                    cat_totals = sub["agent_category"].value_counts(dropna=False)
+                    cat_missing = missing["agent_category"].value_counts(dropna=False)
+                    cat_tbl = pd.DataFrame({
+                        "total": cat_totals,
+                        "missing": cat_missing,
+                    }).fillna(0).astype({"total": int, "missing": int})
+                    cat_tbl["missing_pct"] = cat_tbl["missing"] / cat_tbl["total"].clip(lower=1)
+                    cat_tbl = cat_tbl.sort_values("missing_pct", ascending=False)
+                    print(f"\n  Missing-from-borrower-file rate by agent_category (whitelist, "
+                          f"'reason' isn't populated for whitelist -- category is the closest proxy):")
+                    print(f"  {cat_tbl.to_string()}")
+                    print("  Read this as: if categories containing 'New' show a much higher missing "
+                          "rate than established categories (Silver/Bronze/etc.), that supports "
+                          "'newly-onboarded, hasn't borrowed yet' as the benign explanation -- if "
+                          "missing rates look similar across all categories instead, that's less "
+                          "conclusive and worth a manual spot-check of a few missing msisdns.")
     else:
         print(f"NOTE: borrower file '{args.borrower_file}' not found -- skipping Part A.")
 
