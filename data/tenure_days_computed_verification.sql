@@ -26,10 +26,21 @@
 -- Query 2: bridge coverage -- how many of those closed loans even resolve
 --   to a disbursement_fid via tmp_target_loans (only covers the
 --   2026-01-01 to 2026-07-14 training/validation cohort window).
+--   Already run -- 5,695,188 / 7,025,955 (81.1%) resolved.
 --
 -- Query 3: cross-check agreement between the computed value and the
 --   xtrafloat table's days_since_disbursement, for whichever loans Query 2
---   found a disbursement_fid for.
+--   found a disbursement_fid for. FIRST VERSION (superseded, kept here as
+--   a documented dead end) took xtrafloat's row at MAX(date_key) per
+--   disbursement_fid -- that diverged badly (avg_abs_diff ~18.75 days,
+--   only 18.8% exact match out of 5,695,188 compared, p90 diff 108 days),
+--   because that table doesn't stop emitting rows at closure the way
+--   tmp_loan_state does (its penalty flags are already confirmed
+--   elsewhere in this file to persist on later daily rows past
+--   resolution) -- so "last row" measures "how long this table kept
+--   tracking the loan afterward," not tenure. CURRENT VERSION instead
+--   takes xtrafloat's row nearest to (on or before) the loan's own
+--   closure_date, for a true as-of-closure-day comparison.
 -- ============================================================================
 
 
@@ -140,40 +151,57 @@ bridged_closed_loans AS (
      AND t.msisdn = c.customer_msisdn
 ),
 
-xtrafloat_final_state_ranked AS (
+-- NOTE: xtrafloat_final_state (MAX(date_key) per disbursement_fid, no
+-- closure-day alignment) was tried first and diverged badly from
+-- computed_tenure_days (avg_abs_diff ~18.75 days, only 18.8% exact match)
+-- -- consistent with this table NOT stopping at closure the way
+-- tmp_loan_state does (its penalty flags are already confirmed elsewhere
+-- in this file to persist on later daily rows past resolution). So instead
+-- of the loan's LAST row, take the row nearest to (on or before) that
+-- loan's own closure_date -- a true apples-to-apples "what did each source
+-- say tenure was, as of the closure day" comparison.
+xtrafloat_dated AS (
     SELECT
         pen.disbursement_fid,
         pen.days_since_disbursement,
         pen.days_past_due,
-
-        ROW_NUMBER() OVER (
-            PARTITION BY pen.disbursement_fid
-            ORDER BY pen.date_key DESC, pen.inserted_ts DESC
-        ) AS final_state_rn
+        CAST(DATE_PARSE(CAST(pen.date_key AS VARCHAR), '%Y%m%d') AS DATE)
+            AS state_date
 
     FROM analytics.momo_loan_book_tracker_xtrafloat_loan_state_daily pen
     WHERE pen.ova = 'XTRAFLOAT-AGENT'
       AND pen.date_key >= 20260101
 ),
 
-xtrafloat_final_state AS (
-    SELECT disbursement_fid, days_since_disbursement, days_past_due
-    FROM xtrafloat_final_state_ranked
-    WHERE final_state_rn = 1
+xtrafloat_at_closure_ranked AS (
+    SELECT
+        b.loan_uid,
+        b.computed_tenure_days,
+        x.days_since_disbursement,
+        x.days_past_due,
+
+        ROW_NUMBER() OVER (
+            PARTITION BY b.loan_uid
+            ORDER BY x.state_date DESC
+        ) AS closure_proximity_rn
+
+    FROM bridged_closed_loans b
+    JOIN xtrafloat_dated x
+      ON x.disbursement_fid = b.disbursement_fid
+     AND x.state_date <= b.closure_date
 ),
 
 section_2_cross_check AS (
     SELECT
-        b.computed_tenure_days,
-        x.days_since_disbursement AS xtrafloat_days_since_disbursement,
-        x.days_past_due AS xtrafloat_days_past_due,
+        computed_tenure_days,
+        days_since_disbursement AS xtrafloat_days_since_disbursement,
+        days_past_due AS xtrafloat_days_past_due,
 
-        b.computed_tenure_days - x.days_since_disbursement
+        computed_tenure_days - days_since_disbursement
             AS tenure_diff
 
-    FROM bridged_closed_loans b
-    JOIN xtrafloat_final_state x
-      ON x.disbursement_fid = b.disbursement_fid
+    FROM xtrafloat_at_closure_ranked
+    WHERE closure_proximity_rn = 1
 )
 
 SELECT
