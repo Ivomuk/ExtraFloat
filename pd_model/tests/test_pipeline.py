@@ -182,3 +182,60 @@ class TestEndToEndPipeline:
         if len(thin_agents) > 0:
             assert "never_loan_points" in df.columns
             assert "never_loan_pd_like" in df.columns
+
+
+class TestExcludeFeatures:
+    """exclude_features supports ablation runs (e.g. comparing val/bootstrap
+    AUC with vs. without a newly-added feature group) without a permanent
+    PD_FEATURE_BLACKLIST change -- see run_pipeline.py's --exclude-features."""
+
+    @pytest.fixture(scope="class")
+    def prepared(self):
+        cfg = DEFAULT_CONFIG
+        df_pd, _ = _make_synthetic_dataset()
+        df_pd = run_phase_2_1_richer_tx_behaviour(df_pd, cfg=cfg)
+        df_pd = classify_agent_loan_status(df_pd)
+        df_pd = add_thin_file_flags(df_pd, cfg=cfg)
+        df_pd = compute_bad_flags(df_pd)
+        df_pd = add_never_loan_scorecard_from_phase_2_1(df_pd, cfg=cfg)
+        pd_features, log_cols, cap_cols, _, signed_log_cols, _ = get_and_classify_pd_features(df_pd)
+        df_pd_raw = df_pd.copy(deep=True)
+        df_pd_transformed, _, _ = build_transformed_dataframe(
+            df_pd, pd_features, log_cols, cap_cols, signed_log_cols, cfg=cfg
+        )
+        return df_pd_raw, df_pd_transformed
+
+    def _candidates(self, df_pd_raw, df_pd_transformed, **kwargs):
+        result = prepare_pd_training_and_validation_data(
+            df_pd_raw=df_pd_raw,
+            df_pd_transformed=df_pd_transformed,
+            target_col=feature_config.TARGET_COL,
+            train_cutoff=pd.Timestamp("2025-09-30"),
+            id_cols=[feature_config.AGENT_KEY],
+            protected_cols=list(feature_config.PD_FEATURE_BLACKLIST),
+            pd_feature_blacklist=feature_config.PD_FEATURE_BLACKLIST,
+            forbidden_feature_patterns=feature_config.LEAKAGE_PATTERNS,
+            date_cols=feature_config.DATE_COLS,
+            **kwargs,
+        )
+        return result[6]  # candidate_features
+
+    def test_exclude_features_removes_named_column(self, prepared):
+        df_pd_raw, df_pd_transformed = prepared
+        baseline = self._candidates(df_pd_raw, df_pd_transformed)
+        assert "vol_1m" in baseline
+
+        ablated = self._candidates(df_pd_raw, df_pd_transformed, exclude_features=["vol_1m"])
+        assert "vol_1m" not in ablated
+        assert set(baseline) - {"vol_1m"} == set(ablated)
+
+    def test_exclude_features_none_is_a_no_op(self, prepared):
+        df_pd_raw, df_pd_transformed = prepared
+        baseline = self._candidates(df_pd_raw, df_pd_transformed)
+        unchanged = self._candidates(df_pd_raw, df_pd_transformed, exclude_features=None)
+        assert baseline == unchanged
+
+    def test_exclude_features_is_case_insensitive(self, prepared):
+        df_pd_raw, df_pd_transformed = prepared
+        ablated = self._candidates(df_pd_raw, df_pd_transformed, exclude_features=["VOL_1M"])
+        assert "vol_1m" not in ablated

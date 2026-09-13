@@ -34,6 +34,7 @@ def prepare_pd_training_and_validation_data(
     date_cols: list[str],
     split_date_col: str = "snapshot_dt",
     allowed_features: list[str] | None = None,
+    exclude_features: list[str] | None = None,
     precomputed_train_mask: pd.Series | None = None,
 ) -> tuple[
     pd.DataFrame,  # X_train_raw
@@ -87,6 +88,14 @@ def prepare_pd_training_and_validation_data(
                                    supplied (still coerced to datetime if present,
                                    for downstream diagnostics only).
         allowed_features:          If provided, restrict candidates to this list.
+        exclude_features:          If provided, drop these names from the candidate
+                                   list even if they'd otherwise qualify -- for
+                                   ablation runs (e.g. comparing val/bootstrap AUC
+                                   with vs. without a newly-added feature group)
+                                   without needing a permanent, semantic
+                                   PD_FEATURE_BLACKLIST entry. Applied after
+                                   ``allowed_features``, so the two compose
+                                   (exclude wins if a name is in both).
         precomputed_train_mask:    Optional boolean Series, aligned to
                                    ``df_pd_raw``'s index, used directly as the
                                    train/validation split instead of comparing
@@ -129,6 +138,7 @@ def prepare_pd_training_and_validation_data(
     # directly -- strictly more robust than the coercion-order trick it
     # replaces (works even for still-object/string-encoded dates).
     date_cols_low = {str(c).lower() for c in date_cols}
+    exclude_low = {str(c).lower() for c in exclude_features} if exclude_features else set()
 
     base_cols = allowed_features if allowed_features is not None else df_pd_transformed.columns
     candidate_features: list[str] = []
@@ -145,11 +155,19 @@ def prepare_pd_training_and_validation_data(
             continue
         if c_low in date_cols_low:
             continue
+        if c_low in exclude_low:
+            continue
         if c == target_col or c == split_date_col:
             continue
         if not pd.api.types.is_numeric_dtype(df_pd_transformed[c]):
             continue
         candidate_features.append(c)
+
+    if exclude_features:
+        logger.info(
+            "prepare_pd_data: excluded %d requested feature(s) from candidates: %s",
+            len(exclude_low), sorted(exclude_low),
+        )
 
     logger.info(
         "prepare_pd_data: %d candidate numeric features identified",

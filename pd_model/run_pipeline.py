@@ -237,6 +237,16 @@ def run_pipeline(args: argparse.Namespace) -> None:
     using_loan_level_grain = getattr(args, "loan_training_file", None) is not None
     train_cutoff: pd.Timestamp | None = None
 
+    exclude_features_raw = getattr(args, "exclude_features", None)
+    exclude_features = (
+        [f.strip() for f in exclude_features_raw.split(",") if f.strip()]
+        if exclude_features_raw
+        else None
+    )
+    if exclude_features:
+        logger.info("Ablation run: excluding %d feature(s) from candidates: %s",
+                    len(exclude_features), exclude_features)
+
     if using_loan_level_grain:
         # ------------------------------------------------------------------ #
         # 1) Load the loan-level training file
@@ -705,6 +715,7 @@ def run_pipeline(args: argparse.Namespace) -> None:
         pd_feature_blacklist=feature_config.PD_FEATURE_BLACKLIST,
         forbidden_feature_patterns=feature_config.LEAKAGE_PATTERNS,
         date_cols=feature_config.DATE_COLS,
+        exclude_features=exclude_features,
         precomputed_train_mask=precomputed_train_mask,
     )
 
@@ -1154,6 +1165,14 @@ def _build_parser() -> argparse.ArgumentParser:
         default="xgb",
         choices=["xgb", "lgb"],
         help="Champion model for policy placement and inference (default: xgb)",
+    )
+    parser.add_argument(
+        "--exclude-features",
+        default=None,
+        help="Comma-separated feature names to drop from the candidate list, "
+             "for ablation runs comparing val/bootstrap AUC with vs. without a "
+             "specific feature group (e.g. a newly-added SQL feature batch) "
+             "without a permanent PD_FEATURE_BLACKLIST change.",
     )
     parser.add_argument(
         "--skip-bootstrap",
