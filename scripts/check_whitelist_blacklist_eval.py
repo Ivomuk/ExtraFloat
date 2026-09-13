@@ -221,6 +221,35 @@ def main():
                             print(f"    Real-gap agents by category:\n"
                                   f"{gap_by_cat.to_string()}")
 
+                        # -------------------------------------------------
+                        # Business-facing summary, whitelist only: mirrors the
+                        # blacklist summary's structure, but "should be
+                        # present" is defined directly from the disbursement
+                        # cross-check (has a real loan on record) rather than
+                        # a reason string, since whitelist has no reason
+                        # column at all. Coverage rate is computed over the
+                        # FULL whitelist (not just the missing subset), so it
+                        # answers "of every whitelisted agent with a real
+                        # disbursement, what fraction does the engine
+                        # actually see" -- the same shape of question as
+                        # blacklist's "coverage rate among real defaulters".
+                        # -------------------------------------------------
+                        if list_type == "whitelist":
+                            sub_has_disbursement = sub["agent_msisdn_key"].isin(loan_summary_keys)
+                            n_with_disbursement_total = int(sub_has_disbursement.sum())
+                            n_with_disbursement_found = n_with_disbursement_total - n_real_gap
+                            wl_coverage_rate = (
+                                n_with_disbursement_found / n_with_disbursement_total
+                                if n_with_disbursement_total > 0 else float("nan")
+                            )
+                            print("\n  --- Business summary: whitelist coverage ---")
+                            print(f"  1. Total whitelisted agents:                                {n_wl:,}")
+                            print(f"  2. Missing from borrower_history.csv (all):                 {n_missing:,}")
+                            print(f"  3. Missing, but EXPECTED (no disbursement -- never borrowed): {n_confirmed_benign:,}")
+                            print(f"  4. Missing, but SHOULD BE PRESENT (has a real disbursement):  {n_real_gap:,}")
+                            print(f"  5. Coverage rate among agents with a real disbursement "
+                                  f"(found/{n_with_disbursement_total:,}):        {wl_coverage_rate:.1%}")
+
                     # Missing rate PER reason -- tests whether coverage gaps are
                     # concentrated in eligibility/admin reasons (agent never took
                     # a loan, so absence from a loan-history-based borrower file
