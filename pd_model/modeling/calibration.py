@@ -73,7 +73,14 @@ def _standardize_scored_df(
     df["model_score"] = pd.to_numeric(df[score_col], errors="coerce")
     df = df.replace([np.inf, -np.inf], np.nan)
     required = [feature_config.AGENT_KEY, "y", "model_score"]
-    passthrough = [c for c in ["bad_state", feature_config.THIN_FILE_COL] if c in df.columns]
+    # _cal_row_id (stamped in run_pipeline.py's Step 13 merge fix, on
+    # xgb_val_cal/lgb_val_cal before either model's own calibration/policy
+    # sort) must survive this narrowing -- without it, attach_cal_pd's
+    # output silently loses the one column that makes the later
+    # xgb_sorted x lgb_sorted merge safe from many-to-many fan-out.
+    passthrough = [
+        c for c in ["bad_state", feature_config.THIN_FILE_COL, "_cal_row_id"] if c in df.columns
+    ]
     df = df[required + passthrough].dropna(subset=required)
 
     return df, score_col
