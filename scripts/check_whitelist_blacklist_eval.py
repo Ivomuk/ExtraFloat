@@ -151,6 +151,24 @@ def main():
                 if n_missing > 0:
                     sample_cols = [c for c in ["agent_msisdn", "agent_category", "reason"] if c in missing.columns]
                     print(f"  Sample (up to 10): \n{missing[sample_cols].head(10).to_string(index=False)}")
+
+                    # Missing rate PER reason -- tests whether coverage gaps are
+                    # concentrated in eligibility/admin reasons (agent never took
+                    # a loan, so absence from a loan-history-based borrower file
+                    # is expected) versus genuine loan-performance reasons (e.g.
+                    # "Defaulter..." -- an agent who DID take a loan; missing here
+                    # would be a real data-linkage problem, not benign).
+                    if "reason" in sub.columns:
+                        reason_totals = sub["reason"].value_counts(dropna=False)
+                        reason_missing = missing["reason"].value_counts(dropna=False)
+                        reason_tbl = pd.DataFrame({
+                            "total": reason_totals,
+                            "missing": reason_missing,
+                        }).fillna(0).astype({"total": int, "missing": int})
+                        reason_tbl["missing_pct"] = reason_tbl["missing"] / reason_tbl["total"].clip(lower=1)
+                        reason_tbl = reason_tbl.sort_values("missing_pct", ascending=False)
+                        print(f"\n  Missing-from-borrower-file rate by reason ({list_type}):")
+                        print(f"  {reason_tbl.to_string()}")
     else:
         print(f"NOTE: borrower file '{args.borrower_file}' not found -- skipping Part A.")
 
