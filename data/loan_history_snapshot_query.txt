@@ -493,8 +493,11 @@ last_closed_loan_features AS (
     WHERE closed_loan_recency = 1
 ),
 
--- tenure_days <= 1 is provisional -- see the same caveat in
--- loan_state_query_updated.txt.
+-- tenure_days is now a locally computed calendar-day count, sourced from
+-- hive.analytics.tmp_loan_state (see loan_state_query_updated_materialized.txt's
+-- normalized_loan_state CTE) -- the "<= 1" threshold itself is a
+-- product/business call, not a data-semantics question; see the same note
+-- in loan_state_query_updated.txt.
 closed_loan_streak_rows AS (
     SELECT
         msisdn,

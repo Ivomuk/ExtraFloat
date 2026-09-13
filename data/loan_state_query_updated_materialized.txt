@@ -188,7 +188,27 @@ WITH normalized_loan_state AS (
         ls.has_pre_window_history,
         ls.is_anomaly_open,
         ls.is_active_loan,
-        ls.tenure_days,
+
+        -- ls.tenure_days is confirmed 0% populated at the source across
+        -- every loan_status (live warehouse check, ~39.6M rows) -- a dead
+        -- column. Computed locally instead: for closed loans this exactly
+        -- matches (100% agreement, 0 avg/max diff across 5,694,997 loans)
+        -- an independent source -- analytics.momo_loan_book_tracker_
+        -- xtrafloat_loan_state_daily's days_since_disbursement, read at
+        -- its row nearest to (on or before) closure_date -- confirmed via
+        -- data/tenure_days_computed_verification.sql. For an open loan
+        -- (closure_date IS NULL) this falls back to tenure-as-of-this-
+        -- state-row; harmless, since every consumer of tenure_days
+        -- downstream (avg_tenure_days_closed_loans and siblings) is
+        -- already scoped to closed loans only.
+        DATE_DIFF(
+            'day',
+            ls.current_loan_start_date,
+            COALESCE(
+                ls.closure_date,
+                CAST(DATE_PARSE(CAST(ls.date_key AS VARCHAR), '%Y%m%d') AS DATE)
+            )
+        ) AS tenure_days,
 
         ls.inserted_ts,
 
@@ -1495,8 +1515,12 @@ last_closed_loan_features AS (
 -- ---------------------------------------------------------------------
 -- Consecutive on-time closed-loan streak
 --
--- tenure_days <= 1 is provisional and must be validated against the
--- source's timestamp/calendar-day semantics.
+-- tenure_days is now a locally computed calendar-day count (see
+-- normalized_loan_state above), so its semantics are well-defined; the
+-- "<= 1" threshold itself (same-day-or-next-day closure counts as "on
+-- time") is a product/business call, not a data-semantics question, and
+-- can now be tested against real values rather than being blocked on an
+-- opaque source column.
 -- ---------------------------------------------------------------------
 closed_loan_streak_rows AS (
     SELECT
