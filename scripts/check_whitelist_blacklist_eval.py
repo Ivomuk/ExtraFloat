@@ -72,6 +72,31 @@ from pd_model.postprocessing.whitelist_eval import (  # noqa: E402
     load_and_merge_lists,
 )
 
+# Blacklist reasons that describe actual loan-repayment behavior -- an
+# agent flagged for one of these DID take a loan, so absence from
+# --borrower-file (a loan-history-based table) is a genuine gap, not
+# expected. Every other observed reason (commission threshold, tenure,
+# activity, director discretion) is an ELIGIBILITY criterion that doesn't
+# require having ever borrowed -- absence there is expected. Deliberately
+# narrow/explicit rather than "everything not in NON_PERF_BLACKLIST_REASONS
+# counts as loan-performance" -- a new reason this list hasn't seen yet
+# should show up as unclassified, not get silently assumed either way.
+LOAN_PERFORMANCE_BLACKLIST_REASONS: tuple[str, ...] = (
+    "Defaulter not paid back in the last 30 days",
+)
+
+# Explicit eligibility reasons reviewed and confirmed NOT to require having
+# ever taken a loan. A reason seen in the data that's in NEITHER this list
+# nor LOAN_PERFORMANCE_BLACKLIST_REASONS is "unclassified" -- reported
+# separately below rather than silently defaulted into either bucket, so a
+# future new reason gets a human look before being folded into "expected".
+KNOWN_ELIGIBILITY_BLACKLIST_REASONS: tuple[str, ...] = (
+    "Agent active less than 3 months",
+    "As requested by Director",
+    "Average Monthly Commission in last 3 months below 20K",
+    "Transacted less than 50 days out of the last 90 days",
+)
+
 
 def _mann_whitney_auc(scores: np.ndarray, labels: np.ndarray) -> float:
     """Mirrors pd_model.postprocessing.whitelist_eval._mann_whitney_auc exactly."""
@@ -169,6 +194,45 @@ def main():
                         reason_tbl = reason_tbl.sort_values("missing_pct", ascending=False)
                         print(f"\n  Missing-from-borrower-file rate by reason ({list_type}):")
                         print(f"  {reason_tbl.to_string()}")
+
+                        # -------------------------------------------------
+                        # Business-facing summary, blacklist only: split the
+                        # missing population into "expected" (blacklisted for
+                        # an eligibility reason that never required a loan)
+                        # vs. "should be there" (blacklisted for a genuine
+                        # loan-performance reason -- their absence is a real
+                        # gap, not benign). Reasons this classification
+                        # hasn't seen are counted separately, not guessed.
+                        # -------------------------------------------------
+                        if list_type == "blacklist":
+                            reason_str = sub["reason"].astype(str)
+                            is_loan_perf = reason_str.isin(LOAN_PERFORMANCE_BLACKLIST_REASONS)
+                            is_eligibility = reason_str.isin(KNOWN_ELIGIBILITY_BLACKLIST_REASONS)
+                            is_unclassified = ~is_loan_perf & ~is_eligibility
+                            unclassified_reasons = sorted(set(reason_str[is_unclassified].unique()))
+
+                            missing_mask = sub["agent_msisdn_key"].isin(missing["agent_msisdn_key"])
+                            n_expected_missing = int((missing_mask & is_eligibility).sum())
+                            n_should_be_present_missing = int((missing_mask & is_loan_perf).sum())
+                            n_unclassified_missing = int((missing_mask & is_unclassified).sum())
+                            n_loan_perf_total = int(is_loan_perf.sum())
+                            coverage_rate = (
+                                1.0 - n_should_be_present_missing / n_loan_perf_total
+                                if n_loan_perf_total > 0 else float("nan")
+                            )
+
+                            print("\n  --- Business summary: blacklist coverage ---")
+                            print(f"  1. Total blacklisted agents:                                {n_bl:,}")
+                            print(f"  2. Missing from borrower_history.csv (all reasons):         {n_missing:,}")
+                            print(f"  3. Missing, but EXPECTED (never required a loan):           {n_expected_missing:,}")
+                            print(f"  4. Missing, but SHOULD BE PRESENT (real defaulters):        {n_should_be_present_missing:,}")
+                            print(f"     -- reason: '{LOAN_PERFORMANCE_BLACKLIST_REASONS[0]}'")
+                            print(f"  5. Coverage rate among real defaulters (found/{n_loan_perf_total:,}):   {coverage_rate:.1%}")
+                            if n_unclassified_missing:
+                                print(f"\n  NOTE: {n_unclassified_missing:,} missing agent(s) have a reason not yet "
+                                      f"classified as loan-performance or eligibility -- excluded from numbers 3-5 "
+                                      f"above. Review and add to LOAN_PERFORMANCE_BLACKLIST_REASONS or "
+                                      f"KNOWN_ELIGIBILITY_BLACKLIST_REASONS: {unclassified_reasons}")
     else:
         print(f"NOTE: borrower file '{args.borrower_file}' not found -- skipping Part A.")
 
