@@ -737,14 +737,14 @@ prior_loan_state_candidates AS (
 
             OR
 
-            -- For target loan 2 on a customer-day, permit the closed
-            -- state of loan 1 from that same day.
+            -- For target loan 2 on a customer-day, permit a prior loan
+            -- (any start date) that closed on or before that day.
             (
-                ls.current_loan_start_date = d.loan_date
-                AND ls.state_date <= d.loan_date
+                ls.state_date <= d.loan_date
                 AND ls.loan_seq < d.target_loan_seq
                 AND ls.closure_date IS NOT NULL
                 AND ls.closure_date <= d.loan_date
+                AND ls.loan_status IN ('SETTLED', 'CLOSED', 'OVERPAID')
             )
          )
 ),
