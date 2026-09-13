@@ -165,6 +165,21 @@ def main():
             n_def = int(((sub["_cohort"] == "blacklist: Defaulter")).sum())
             print(f"  {label}: AUC={auc:.4f} (n_whitelist+n_defaulter={n}, n_defaulter={n_def})")
 
+        # Export the actual msisdns for each Defaulter subgroup -- e.g. to
+        # plug directly into a WHERE customer_msisdn IN (...) spot-check
+        # against the raw loan_state table for the WITHOUT-unresolved group.
+        if "msisdn" in df.columns:
+            defaulter_df = df[df["_cohort"] == "blacklist: Defaulter"]
+            for flag_val, suffix in [(1, "with_unresolved"), (0, "without_unresolved")]:
+                msisdns = defaulter_df.loc[
+                    defaulter_df["has_unresolved_loan_at_snapshot"] == flag_val, "msisdn"
+                ]
+                msisdn_path = f"{args.out_prefix}_defaulter_{suffix}_msisdns.csv"
+                msisdns.to_frame(name="msisdn").to_csv(msisdn_path, index=False)
+                print(f"  {len(msisdns):,} msisdns written to: {msisdn_path}")
+        else:
+            print("  NOTE: 'msisdn' column not found in --matched-file -- skipping msisdn export.")
+
     out_path = f"{args.out_prefix}_tier1_by_cohort.csv"
     summary.to_csv(out_path)
     print(f"\nTIER 1 summary written to: {out_path}")
