@@ -11,30 +11,66 @@
 -- affected features actually read tenure_days for):
 --     DATE_DIFF('day', current_loan_start_date, closure_date)
 -- computed directly on hive.analytics.tmp_loan_state, using two columns
--- already confirmed reliable elsewhere this session (closure_date: 100%
--- populated on genuinely terminal rows; current_loan_start_date: used
--- throughout prior_loan_state_candidates's JOIN conditions already).
+-- already confirmed reliable elsewhere this session.
 --
--- This script:
---   1. Computes that expression for every closed loan and reports its
---      distribution (checking in particular for negative values, which
---      would indicate a data-integrity problem, not just a formula bug).
---   2. Cross-checks it, where possible, against an independent source:
---      analytics.momo_loan_book_tracker_xtrafloat_loan_state_daily's
---      days_since_disbursement, at that loan's final observed daily row
---      (same ROW_NUMBER() OVER (PARTITION BY disbursement_fid ORDER BY
---      date_key DESC, inserted_ts DESC) pattern as this file's own
---      xtrafloat_loan_final_state_ranked CTE). This cross-check is only
---      possible for closed loans that resolve to a disbursement_fid via
---      hive.analytics.tmp_target_loans's bridge, which only covers the
---      2026-01-01 to 2026-07-14 training/validation cohort window -- so
---      expect partial coverage here, not 100%.
+-- THREE INDEPENDENT QUERIES BELOW -- run each one separately. A CTE only
+-- lives for the single statement that defines it (it is not a table), so
+-- each query below repeats its own full WITH clause rather than assuming
+-- an earlier query's CTEs are still queryable.
 --
--- Run this and inspect both sections before folding the DATE_DIFF
--- expression into loan_state_query_updated_materialized.txt /
--- loan_state_query_updated.txt's normalized_loan_state CTE.
+-- Query 1: distribution / sanity check of the computed value alone.
+--   Already run -- confirmed sane: 7,025,955 closed loans, 100% non-null,
+--   median 0 days, p90 5 days, p99 39 days, max 226 days, mean 2.22 days.
+--   Only 199 negative values (0.0028%), immaterial.
+--
+-- Query 2: bridge coverage -- how many of those closed loans even resolve
+--   to a disbursement_fid via tmp_target_loans (only covers the
+--   2026-01-01 to 2026-07-14 training/validation cohort window).
+--
+-- Query 3: cross-check agreement between the computed value and the
+--   xtrafloat table's days_since_disbursement, for whichever loans Query 2
+--   found a disbursement_fid for.
 -- ============================================================================
 
+
+-- ----------------------------------------------------------------------
+-- Query 1 (already run): distribution / sanity check.
+-- ----------------------------------------------------------------------
+WITH closed_loans_computed_tenure AS (
+    SELECT
+        ls.customer_msisdn,
+        ls.loan_uid,
+        ls.loan_seq,
+        ls.current_loan_start_date,
+        ls.closure_date,
+        ls.loan_status,
+
+        DATE_DIFF(
+            'day',
+            ls.current_loan_start_date,
+            ls.closure_date
+        ) AS computed_tenure_days
+
+    FROM hive.analytics.tmp_loan_state ls
+    WHERE ls.closure_date IS NOT NULL
+      AND ls.loan_status IN ('SETTLED', 'CLOSED', 'OVERPAID')
+)
+SELECT
+    COUNT(*) AS n_closed_loans,
+    COUNT(computed_tenure_days) AS n_non_null_computed_tenure_days,
+    COUNT_IF(computed_tenure_days < 0) AS n_negative_tenure_days,
+    MIN(computed_tenure_days) AS min_tenure_days,
+    approx_percentile(computed_tenure_days, 0.5) AS p50_tenure_days,
+    approx_percentile(computed_tenure_days, 0.9) AS p90_tenure_days,
+    approx_percentile(computed_tenure_days, 0.99) AS p99_tenure_days,
+    MAX(computed_tenure_days) AS max_tenure_days,
+    AVG(computed_tenure_days) AS avg_tenure_days
+FROM closed_loans_computed_tenure;
+
+
+-- ----------------------------------------------------------------------
+-- Query 2: bridge coverage. Run this separately.
+-- ----------------------------------------------------------------------
 WITH closed_loans_computed_tenure AS (
     SELECT
         ls.customer_msisdn,
@@ -55,32 +91,45 @@ WITH closed_loans_computed_tenure AS (
       AND ls.loan_status IN ('SETTLED', 'CLOSED', 'OVERPAID')
 ),
 
--- ----------------------------------------------------------------------
--- Section 1: distribution / sanity check of the computed value alone.
--- ----------------------------------------------------------------------
-section_1_distribution AS (
+bridged_closed_loans AS (
     SELECT
-        COUNT(*) AS n_closed_loans,
-        COUNT(computed_tenure_days) AS n_non_null_computed_tenure_days,
+        c.*,
+        t.disbursement_fid
+    FROM closed_loans_computed_tenure c
+    JOIN hive.analytics.tmp_target_loans t
+      ON t.target_loan_uid = c.loan_uid
+     AND t.msisdn = c.customer_msisdn
+)
 
-        COUNT_IF(computed_tenure_days < 0)
-            AS n_negative_tenure_days,
+SELECT
+    (SELECT COUNT(*) FROM closed_loans_computed_tenure) AS n_closed_loans,
+    (SELECT COUNT(*) FROM bridged_closed_loans) AS n_bridged_to_disbursement_fid;
 
-        MIN(computed_tenure_days) AS min_tenure_days,
-        approx_percentile(computed_tenure_days, 0.5) AS p50_tenure_days,
-        approx_percentile(computed_tenure_days, 0.9) AS p90_tenure_days,
-        approx_percentile(computed_tenure_days, 0.99) AS p99_tenure_days,
-        MAX(computed_tenure_days) AS max_tenure_days,
-        AVG(computed_tenure_days) AS avg_tenure_days
 
-    FROM closed_loans_computed_tenure
+-- ----------------------------------------------------------------------
+-- Query 3: cross-check agreement against xtrafloat's
+-- days_since_disbursement. Run this separately.
+-- ----------------------------------------------------------------------
+WITH closed_loans_computed_tenure AS (
+    SELECT
+        ls.customer_msisdn,
+        ls.loan_uid,
+        ls.loan_seq,
+        ls.current_loan_start_date,
+        ls.closure_date,
+        ls.loan_status,
+
+        DATE_DIFF(
+            'day',
+            ls.current_loan_start_date,
+            ls.closure_date
+        ) AS computed_tenure_days
+
+    FROM hive.analytics.tmp_loan_state ls
+    WHERE ls.closure_date IS NOT NULL
+      AND ls.loan_status IN ('SETTLED', 'CLOSED', 'OVERPAID')
 ),
 
--- ----------------------------------------------------------------------
--- Section 2: cross-check against the xtrafloat table's
--- days_since_disbursement, for the subset of closed loans that resolve
--- to a disbursement_fid via tmp_target_loans's bridge.
--- ----------------------------------------------------------------------
 bridged_closed_loans AS (
     SELECT
         c.*,
@@ -127,24 +176,11 @@ section_2_cross_check AS (
       ON x.disbursement_fid = b.disbursement_fid
 )
 
-SELECT 'section_1_distribution' AS section, * FROM section_1_distribution;
-
--- Run separately (Trino/Athena clients generally only return the last
--- statement's result set per execution -- run each SELECT below on its
--- own if your client doesn't show every statement's output):
-
--- Coverage of the bridge itself.
--- SELECT
---     (SELECT COUNT(*) FROM closed_loans_computed_tenure) AS n_closed_loans,
---     (SELECT COUNT(*) FROM bridged_closed_loans) AS n_bridged_to_disbursement_fid,
---     (SELECT COUNT(*) FROM section_2_cross_check) AS n_with_xtrafloat_value;
-
--- Cross-check agreement, where both values are available.
--- SELECT
---     COUNT(*) AS n_compared,
---     COUNT_IF(tenure_diff = 0) AS n_exact_match,
---     COUNT_IF(ABS(tenure_diff) <= 1) AS n_within_1_day,
---     AVG(ABS(tenure_diff)) AS avg_abs_diff,
---     approx_percentile(ABS(tenure_diff), 0.9) AS p90_abs_diff,
---     MAX(ABS(tenure_diff)) AS max_abs_diff
--- FROM section_2_cross_check;
+SELECT
+    COUNT(*) AS n_compared,
+    COUNT_IF(tenure_diff = 0) AS n_exact_match,
+    COUNT_IF(ABS(tenure_diff) <= 1) AS n_within_1_day,
+    AVG(ABS(tenure_diff)) AS avg_abs_diff,
+    approx_percentile(ABS(tenure_diff), 0.9) AS p90_abs_diff,
+    MAX(ABS(tenure_diff)) AS max_abs_diff
+FROM section_2_cross_check;
