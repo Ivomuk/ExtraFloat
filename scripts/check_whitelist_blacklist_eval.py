@@ -116,6 +116,12 @@ def main():
     ap.add_argument("--output-file", default="output/engine_test_output.csv")
     ap.add_argument("--transaction-file", default="data/mfs_daily_agent_mart_20260731.csv")
     ap.add_argument("--borrower-file", default="data/borrower_history.csv")
+    ap.add_argument("--loan-summary-file", default=None,
+                     help="Optional path to loan_summary.csv. Its population is built as "
+                          "'every distinct msisdn with a disbursement' (see its own SQL), so "
+                          "cross-checking the borrower-file-missing population against it gives "
+                          "a direct 'did this agent ever actually take a loan' signal -- stronger "
+                          "than agent_category as a proxy. Skipped if not provided.")
     ap.add_argument("--score-col", default="cal_pd", help="Lower = safer, per model convention (see --higher-is-safer)")
     ap.add_argument("--higher-is-safer", action="store_true",
                      help="Set for score columns like risk_score where HIGHER = safer (opposite of cal_pd)")
@@ -162,6 +168,23 @@ def main():
         else:
             bor_keys = set(_normalize_msisdn(bor[bor_col]).dropna())
 
+            loan_summary_keys = None
+            if args.loan_summary_file:
+                ls_path = Path(args.loan_summary_file)
+                if not ls_path.exists():
+                    print(f"NOTE: --loan-summary-file '{ls_path}' not found -- skipping the "
+                          f"disbursement cross-check.")
+                else:
+                    ls_df = pd.read_csv(ls_path)
+                    ls_col = "msisdn" if "msisdn" in ls_df.columns else ("phonenumber" if "phonenumber" in ls_df.columns else None)
+                    if ls_col is None:
+                        print(f"NOTE: --loan-summary-file has neither 'msisdn' nor 'phonenumber' "
+                              f"column -- skipping the disbursement cross-check.")
+                    else:
+                        loan_summary_keys = set(_normalize_msisdn(ls_df[ls_col]).dropna())
+                        print(f"Loan-summary file: {len(loan_summary_keys):,} unique msisdns with a "
+                              f"real disbursement on record (from {ls_path})\n")
+
             for list_type, n_list in [("whitelist", n_wl), ("blacklist", n_bl)]:
                 sub = wl_bl[wl_bl["xtrafloat_list_type"] == list_type]
                 missing = sub[~sub["agent_msisdn_key"].isin(bor_keys)]
@@ -176,6 +199,27 @@ def main():
                 if n_missing > 0:
                     sample_cols = [c for c in ["agent_msisdn", "agent_category", "reason"] if c in missing.columns]
                     print(f"  Sample (up to 10): \n{missing[sample_cols].head(10).to_string(index=False)}")
+
+                    # Concrete disbursement cross-check, replaces guessing from a
+                    # proxy (agent_category tier, or a blacklist reason string):
+                    # of the agents missing from --borrower-file, how many DO have
+                    # a real disbursement on record in --loan-summary-file? Present
+                    # there = a genuine data-linkage gap (they took a loan but
+                    # borrower_history.csv doesn't have them); absent there =
+                    # confirmed benign (never actually borrowed).
+                    if loan_summary_keys is not None:
+                        has_disbursement = missing["agent_msisdn_key"].isin(loan_summary_keys)
+                        n_real_gap = int(has_disbursement.sum())
+                        n_confirmed_benign = n_missing - n_real_gap
+                        print(f"\n  Disbursement cross-check ({list_type}, of the {n_missing:,} missing):")
+                        print(f"    Confirmed benign (no disbursement on record -- never borrowed): "
+                              f"{n_confirmed_benign:,} ({n_confirmed_benign/n_missing:.1%})")
+                        print(f"    REAL GAP (has a disbursement on record, but missing from "
+                              f"borrower_history.csv anyway): {n_real_gap:,} ({n_real_gap/n_missing:.1%})")
+                        if list_type == "whitelist" and "agent_category" in missing.columns and n_real_gap > 0:
+                            gap_by_cat = missing.loc[has_disbursement, "agent_category"].value_counts(dropna=False)
+                            print(f"    Real-gap agents by category:\n"
+                                  f"{gap_by_cat.to_string()}")
 
                     # Missing rate PER reason -- tests whether coverage gaps are
                     # concentrated in eligibility/admin reasons (agent never took
