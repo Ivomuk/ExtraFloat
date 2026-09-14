@@ -22,6 +22,18 @@ disbursement-date column (auto-detects common names; override with
 --snapshot-date -- i.e. a loan the snapshot could not possibly have known
 about.
 
+CORRECTION: the first run of this script reported 0/4,756 (0.0%) with a
+post-snapshot disbursement -- that result was WRONG, caused by a date-
+parsing bug (pd.to_datetime() on a raw YYYYMMDD date_key integer defaults
+to nanoseconds-since-epoch, collapsing every date to ~1970-01-01, so
+"date > snapshot_date" was always false regardless of the real dates).
+Fixed via _parse_date_flexible(), which falls back to explicit %Y%m%d
+parsing whenever the naive parse collapses to the epoch -- same fix applied
+in check_defaulter_tenure_matches_definition.py, where the bug was first
+caught (that script's last_disbursement_date section showed real dates
+ranging 2026-02-19 to 2026-08-14, with 203 agents' last disbursement
+already in August -- directly contradicting the original 0% claim here).
+
 Usage:
     python scripts\\check_post_snapshot_disbursement.py ^
         --matched-file wl_bl_eval_matched_agents.csv ^
@@ -48,6 +60,17 @@ CANDIDATE_DATE_COLS = [
 
 def _normalize_msisdn(s: pd.Series) -> pd.Series:
     return s.astype(str).str.replace(r"[^0-9]", "", regex=True).replace("", pd.NA)
+
+
+def _parse_date_flexible(s: pd.Series) -> pd.Series:
+    """Tries ISO-format parsing first; if the result collapses to the epoch
+    (a symptom of a raw YYYYMMDD integer being misread as nanoseconds-since-
+    epoch, matching this project's date_key convention), retries with an
+    explicit %Y%m%d format instead."""
+    parsed = pd.to_datetime(s, errors="coerce")
+    if parsed.notna().any() and parsed.dropna().dt.year.max() <= 1971:
+        parsed = pd.to_datetime(s.astype("Int64").astype(str), format="%Y%m%d", errors="coerce")
+    return parsed
 
 
 def main():
@@ -109,7 +132,7 @@ def main():
     print(f"Using date column: {date_col}\n")
 
     ls_df["_key"] = _normalize_msisdn(ls_df[ls_msisdn_col])
-    ls_df["_date"] = pd.to_datetime(ls_df[date_col], errors="coerce")
+    ls_df["_date"] = _parse_date_flexible(ls_df[date_col])
     snapshot_date = pd.to_datetime(args.snapshot_date)
 
     matched_ls = ls_df[ls_df["_key"].isin(target_keys)].copy()
