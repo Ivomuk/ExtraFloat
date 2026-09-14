@@ -55,6 +55,10 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--matched-file", default="wl_bl_eval_matched_agents.csv")
     ap.add_argument("--loan-history-file", required=True)
+    ap.add_argument("--loan-summary-file", default=None,
+                     help="Optional data/loan_summary.csv -- adds each agent's actual "
+                          "last_disbursement_date (a calendar date, not just a day-count) "
+                          "to the report and the per-agent CSV.")
     args = ap.parse_args()
 
     matched_path = Path(args.matched_file)
@@ -93,6 +97,39 @@ def main():
     matched_lh = target[["_key"]].drop_duplicates().merge(lh_df, on="_key", how="left")
     n_found = matched_lh[lh_msisdn_col].notna().sum()
     print(f"Found in {lh_path.name}: {n_found:,} / {matched_lh['_key'].nunique():,}\n")
+
+    last_disb_col = None
+    if args.loan_summary_file:
+        ls_path = Path(args.loan_summary_file)
+        if not ls_path.exists():
+            print(f"NOTE: --loan-summary-file '{ls_path}' not found -- skipping last_disbursement_date.\n")
+        else:
+            ls_df = pd.read_csv(ls_path)
+            ls_msisdn_col = "msisdn" if "msisdn" in ls_df.columns else ("phonenumber" if "phonenumber" in ls_df.columns else None)
+            candidates = ["last_disbursement_date", "Last_disbursement_date",
+                          "most_recent_disbursement_date", "latest_disbursement_date"]
+            last_disb_col = next((c for c in candidates if c in ls_df.columns), None)
+            if ls_msisdn_col is None or last_disb_col is None:
+                print(f"NOTE: could not find a msisdn/date column pair in {ls_path}. "
+                      f"Columns present: {list(ls_df.columns)} -- skipping last_disbursement_date.\n")
+                last_disb_col = None
+            else:
+                ls_df["_key"] = _normalize_msisdn(ls_df[ls_msisdn_col])
+                matched_lh = matched_lh.merge(
+                    ls_df[["_key", last_disb_col]].drop_duplicates(subset="_key"),
+                    on="_key", how="left",
+                )
+                dates = pd.to_datetime(matched_lh[last_disb_col], errors="coerce")
+                print("=" * 78)
+                print(f"{last_disb_col} (actual calendar date of each agent's last disbursement)")
+                print("=" * 78)
+                print(f"n_non_null={dates.notna().sum():,} / {len(matched_lh):,}  "
+                      f"min={dates.min().date() if dates.notna().any() else 'n/a'}  "
+                      f"median={dates.median().date() if dates.notna().any() else 'n/a'}  "
+                      f"max={dates.max().date() if dates.notna().any() else 'n/a'}")
+                print("\nDistribution by month:")
+                print(dates.dt.to_period("M").value_counts().sort_index().to_string())
+                print()
 
     present_count_cols = [c for c in COUNT_COLS if c in matched_lh.columns]
     if present_count_cols:
@@ -138,6 +175,13 @@ def main():
         "behavior has genuinely improved, which the model would correctly score as low-risk even "
         "though the old flag persists."
     )
+
+    out_cols = ["_key"] + present_count_cols + [c for c in TENURE_COLS if c in matched_lh.columns]
+    if last_disb_col:
+        out_cols.append(last_disb_col)
+    out_path = f"{Path(args.matched_file).stem}_defaulter_tenure_vs_disbursement.csv"
+    matched_lh[out_cols].rename(columns={"_key": "msisdn"}).to_csv(out_path, index=False)
+    print(f"\nPer-agent detail written: {out_path}")
 
 
 if __name__ == "__main__":
