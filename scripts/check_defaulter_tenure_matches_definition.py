@@ -51,6 +51,17 @@ def _normalize_msisdn(s: pd.Series) -> pd.Series:
     return s.astype(str).str.replace(r"[^0-9]", "", regex=True).replace("", pd.NA)
 
 
+def _parse_date_flexible(s: pd.Series) -> pd.Series:
+    """Tries ISO-format parsing first; if the result collapses to the epoch
+    (a symptom of a raw YYYYMMDD integer being misread as nanoseconds-since-
+    epoch, matching this project's date_key convention), retries with an
+    explicit %Y%m%d format instead."""
+    parsed = pd.to_datetime(s, errors="coerce")
+    if parsed.notna().any() and parsed.dropna().dt.year.max() <= 1971:
+        parsed = pd.to_datetime(s.astype("Int64").astype(str), format="%Y%m%d", errors="coerce")
+    return parsed
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--matched-file", default="wl_bl_eval_matched_agents.csv")
@@ -119,7 +130,7 @@ def main():
                     ls_df[["_key", last_disb_col]].drop_duplicates(subset="_key"),
                     on="_key", how="left",
                 )
-                dates = pd.to_datetime(matched_lh[last_disb_col], errors="coerce")
+                dates = _parse_date_flexible(matched_lh[last_disb_col])
                 print("=" * 78)
                 print(f"{last_disb_col} (actual calendar date of each agent's last disbursement)")
                 print("=" * 78)
