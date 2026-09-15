@@ -30,6 +30,15 @@ score:
     script's own composite calculation is verified to match production
     exactly rather than silently drifting from it
 
+  - "all columns near-zero" cross-check: for a few absolute tolerances
+    (0, 1, 2 transactions), the count/share of agents where EVERY one of
+    the 4 raw activity columns is simultaneously <= that tolerance -- an
+    independent, non-normalized definition of "genuinely inactive" to
+    compare against the composite-score-based dormant count. If the
+    composite threshold flags far more agents than are actually near-zero
+    on every input, that's further evidence the threshold (not just one
+    column's weight) needs revisiting.
+
   - for each --target-dormant-proportion given (may be repeated): the
     composite-score threshold VALUE that would achieve that dormant rate on
     THIS population (composite.quantile(target)), mirroring how
@@ -61,6 +70,7 @@ from segmentation.extrafloat_segmentation_scoring import _identify_dormant_mask 
 
 PERCENTILES = [0.01, 0.05, 0.10, 0.25, 0.50, 0.75, 0.90, 0.95, 0.99]
 CANDIDATE_THRESHOLDS = [0.01, 0.02, 0.05, 0.10, 0.15, 0.20]
+NEAR_ZERO_TOLERANCES = [0, 1, 2, 5]
 
 DEFAULT_COLS = ["cash_out_vol_1m", "cash_in_vol_1m", "payment_vol_1m", "voucher_vol_1m"]
 DEFAULT_WEIGHTS = [0.5, 0.25, 0.15, 0.10]
@@ -94,10 +104,12 @@ def main(argv: list[str] | None = None) -> None:
     for col, w in zip(present_cols, norm_weights):
         print(f"  {col:<20} weight={w:.4f}")
 
+    raw_frame = pd.DataFrame(index=df.index)
     normalized_frame = pd.DataFrame(index=df.index)
     composite = pd.Series(0.0, index=df.index)
     for col, w in zip(present_cols, norm_weights):
         series = df[col].fillna(0.0).clip(lower=0.0)
+        raw_frame[col] = series
         p95 = series.quantile(0.95)
         normalized = (series / p95).clip(upper=1.0) if p95 > 0 else pd.Series(0.0, index=series.index)
         normalized_frame[col] = normalized
@@ -122,6 +134,22 @@ def main(argv: list[str] | None = None) -> None:
     for t in CANDIDATE_THRESHOLDS:
         n = int((composite <= t).sum())
         print(f"  threshold <= {t:.2f}   n={n:>7,}  ({n / total:.1%})")
+
+    print("\n=== Agents where EVERY activity column is near-zero (independent, non-normalized check) ===")
+    print(f"(columns checked: {list(present_cols)})")
+    for tol in NEAR_ZERO_TOLERANCES:
+        all_near_zero = (raw_frame <= tol).all(axis=1)
+        n = int(all_near_zero.sum())
+        print(f"  all columns <= {tol}   n={n:>7,}  ({n / total:.1%})")
+    current_dormant_n = int((composite <= 0.05).sum())
+    all_zero_n = int((raw_frame <= 0).all(axis=1).sum())
+    print(
+        f"\n  For comparison: composite <= 0.05 (current threshold) flags "
+        f"{current_dormant_n:,} ({current_dormant_n / total:.1%}), vs. "
+        f"{all_zero_n:,} ({all_zero_n / total:.1%}) genuinely all-zero on "
+        f"every column -- the gap between these is agents the composite "
+        f"calls dormant despite having SOME real activity on at least one input."
+    )
 
     targets = args.target_dormant_proportion or [0.05, 0.10, 0.15, 0.20]
     print("\n=== Threshold VALUE implied by each target dormant proportion ===")
