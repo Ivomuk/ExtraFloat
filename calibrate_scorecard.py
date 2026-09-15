@@ -28,6 +28,15 @@ Usage
     python calibrate_scorecard.py --agents development_agents.csv \\
         --out scorecards/capacity_scorecard_v1.json \\
         --cutoff-version reviewed_2026q1 --final
+
+calibration_metadata["expected_tier_proportions"] reflects what
+compute_agent_capacity ACTUALLY produces on --agents (score -> tenure
+safety cap -> dormant override) -- the same post-processing a production
+run applies -- not just raw score-quantile bucketing. This is printed
+below alongside the pre-override raw_score_tier_proportions, so the size
+of the tenure-cap/dormancy effect on this population is visible directly,
+rather than only discoverable later as a "drift" alert on the first real
+production run.
 """
 
 from __future__ import annotations
@@ -83,6 +92,15 @@ def _build_parser() -> argparse.ArgumentParser:
         help='JSON object {tier_name: proportion} summing to 1.0. Omit for an even split.',
     )
     p.add_argument(
+        "--dormancy-config", metavar="JSON", default=None,
+        help=(
+            "JSON object overriding dormant_inactivity_cols/_weights/"
+            "_composite_threshold, passed to the same dormancy check "
+            "production scoring uses. Omit to use its built-in defaults "
+            "(matching DEFAULT_CLUSTERING_CONFIG)."
+        ),
+    )
+    p.add_argument(
         "--cutoff-version", metavar="LABEL", default="provisional_v0",
         help="Version label stored in the scorecard (default: provisional_v0).",
     )
@@ -119,6 +137,14 @@ def main(argv: list[str] | None = None) -> None:
             print(f"error: --target-proportions is not valid JSON — {exc}", file=sys.stderr)
             sys.exit(1)
 
+    dormancy_config = None
+    if args.dormancy_config:
+        try:
+            dormancy_config = json.loads(args.dormancy_config)
+        except json.JSONDecodeError as exc:
+            print(f"error: --dormancy-config is not valid JSON — {exc}", file=sys.stderr)
+            sys.exit(1)
+
     try:
         scorecard = calibrate_capacity_scorecard(
             development_df,
@@ -127,6 +153,7 @@ def main(argv: list[str] | None = None) -> None:
             is_provisional=not args.final,
             population_description=args.population_description,
             on_missing_column="zero" if args.allow_missing_columns else "raise",
+            dormancy_config=dormancy_config,
         )
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -138,12 +165,22 @@ def main(argv: list[str] | None = None) -> None:
         print(f"error: {exc}", file=sys.stderr)
         sys.exit(1)
 
+    meta = scorecard["calibration_metadata"]
+    n_agents = meta["n_agents"]
+    n_dormant = meta.get("n_dormant_agents", 0)
     print(f"Scorecard written to: {args.out}")
     print(f"  cutoff_version   : {scorecard['cutoff_version']}")
-    print(f"  is_provisional   : {scorecard['calibration_metadata']['is_provisional']}")
-    print(f"  n_agents         : {scorecard['calibration_metadata']['n_agents']}")
-    print("  tier proportions :")
-    for tier, prop in scorecard["calibration_metadata"]["expected_tier_proportions"].items():
+    print(f"  is_provisional   : {meta['is_provisional']}")
+    print(f"  n_agents         : {n_agents}")
+    print(
+        f"  n_dormant_agents : {n_dormant} "
+        f"({n_dormant / n_agents:.1%})" if n_agents else f"  n_dormant_agents : {n_dormant}"
+    )
+    print("  raw score-quantile tier proportions (pre tenure-cap/dormancy):")
+    for tier, prop in meta.get("raw_score_tier_proportions", {}).items():
+        print(f"    {tier:<20} {prop:.4f}")
+    print("  FINAL tier proportions (post tenure-cap+dormancy -- what production will actually produce):")
+    for tier, prop in meta["expected_tier_proportions"].items():
         print(f"    {tier:<20} {prop:.4f}")
 
 

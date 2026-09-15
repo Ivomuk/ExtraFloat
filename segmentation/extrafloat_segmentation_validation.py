@@ -530,7 +530,7 @@ def run_quality_gate(
                   `df["cluster_round2"].notna()` when that column is present,
                   else all agents are treated as active. Callers with a
                   dormant mask computed elsewhere (e.g.
-                  `extrafloat_segmentation_pipeline._identify_dormant_mask`)
+                  `extrafloat_segmentation_scoring._identify_dormant_mask`)
                   should pass it explicitly.
     hdb_tier_col : Column holding HDBSCAN diagnostic tier labels, used for
                   the noise/unavailable-share check. Only evaluated when

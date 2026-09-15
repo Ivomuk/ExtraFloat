@@ -58,6 +58,14 @@ try:
 except ImportError:
     _UMAP_AVAILABLE = False
 
+# _identify_dormant_mask lives in extrafloat_segmentation_scoring.py (pure
+# pandas/numpy, no sklearn) even though it's used here too -- that module is
+# intentionally kept free of clustering-library imports so it stays
+# importable in minimal environments, and compute_agent_capacity /
+# calibrate_capacity_scorecard both need this same dormancy logic. Imported
+# here so every existing call site in this module keeps working unchanged.
+from segmentation.extrafloat_segmentation_scoring import _identify_dormant_mask  # noqa: E402,F401
+
 logger = logging.getLogger(__name__)
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -274,74 +282,6 @@ def _validate_lof_config(cfg: dict[str, Any]) -> str | None:
         return f"lof_min_cluster_population must be an int >= 2, got {min_pop!r}"
 
     return None
-
-
-def _identify_dormant_mask(
-    features_df: pd.DataFrame, cfg: dict[str, Any]
-) -> pd.Series:
-    """Identify dormant agents via a multi-product composite inactivity score.
-
-    For each configured inactivity column the column is normalised by its 95th
-    percentile (clipped to [0, 1]) and then the weighted sum is computed.
-    Agents whose composite score is at or below *dormant_composite_threshold*
-    are classified as dormant.
-
-    This is the single source of truth for dormancy across the whole
-    segmentation pipeline — both `extrafloat_segmentation_scoring.py`
-    (dormant agents forced to the lowest capacity tier) and this module's
-    diagnostics call it with the same config.
-
-    Parameters
-    ----------
-    features_df : Agent feature DataFrame.
-    cfg         : Clustering config.
-
-    Returns
-    -------
-    Boolean Series (True = dormant).
-    """
-    inactivity_cols: list[str] = cfg.get(
-        "dormant_inactivity_cols",
-        ["cash_out_vol_1m", "cash_in_vol_1m", "payment_vol_1m", "voucher_volume_1m"],
-    )
-    raw_weights: list[float] = cfg.get(
-        "dormant_inactivity_weights", [0.5, 0.25, 0.15, 0.10]
-    )
-    threshold: float = float(cfg.get("dormant_composite_threshold", 0.05))
-
-    # Filter to columns that actually exist in the DataFrame
-    present = [(col, w) for col, w in zip(inactivity_cols, raw_weights) if col in features_df.columns]
-
-    if not present:
-        logger.warning(
-            "_identify_dormant_mask: none of %s found in features_df — "
-            "treating all agents as active.",
-            inactivity_cols,
-        )
-        return pd.Series(False, index=features_df.index)
-
-    present_cols, present_weights = zip(*present)
-    weight_sum = sum(present_weights)
-    norm_weights = [w / weight_sum for w in present_weights]
-
-    # Build composite score: weighted sum of per-column normalised activity
-    composite = pd.Series(0.0, index=features_df.index)
-    for col, w in zip(present_cols, norm_weights):
-        series = features_df[col].fillna(0.0).clip(lower=0.0)
-        p95 = series.quantile(0.95)
-        normalised = (series / p95).clip(upper=1.0) if p95 > 0 else pd.Series(0.0, index=series.index)
-        composite += w * normalised
-
-    mask = composite <= threshold
-    logger.info(
-        "_identify_dormant_mask: %d dormant agents (%.1f%%) via composite inactivity "
-        "score (cols=%s, threshold=%.3f)",
-        int(mask.sum()),
-        mask.mean() * 100,
-        list(present_cols),
-        threshold,
-    )
-    return mask
 
 
 def _get_active_pca(

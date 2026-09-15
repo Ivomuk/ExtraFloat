@@ -269,6 +269,79 @@ def compute_raw_kpi_frame(
     return out
 
 
+def _identify_dormant_mask(
+    features_df: pd.DataFrame, cfg: dict[str, Any]
+) -> pd.Series:
+    """Identify dormant agents via a multi-product composite inactivity score.
+
+    For each configured inactivity column the column is normalised by its 95th
+    percentile (clipped to [0, 1]) and then the weighted sum is computed.
+    Agents whose composite score is at or below *dormant_composite_threshold*
+    are classified as dormant.
+
+    This is the single source of truth for dormancy across the whole
+    segmentation pipeline — `compute_agent_capacity`/`calibrate_capacity_scorecard`
+    (this module, dormant agents forced to the lowest capacity tier) and
+    `extrafloat_segmentation_pipeline.py`'s diagnostics both call it with the
+    same config. Lives here rather than in extrafloat_segmentation_pipeline.py
+    (which pulls in sklearn/hdbscan/umap) because it's pure pandas/numpy and
+    this module is intentionally kept importable without those dependencies
+    — extrafloat_segmentation_pipeline.py imports it back from here instead
+    of defining its own copy, so the two never drift apart.
+
+    Parameters
+    ----------
+    features_df : Agent feature DataFrame.
+    cfg         : Clustering config.
+
+    Returns
+    -------
+    Boolean Series (True = dormant).
+    """
+    inactivity_cols: list[str] = cfg.get(
+        "dormant_inactivity_cols",
+        ["cash_out_vol_1m", "cash_in_vol_1m", "payment_vol_1m", "voucher_volume_1m"],
+    )
+    raw_weights: list[float] = cfg.get(
+        "dormant_inactivity_weights", [0.5, 0.25, 0.15, 0.10]
+    )
+    threshold: float = float(cfg.get("dormant_composite_threshold", 0.05))
+
+    # Filter to columns that actually exist in the DataFrame
+    present = [(col, w) for col, w in zip(inactivity_cols, raw_weights) if col in features_df.columns]
+
+    if not present:
+        logger.warning(
+            "_identify_dormant_mask: none of %s found in features_df — "
+            "treating all agents as active.",
+            inactivity_cols,
+        )
+        return pd.Series(False, index=features_df.index)
+
+    present_cols, present_weights = zip(*present)
+    weight_sum = sum(present_weights)
+    norm_weights = [w / weight_sum for w in present_weights]
+
+    # Build composite score: weighted sum of per-column normalised activity
+    composite = pd.Series(0.0, index=features_df.index)
+    for col, w in zip(present_cols, norm_weights):
+        series = features_df[col].fillna(0.0).clip(lower=0.0)
+        p95 = series.quantile(0.95)
+        normalised = (series / p95).clip(upper=1.0) if p95 > 0 else pd.Series(0.0, index=series.index)
+        composite += w * normalised
+
+    mask = composite <= threshold
+    logger.info(
+        "_identify_dormant_mask: %d dormant agents (%.1f%%) via composite inactivity "
+        "score (cols=%s, threshold=%.3f)",
+        int(mask.sum()),
+        mask.mean() * 100,
+        list(present_cols),
+        threshold,
+    )
+    return mask
+
+
 def _fit_normalization_params(
     raw_frame: pd.DataFrame,
     upper_quantile: float = 0.99,
@@ -527,6 +600,7 @@ def calibrate_capacity_scorecard(
     population_description: str = "",
     on_missing_column: str = "raise",
     config: dict | None = None,
+    dormancy_config: dict | None = None,
 ) -> dict[str, Any]:
     """Fit a versioned capacity scorecard from a development population.
 
@@ -575,10 +649,24 @@ def calibrate_capacity_scorecard(
                       a scorecard-declared KPI column; "zero" is an
                       explicit research/dev escape hatch.
     config          : Scoring config; see DEFAULT_SCORING_CONFIG.
+    dormancy_config : Passed to `_identify_dormant_mask` (dormant_inactivity_cols/
+                      _weights/_composite_threshold). Defaults to that function's
+                      own built-in defaults, which match production's
+                      DEFAULT_CLUSTERING_CONFIG -- override only to calibrate
+                      against a non-default dormancy definition.
 
     Returns
     -------
     dict — a fully-populated scorecard artifact (see module docstring).
+    `calibration_metadata["expected_tier_proportions"]` is what
+    `compute_agent_capacity` actually produces on *development_df* — score
+    -> tenure safety cap -> dormant override, the same three steps production
+    scoring applies — not just the raw score-quantile bucketing used to
+    resolve the cutoffs themselves.
+    `calibration_metadata["raw_score_tier_proportions"]` keeps the
+    pre-override, score-only breakdown for reference, so the size of the
+    tenure-cap/dormancy effect on this population is visible directly in the
+    artifact rather than only discoverable by diffing two production runs.
     """
     cfg = _get_scoring_config(config)
     if factor_groups is None:
@@ -665,12 +753,12 @@ def calibrate_capacity_scorecard(
         if resolved_cutoffs[i] <= resolved_cutoffs[i - 1]:
             resolved_cutoffs[i] = resolved_cutoffs[i - 1] + 1e-9
 
-    tier_assignment = assign_capacity_tier(
+    tier_raw_assignment = assign_capacity_tier(
         blended_score,
         {"cutoffs": resolved_cutoffs, "tiers": list(tiers)},
     )
-    achieved_proportions = {
-        t: float((tier_assignment == t).mean()) for t in tiers
+    raw_achieved_proportions = {
+        t: float((tier_raw_assignment == t).mean()) for t in tiers
     }
 
     scorecard: dict[str, Any] = {
@@ -684,18 +772,49 @@ def calibrate_capacity_scorecard(
         "cutoffs": resolved_cutoffs,
         "tiers": list(tiers),
         "safety": {"min_tenure_years": float(cfg["min_tenure_years"])},
-        "calibration_metadata": {
-            "population_description": population_description,
-            "n_agents": int(len(development_df)),
-            "expected_tier_proportions": achieved_proportions,
-            "is_provisional": bool(is_provisional),
-        },
+        # Placeholder -- validate_scorecard (called by compute_agent_capacity
+        # below) only checks this key is present, not its contents. Replaced
+        # with the real metadata once expected_tier_proportions is known.
+        "calibration_metadata": {},
+    }
+
+    # expected_tier_proportions must reflect what compute_agent_capacity
+    # ACTUALLY produces (score -> tenure safety cap -> dormant override),
+    # not just the raw score-quantile bucketing above -- otherwise every
+    # real production run against this SAME development population would
+    # show "drift" purely because calibration never simulated the overrides
+    # production applies (the tenure cap demotes any agent under
+    # min_tenure_years by one tier; the dormancy override force-sets an
+    # agent to the lowest tier based on 1-month activity regardless of
+    # score). Reuses compute_agent_capacity itself, rather than
+    # re-implementing tenure-cap/dormancy logic here, so calibration and
+    # production can never drift apart from each other again.
+    dormant_mask = _identify_dormant_mask(development_df, dormancy_config or {})
+    capacity_config = {**cfg, "on_missing_column": on_missing_column}
+    final_capacity_df = compute_agent_capacity(
+        development_df, scorecard, is_dormant=dormant_mask, config=capacity_config
+    )
+    final_tier = final_capacity_df["capacity_tier"]
+    achieved_proportions = {t: float((final_tier == t).mean()) for t in tiers}
+    n_dormant = int(dormant_mask.sum())
+
+    scorecard["calibration_metadata"] = {
+        "population_description": population_description,
+        "n_agents": int(len(development_df)),
+        "expected_tier_proportions": achieved_proportions,
+        "raw_score_tier_proportions": raw_achieved_proportions,
+        "n_dormant_agents": n_dormant,
+        "is_provisional": bool(is_provisional),
     }
     validate_scorecard(scorecard)
     logger.info(
-        "calibrate_capacity_scorecard: calibrated on %d agents — tier "
-        "proportions=%s (is_provisional=%s)",
+        "calibrate_capacity_scorecard: calibrated on %d agents (%d dormant, "
+        "%.1f%%) -- raw score-quantile proportions=%s, FINAL (post tenure-cap"
+        "+dormancy) proportions=%s (is_provisional=%s)",
         len(development_df),
+        n_dormant,
+        100.0 * n_dormant / len(development_df) if len(development_df) else 0.0,
+        {k: round(v, 4) for k, v in raw_achieved_proportions.items()},
         {k: round(v, 4) for k, v in achieved_proportions.items()},
         is_provisional,
     )
