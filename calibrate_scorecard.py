@@ -94,10 +94,11 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--dormancy-config", metavar="JSON", default=None,
         help=(
-            "JSON object overriding dormant_inactivity_cols/_weights/"
-            "_composite_threshold, passed to the same dormancy check "
-            "production scoring uses. Omit to use its built-in defaults "
-            "(matching DEFAULT_CLUSTERING_CONFIG)."
+            "JSON object overriding dormant_inactivity_cols, passed to the "
+            "same dormancy check production scoring uses (an agent is "
+            "dormant iff every present inactivity column is exactly 0 -- "
+            "no weights or threshold to tune). Omit to use its built-in "
+            "defaults (matching DEFAULT_CLUSTERING_CONFIG)."
         ),
     )
     p.add_argument(

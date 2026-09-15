@@ -114,8 +114,9 @@ bucketed against *frozen* cutoff thresholds. Given the same scorecard, the
 same agent feature values always produce the same score and tier —
 regardless of which other agents are in the run. Agents below the
 scorecard's `min_tenure_years` are downgraded one tier; dormant agents
-(identified by a weighted composite inactivity score) always land in
-"Below Threshold".
+(identified by a simple, parameter-free rule — every one of the four
+inactivity columns, cash_out/cash_in/payment/voucher volume, is exactly
+zero) always land in "Below Threshold".
 
 Normalizing each KPI independently *before* combining — rather than
 averaging/summing raw KPIs of different units and scales together first —

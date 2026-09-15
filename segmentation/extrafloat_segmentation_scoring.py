@@ -272,12 +272,21 @@ def compute_raw_kpi_frame(
 def _identify_dormant_mask(
     features_df: pd.DataFrame, cfg: dict[str, Any]
 ) -> pd.Series:
-    """Identify dormant agents via a multi-product composite inactivity score.
+    """Identify dormant agents: all present inactivity columns are exactly zero.
 
-    For each configured inactivity column the column is normalised by its 95th
-    percentile (clipped to [0, 1]) and then the weighted sum is computed.
-    Agents whose composite score is at or below *dormant_composite_threshold*
-    are classified as dormant.
+    An agent is dormant iff every one of *dormant_inactivity_cols* that is
+    actually present in `features_df` is exactly 0 (NaN is treated as 0 --
+    an agent missing a value for a product line is not thereby exempted
+    from being flagged inactive on it). There is no normalization, no
+    per-column weighting, and no tunable threshold: this is a
+    parameter-free AND-of-zeros rule, chosen after the previous p95-
+    normalized weighted-composite-score-vs-threshold approach was found to
+    be badly miscalibrated on real production data -- its own median
+    composite score sat below the classification threshold, and
+    quantile-based threshold search collapsed to a single tie mass driven
+    entirely by agents with all four raw columns simultaneously at 0. This
+    rule sidesteps that failure mode by keying directly off the tie mass
+    itself, an unambiguous, cross-checked business quantity.
 
     This is the single source of truth for dormancy across the whole
     segmentation pipeline — `compute_agent_capacity`/`calibrate_capacity_scorecard`
@@ -292,7 +301,11 @@ def _identify_dormant_mask(
     Parameters
     ----------
     features_df : Agent feature DataFrame.
-    cfg         : Clustering config.
+    cfg         : Clustering config. Only `dormant_inactivity_cols` is read
+                  (defaults to `["cash_out_vol_1m", "cash_in_vol_1m",
+                  "payment_vol_1m", "voucher_vol_1m"]`); columns absent from
+                  *features_df* are dropped (not treated as 0), matching the
+                  old function's graceful-degradation behaviour.
 
     Returns
     -------
@@ -302,15 +315,10 @@ def _identify_dormant_mask(
         "dormant_inactivity_cols",
         ["cash_out_vol_1m", "cash_in_vol_1m", "payment_vol_1m", "voucher_vol_1m"],
     )
-    raw_weights: list[float] = cfg.get(
-        "dormant_inactivity_weights", [0.5, 0.25, 0.15, 0.10]
-    )
-    threshold: float = float(cfg.get("dormant_composite_threshold", 0.05))
 
-    # Filter to columns that actually exist in the DataFrame
-    present = [(col, w) for col, w in zip(inactivity_cols, raw_weights) if col in features_df.columns]
+    present_cols = [col for col in inactivity_cols if col in features_df.columns]
 
-    if not present:
+    if not present_cols:
         logger.warning(
             "_identify_dormant_mask: none of %s found in features_df — "
             "treating all agents as active.",
@@ -318,26 +326,19 @@ def _identify_dormant_mask(
         )
         return pd.Series(False, index=features_df.index)
 
-    present_cols, present_weights = zip(*present)
-    weight_sum = sum(present_weights)
-    norm_weights = [w / weight_sum for w in present_weights]
+    # Dormant iff every present inactivity column is exactly zero. NaN -> 0.0
+    # before the comparison so a missing value counts as inactive on that
+    # column rather than silently exempting the agent.
+    mask = pd.Series(True, index=features_df.index)
+    for col in present_cols:
+        mask &= features_df[col].fillna(0.0) == 0.0
 
-    # Build composite score: weighted sum of per-column normalised activity
-    composite = pd.Series(0.0, index=features_df.index)
-    for col, w in zip(present_cols, norm_weights):
-        series = features_df[col].fillna(0.0).clip(lower=0.0)
-        p95 = series.quantile(0.95)
-        normalised = (series / p95).clip(upper=1.0) if p95 > 0 else pd.Series(0.0, index=series.index)
-        composite += w * normalised
-
-    mask = composite <= threshold
     logger.info(
-        "_identify_dormant_mask: %d dormant agents (%.1f%%) via composite inactivity "
-        "score (cols=%s, threshold=%.3f)",
+        "_identify_dormant_mask: %d dormant agents (%.1f%%) via all-columns-"
+        "zero rule (cols=%s)",
         int(mask.sum()),
         mask.mean() * 100,
-        list(present_cols),
-        threshold,
+        present_cols,
     )
     return mask
 
@@ -649,11 +650,14 @@ def calibrate_capacity_scorecard(
                       a scorecard-declared KPI column; "zero" is an
                       explicit research/dev escape hatch.
     config          : Scoring config; see DEFAULT_SCORING_CONFIG.
-    dormancy_config : Passed to `_identify_dormant_mask` (dormant_inactivity_cols/
-                      _weights/_composite_threshold). Defaults to that function's
-                      own built-in defaults, which match production's
-                      DEFAULT_CLUSTERING_CONFIG -- override only to calibrate
-                      against a non-default dormancy definition.
+    dormancy_config : Passed to `_identify_dormant_mask` (dormant_inactivity_cols
+                      is the only meaningful key -- an agent is dormant iff
+                      every present inactivity column is exactly 0, no
+                      weights or threshold involved). Defaults to that
+                      function's own built-in defaults, which match
+                      production's DEFAULT_CLUSTERING_CONFIG -- override
+                      only to calibrate against a non-default dormancy
+                      definition.
 
     Returns
     -------

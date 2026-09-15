@@ -736,7 +736,7 @@ class TestDiagnosticClustering:
         from extrafloat_segmentation_pipeline import DORMANT_FILL_LABEL, run_diagnostic_clustering
 
         feat_df, X_pca, sel_cols = self._get_small_inputs(80)
-        # Zero out all multi-product inactivity cols so composite score = 0
+        # Zero out all multi-product inactivity cols so all-zero dormancy rule fires
         feat_df = feat_df.copy()
         for col in ("cash_out_vol_1m", "cash_in_vol_1m", "payment_vol_1m", "voucher_vol_1m"):
             if col in feat_df.columns:
