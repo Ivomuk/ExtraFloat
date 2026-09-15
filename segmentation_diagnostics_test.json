@@ -1,0 +1,8 @@
+{
+  "scoring": {
+    "allow_provisional_scorecard": true
+  },
+  "clustering": {
+    "enable_diagnostics": true
+  }
+}
