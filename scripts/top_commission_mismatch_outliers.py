@@ -25,6 +25,7 @@ import argparse
 import sys
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 
@@ -71,12 +72,18 @@ def main():
         pd.to_numeric(txn[c], errors="coerce").fillna(0) for c in parts_6m
     )
     txn["abs_gap"] = (txn["commission_6m_recomputed"] - txn["commission_raw"]).abs()
-    # Ratio of the larger to the smaller (>=1); both-zero rows get ratio=1
-    # (no mismatch) rather than NaN/inf, so they never show up as "outliers".
+    # Ratio of the larger to the smaller (>=1). A one-sided zero (e.g.
+    # commission_raw==0 but commission_6m_recomputed>0 -- the "concerning
+    # bucket" from check_commission_raw_vs_recomputed.py) is a genuine,
+    # maximally-extreme mismatch and must sort to the TOP as ratio=inf, not
+    # disappear as NaN. Only a true both-zero row (no mismatch at all) gets
+    # ratio=1.
     hi = txn[["commission_raw", "commission_6m_recomputed"]].max(axis=1)
     lo = txn[["commission_raw", "commission_6m_recomputed"]].min(axis=1)
-    txn["ratio"] = (hi / lo.replace(0, pd.NA)).astype(float)
-    txn.loc[(txn["commission_raw"] == 0) & (txn["commission_6m_recomputed"] == 0), "ratio"] = 1.0
+    both_zero = (txn["commission_raw"] == 0) & (txn["commission_6m_recomputed"] == 0)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        ratio = hi / lo.replace(0, np.nan)
+    txn["ratio"] = ratio.fillna(np.inf).mask(both_zero, 1.0)
 
     context_cols = [
         c for c in ("agent_msisdn", "agent_profile", "account_balance", "average_balance", "tbl_dt")
