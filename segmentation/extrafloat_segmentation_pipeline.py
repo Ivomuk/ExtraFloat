@@ -385,8 +385,10 @@ def _run_gmm(
             )
             try:
                 g.fit(X_pca_active)
-                scores.append(g.bic(X_pca_active))
+                bic = g.bic(X_pca_active)
+                scores.append(bic)
                 valid_ks.append(k)
+                logger.info("_run_gmm: k=%d cov=%s BIC=%.1f", k, cov, bic)
             except ValueError:
                 logger.warning(
                     "_run_gmm: k=%d cov=%s failed (singular covariance) — skipping.", k, cov
