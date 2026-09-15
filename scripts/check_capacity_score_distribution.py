@@ -108,6 +108,34 @@ def _print_cutoff_preview(
             f"n={n_agents:>7,}  achieved={achieved_pct:5.1f}%"
         )
 
+    # A large block of agents sharing the exact same blended score AT a cutoff
+    # value silently breaks the achieved-vs-target match: assign_capacity_tier
+    # (and this preview) route score == cutoff to the tier ABOVE the cutoff, so
+    # the whole tied block lands in one tier regardless of how the target
+    # proportions were split across that boundary. Flag it here instead of
+    # leaving it to be spotted by eye in the achieved-percentage column.
+    tie_threshold = max(1, int(0.005 * total))
+    flagged_values: list[float] = []
+    tie_warnings = []
+    for cutoff in cutoffs:
+        # Degenerate-cutoff nudging (+1e-9) can produce near-duplicate cutoffs
+        # sitting on the SAME tie mass -- flag each distinct plateau once.
+        if any(abs(cutoff - v) <= 1e-9 for v in flagged_values):
+            continue
+        n_tied = int(np.isclose(blended_score, cutoff, rtol=0, atol=1e-9).sum())
+        if n_tied >= tie_threshold:
+            tie_warnings.append((cutoff, n_tied))
+            flagged_values.append(cutoff)
+    if tie_warnings:
+        print(
+            "  WARNING: large tie mass sitting exactly at a cutoff -- the whole "
+            "tied block goes to the tier ABOVE it, so achieved proportions on "
+            "either side of these cutoffs will deviate from target:"
+        )
+        for cutoff, n_tied in tie_warnings:
+            pct = 100.0 * n_tied / total if total else 0.0
+            print(f"    cutoff={cutoff:.4f}  {n_tied:,} agents tied exactly here ({pct:.1f}% of population)")
+
 
 def _print_decile_buckets(series: pd.Series, label: str) -> None:
     print(f"\n{label} -- decile bucket counts (equal-width on [0,1], not equal-count)")
