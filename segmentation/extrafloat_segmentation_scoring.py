@@ -300,7 +300,7 @@ def _identify_dormant_mask(
     """
     inactivity_cols: list[str] = cfg.get(
         "dormant_inactivity_cols",
-        ["cash_out_vol_1m", "cash_in_vol_1m", "payment_vol_1m", "voucher_volume_1m"],
+        ["cash_out_vol_1m", "cash_in_vol_1m", "payment_vol_1m", "voucher_vol_1m"],
     )
     raw_weights: list[float] = cfg.get(
         "dormant_inactivity_weights", [0.5, 0.25, 0.15, 0.10]

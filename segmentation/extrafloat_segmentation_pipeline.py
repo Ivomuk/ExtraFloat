@@ -140,7 +140,7 @@ DEFAULT_CLUSTERING_CONFIG: dict[str, Any] = {
         "cash_out_vol_1m",
         "cash_in_vol_1m",
         "payment_vol_1m",
-        "voucher_volume_1m",
+        "voucher_vol_1m",
     ],
     "dormant_inactivity_weights": [0.5, 0.25, 0.15, 0.10],
     "dormant_composite_threshold": 0.05,  # normalized score ≤ this → dormant

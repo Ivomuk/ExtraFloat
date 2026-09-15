@@ -738,7 +738,7 @@ class TestDiagnosticClustering:
         feat_df, X_pca, sel_cols = self._get_small_inputs(80)
         # Zero out all multi-product inactivity cols so composite score = 0
         feat_df = feat_df.copy()
-        for col in ("cash_out_vol_1m", "cash_in_vol_1m", "payment_vol_1m", "voucher_volume_1m"):
+        for col in ("cash_out_vol_1m", "cash_in_vol_1m", "payment_vol_1m", "voucher_vol_1m"):
             if col in feat_df.columns:
                 feat_df.loc[feat_df.index[:10], col] = 0.0
 
@@ -1469,7 +1469,7 @@ class TestOptionalDependencyGuards:
             "cash_out_vol_1m": rng.rand(n) * 10,
             "cash_in_vol_1m": rng.rand(n) * 10,
             "payment_vol_1m": rng.rand(n) * 10,
-            "voucher_volume_1m": rng.rand(n) * 10,
+            "voucher_vol_1m": rng.rand(n) * 10,
         })
         return df, X_pca, list(df.columns)
 
