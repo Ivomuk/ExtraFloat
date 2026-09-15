@@ -19,13 +19,24 @@ group scores (value/activity/efficiency):
   - percentile table (1/5/10/25/50/75/90/95/99)
   - what tier proportions an EVEN split (1/8 each) would cut at, for reference
   - histogram-style decile bucket counts
+  - if --target-proportions is given: the exact cutoffs and achieved agent
+    counts THAT candidate proportion set would produce on this population --
+    the same quantile computation calibrate_capacity_scorecard's
+    target_tier_proportions branch does internally, run here as a
+    look-before-you-leap preview. Writes nothing -- calibrate_scorecard.py
+    is still the only thing that persists a scorecard.
 
 Usage:
     python scripts\\check_capacity_score_distribution.py --agents data\\mfs_daily_agent_mart_20260731.csv
     python scripts\\check_capacity_score_distribution.py --agents data\\mfs_daily_agent_mart_20260731.csv --raw
+    python scripts\\check_capacity_score_distribution.py --agents data\\mfs_daily_agent_mart_20260731.csv ^
+        --target-proportions '{"Below Threshold": 0.15, "New Bronze": 0.20, \\
+            "Bronze": 0.20, "Silver": 0.15, "Gold": 0.12, "Platinum": 0.10, \\
+            "Titanium": 0.05, "Diamond": 0.03}'
 """
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -36,6 +47,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from segmentation.extrafloat_segmentation_features import prepare_features  # noqa: E402
 from segmentation.extrafloat_segmentation_scoring import (  # noqa: E402
+    BUSINESS_SEGMENTS,
     CAPACITY_FACTOR_GROUPS,
     DEFAULT_GROUP_WEIGHTS,
     DEFAULT_SCORING_CONFIG,
@@ -56,6 +68,40 @@ def _print_percentile_table(series: pd.Series, label: str) -> None:
         print(f"  p{int(q * 100):>2}  {series.quantile(q):.4f}")
     print(f"  mean  {series.mean():.4f}")
     print(f"  std   {series.std():.4f}")
+
+
+def _print_cutoff_preview(
+    blended_score: pd.Series,
+    tiers: list[str],
+    proportions: list[float],
+    label: str,
+) -> None:
+    """Print the cutoffs/tier ranges/achieved counts *proportions* would produce.
+
+    Mirrors calibrate_capacity_scorecard's target_tier_proportions branch
+    (cumulative quantiles of the blended score) exactly, but only prints --
+    never writes a scorecard.
+    """
+    cumulative = np.cumsum(proportions)[:-1]
+    cutoffs = [float(blended_score.quantile(q)) for q in cumulative]
+    for i in range(1, len(cutoffs)):
+        if cutoffs[i] <= cutoffs[i - 1]:
+            cutoffs[i] = cutoffs[i - 1] + 1e-9
+
+    bounds = [0.0] + cutoffs + [1.0]
+    total = len(blended_score)
+    print(f"\n{label}")
+    print("-" * 60)
+    for name, target_prop, lo, hi in zip(tiers, proportions, bounds[:-1], bounds[1:]):
+        n_agents = int(((blended_score >= lo) & (blended_score < hi)).sum()) if hi < 1.0 else int(
+            (blended_score >= lo).sum()
+        )
+        achieved_pct = 100.0 * n_agents / total if total else 0.0
+        print(
+            f"  {name:<16} target={target_prop * 100:5.1f}%  "
+            f"cutoff=[{lo:.4f}, {hi:.4f})  "
+            f"n={n_agents:>7,}  achieved={achieved_pct:5.1f}%"
+        )
 
 
 def _print_decile_buckets(series: pd.Series, label: str) -> None:
@@ -81,6 +127,15 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument(
         "--allow-missing-columns", action="store_true",
         help="Zero-fill any scorecard-declared KPI column missing from --agents instead of failing closed.",
+    )
+    p.add_argument(
+        "--target-proportions", metavar="JSON", default=None,
+        help=(
+            "JSON object {tier_name: proportion} summing to ~1.0. If given, "
+            "preview the exact score cutoffs and achieved agent counts this "
+            "candidate would produce on --agents -- same computation "
+            "calibrate_scorecard.py would do, but writes nothing."
+        ),
     )
     args = p.parse_args(argv)
 
@@ -117,17 +172,35 @@ def main(argv: list[str] | None = None) -> None:
     _print_percentile_table(blended_score, "BLENDED capacity score (value*0.5 + activity*0.3 + efficiency*0.2)")
     _print_decile_buckets(blended_score, "BLENDED capacity score")
 
-    n_tiers = 8
-    even_cutoffs = [blended_score.quantile(i / n_tiers) for i in range(1, n_tiers)]
-    print(f"\nFor reference -- an EVEN 1/8 split of THIS population would cut at:")
-    print("-" * 60)
-    tier_names = [
-        "Below Threshold", "New Bronze", "Bronze", "Silver",
-        "Gold", "Platinum", "Titanium", "Diamond",
-    ]
-    bounds = [0.0] + even_cutoffs + [1.0]
-    for name, lo, hi in zip(tier_names, bounds[:-1], bounds[1:]):
-        print(f"  {name:<16} [{lo:.4f}, {hi:.4f})")
+    tiers = list(BUSINESS_SEGMENTS)
+    n_tiers = len(tiers)
+    even_proportions = [1.0 / n_tiers] * n_tiers
+    _print_cutoff_preview(
+        blended_score, tiers, even_proportions,
+        "For reference -- an EVEN split would cut at:",
+    )
+
+    if args.target_proportions:
+        try:
+            proportions_dict = json.loads(args.target_proportions)
+        except json.JSONDecodeError as exc:
+            print(f"error: --target-proportions is not valid JSON -- {exc}", file=sys.stderr)
+            sys.exit(1)
+        proportions = [float(proportions_dict.get(t, 0.0)) for t in tiers]
+        unknown = [t for t in proportions_dict if t not in tiers]
+        if unknown:
+            print(f"error: --target-proportions has unknown tier name(s): {unknown}", file=sys.stderr)
+            sys.exit(1)
+        if abs(sum(proportions) - 1.0) > 1e-3:
+            print(
+                f"error: --target-proportions must sum to 1.0 (got {sum(proportions):.4f})",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        _print_cutoff_preview(
+            blended_score, tiers, proportions,
+            "Candidate --target-proportions would cut at (preview only -- nothing written):",
+        )
 
 
 if __name__ == "__main__":
