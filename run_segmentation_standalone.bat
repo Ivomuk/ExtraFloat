@@ -1,12 +1,16 @@
 @echo off
 echo === Running agent segmentation standalone (provisional scorecard test) ===
-echo Scorecard: scorecards\capacity_scorecard_v0.json (is_provisional=true)
+echo Scorecard: scorecards\capacity_scorecard_v1.json (is_provisional=true) --
+echo calibrated against this same retail-filtered population, with
+echo expected_tier_proportions reflecting full tenure-cap+dormancy
+echo post-processing, so the tier-drift alert below should now be
+echo meaningful instead of firing by construction.
 echo segmentation_allow_provisional.json overrides allow_provisional_scorecard
 echo for THIS TEST RUN ONLY -- remove that override once the scorecard is
 echo reviewed and recalibrated with --final, and never use it for a real
 echo production run.
 
-python -m segmentation.run_extrafloat_segmentation --agents data\mfs_daily_agent_mart_20260731_retail_filtered.csv --scorecard scorecards\capacity_scorecard_v0.json --config segmentation_allow_provisional.json --output segmentation_outputs
+python -m segmentation.run_extrafloat_segmentation --agents data\mfs_daily_agent_mart_20260731_retail_filtered.csv --scorecard scorecards\capacity_scorecard_v1.json --config segmentation_allow_provisional.json --output segmentation_outputs
 
 if %ERRORLEVEL% neq 0 (
     echo.
