@@ -6,7 +6,7 @@ echo for THIS TEST RUN ONLY -- remove that override once the scorecard is
 echo reviewed and recalibrated with --final, and never use it for a real
 echo production run.
 
-python -m segmentation.run_extrafloat_segmentation --agents data\mfs_daily_agent_mart_20260731.csv --scorecard scorecards\capacity_scorecard_v0.json --config segmentation_allow_provisional.json --output segmentation_outputs
+python -m segmentation.run_extrafloat_segmentation --agents data\mfs_daily_agent_mart_20260731_retail_filtered.csv --scorecard scorecards\capacity_scorecard_v0.json --config segmentation_allow_provisional.json --output segmentation_outputs
 
 if %ERRORLEVEL% neq 0 (
     echo.
