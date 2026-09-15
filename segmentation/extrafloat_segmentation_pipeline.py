@@ -547,6 +547,14 @@ def _map_hdb_to_tier(
     NOT business tiers and never feed into capacity_tier.
     Noise label (-1) -> "Noise / Irregular".
 
+    When there are more clusters than name slots (`len(_HDB_TIER_NAMES)`),
+    multiple clusters share a name -- which clusters share is decided by
+    AGENT count, not cluster count, so a name's population always reflects
+    roughly an equal share of agents rather than an arbitrary count of
+    cluster IDs. Two large, genuinely distinct clusters that happen to be
+    adjacent in the KPI-centroid ranking get bucketed by their own sizes,
+    not silently merged just because they're next to each other in the list.
+
     Parameters
     ----------
     hdb_labels_active  : HDBSCAN label array for active agents.
@@ -600,13 +608,31 @@ def _map_hdb_to_tier(
 
     sorted_clusters = sorted(unique_clusters, key=lambda c: cluster_means[c])
 
-    # Evenly distribute descriptive labels across clusters
-    tier_groups = np.array_split(sorted_clusters, min(len(_HDB_TIER_NAMES), len(sorted_clusters)))
+    # Distribute descriptive labels across clusters by AGENT SHARE, not cluster
+    # count. np.array_split(sorted_clusters, k) used to chop the list of
+    # cluster IDs into k equal-count groups -- with more clusters than name
+    # slots, that silently merges whichever clusters land next to each other
+    # in the sorted list under one shared name, with zero regard for their
+    # actual size. Two genuinely distinct, correctly-separated clusters (e.g.
+    # 160k and 70k agents) landing in the same array_split chunk collapsed
+    # into one label covering the vast majority of agents, making a
+    # reasonably differentiated clustering look like one dominant blob.
+    # Each cluster's midpoint in the cumulative agent-count distribution
+    # decides its bucket instead, so bucket boundaries track population share.
+    cluster_sizes = {
+        cid: int((hdb_labels_active == cid).sum()) for cid in sorted_clusters
+    }
+    total_active = sum(cluster_sizes.values())
+    n_groups = min(len(_HDB_TIER_NAMES), len(sorted_clusters))
+    tier_list = _HDB_TIER_NAMES[-n_groups:]  # use highest labels if fewer clusters
+
     cluster_to_tier: dict[int, str] = {}
-    tier_list = _HDB_TIER_NAMES[-len(tier_groups):]  # use highest labels if fewer clusters
-    for tier_name, group in zip(tier_list, tier_groups):
-        for cid in group:
-            cluster_to_tier[cid] = tier_name
+    cumulative = 0
+    for cid in sorted_clusters:
+        cumulative += cluster_sizes[cid]
+        midpoint_frac = (cumulative - cluster_sizes[cid] / 2) / total_active
+        group_idx = min(n_groups - 1, int(midpoint_frac * n_groups))
+        cluster_to_tier[cid] = tier_list[group_idx]
 
     logger.info(
         "_map_hdb_to_tier: mapping %d clusters -> %d diagnostic labels",
