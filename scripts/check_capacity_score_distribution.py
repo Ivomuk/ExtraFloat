@@ -19,20 +19,25 @@ group scores (value/activity/efficiency):
   - percentile table (1/5/10/25/50/75/90/95/99)
   - what tier proportions an EVEN split (1/8 each) would cut at, for reference
   - histogram-style decile bucket counts
-  - if --target-proportions is given: the exact cutoffs and achieved agent
-    counts THAT candidate proportion set would produce on this population --
-    the same quantile computation calibrate_capacity_scorecard's
-    target_tier_proportions branch does internally, run here as a
-    look-before-you-leap preview. Writes nothing -- calibrate_scorecard.py
-    is still the only thing that persists a scorecard.
+  - for each --target-proportions given (may be repeated -- e.g. 3 candidates
+    in one run, so they can be compared side by side without re-running):
+    the exact cutoffs and achieved agent counts THAT candidate proportion
+    set would produce on this population -- the same quantile computation
+    calibrate_capacity_scorecard's target_tier_proportions branch does
+    internally, run here as a look-before-you-leap preview. Writes nothing
+    -- calibrate_scorecard.py is still the only thing that persists a
+    scorecard. Give each candidate an optional "_name" key for a readable
+    label in the output; otherwise it's labeled "Candidate 1", "Candidate 2", ...
 
 Usage:
     python scripts\\check_capacity_score_distribution.py --agents data\\mfs_daily_agent_mart_20260731.csv
     python scripts\\check_capacity_score_distribution.py --agents data\\mfs_daily_agent_mart_20260731.csv --raw
+
+    REM Compare 3 candidates in one run -- repeat --target-proportions:
     python scripts\\check_capacity_score_distribution.py --agents data\\mfs_daily_agent_mart_20260731.csv ^
-        --target-proportions '{"Below Threshold": 0.15, "New Bronze": 0.20, \\
-            "Bronze": 0.20, "Silver": 0.15, "Gold": 0.12, "Platinum": 0.10, \\
-            "Titanium": 0.05, "Diamond": 0.03}'
+        --target-proportions "{\\"_name\\": \\"Even\\", \\"Below Threshold\\": 0.125, \\"New Bronze\\": 0.125, \\"Bronze\\": 0.125, \\"Silver\\": 0.125, \\"Gold\\": 0.125, \\"Platinum\\": 0.125, \\"Titanium\\": 0.125, \\"Diamond\\": 0.125}" ^
+        --target-proportions "{\\"_name\\": \\"Mild pyramid\\", \\"Below Threshold\\": 0.15, \\"New Bronze\\": 0.20, \\"Bronze\\": 0.20, \\"Silver\\": 0.15, \\"Gold\\": 0.12, \\"Platinum\\": 0.10, \\"Titanium\\": 0.05, \\"Diamond\\": 0.03}" ^
+        --target-proportions "{\\"_name\\": \\"Steep pyramid\\", \\"Below Threshold\\": 0.30, \\"New Bronze\\": 0.25, \\"Bronze\\": 0.15, \\"Silver\\": 0.10, \\"Gold\\": 0.08, \\"Platinum\\": 0.06, \\"Titanium\\": 0.04, \\"Diamond\\": 0.02}"
 """
 
 import argparse
@@ -129,12 +134,14 @@ def main(argv: list[str] | None = None) -> None:
         help="Zero-fill any scorecard-declared KPI column missing from --agents instead of failing closed.",
     )
     p.add_argument(
-        "--target-proportions", metavar="JSON", default=None,
+        "--target-proportions", metavar="JSON", action="append", default=None,
         help=(
-            "JSON object {tier_name: proportion} summing to ~1.0. If given, "
-            "preview the exact score cutoffs and achieved agent counts this "
-            "candidate would produce on --agents -- same computation "
-            "calibrate_scorecard.py would do, but writes nothing."
+            "JSON object {tier_name: proportion} summing to ~1.0, with an "
+            "optional \"_name\" key for a readable label. May be given "
+            "multiple times to preview several candidates side by side in "
+            "one run. Previews the exact score cutoffs and achieved agent "
+            "counts each candidate would produce on --agents -- same "
+            "computation calibrate_scorecard.py would do, but writes nothing."
         ),
     )
     args = p.parse_args(argv)
@@ -180,26 +187,32 @@ def main(argv: list[str] | None = None) -> None:
         "For reference -- an EVEN split would cut at:",
     )
 
-    if args.target_proportions:
+    for i, raw_json in enumerate(args.target_proportions or [], start=1):
         try:
-            proportions_dict = json.loads(args.target_proportions)
+            proportions_dict = json.loads(raw_json)
         except json.JSONDecodeError as exc:
-            print(f"error: --target-proportions is not valid JSON -- {exc}", file=sys.stderr)
+            print(f"error: --target-proportions #{i} is not valid JSON -- {exc}", file=sys.stderr)
             sys.exit(1)
+        candidate_name = proportions_dict.pop("_name", f"Candidate {i}")
         proportions = [float(proportions_dict.get(t, 0.0)) for t in tiers]
         unknown = [t for t in proportions_dict if t not in tiers]
         if unknown:
-            print(f"error: --target-proportions has unknown tier name(s): {unknown}", file=sys.stderr)
+            print(
+                f"error: --target-proportions #{i} ({candidate_name!r}) has "
+                f"unknown tier name(s): {unknown}",
+                file=sys.stderr,
+            )
             sys.exit(1)
         if abs(sum(proportions) - 1.0) > 1e-3:
             print(
-                f"error: --target-proportions must sum to 1.0 (got {sum(proportions):.4f})",
+                f"error: --target-proportions #{i} ({candidate_name!r}) must "
+                f"sum to 1.0 (got {sum(proportions):.4f})",
                 file=sys.stderr,
             )
             sys.exit(1)
         _print_cutoff_preview(
             blended_score, tiers, proportions,
-            "Candidate --target-proportions would cut at (preview only -- nothing written):",
+            f"Candidate {i} -- {candidate_name} (preview only -- nothing written):",
         )
 
 
