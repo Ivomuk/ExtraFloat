@@ -1,0 +1,104 @@
+{
+  "scorecard_version": "2.0",
+  "cutoff_version": "provisional_v0",
+  "generated_at_utc": "2026-09-15T08:16:56.830099+00:00",
+  "factor_groups": {
+    "value": {
+      "columns": {
+        "commission": 0.25,
+        "cash_out_value_3m": 0.25,
+        "cash_in_value_6m": 0.25,
+        "payment_value_3m": 0.25
+      }
+    },
+    "activity": {
+      "columns": {
+        "cash_out_vol_3m": 1.0
+      }
+    },
+    "efficiency": {
+      "columns": {
+        "commission_per_value_3m": 0.3333333333333333,
+        "commission_per_value_6m": 0.3333333333333333,
+        "tenure_years": 0.3333333333333333
+      }
+    }
+  },
+  "group_weights": {
+    "value": 0.5,
+    "activity": 0.3,
+    "efficiency": 0.2
+  },
+  "normalization": {
+    "cash_in_value_6m": {
+      "ref_min": 0.0,
+      "ref_max": 511692770.1300012
+    },
+    "cash_out_value_3m": {
+      "ref_min": 0.0,
+      "ref_max": 188851263.00000012
+    },
+    "cash_out_vol_3m": {
+      "ref_min": 0.0,
+      "ref_max": 2131.0
+    },
+    "commission": {
+      "ref_min": 0.0,
+      "ref_max": 3954336.772000004
+    },
+    "commission_per_value_3m": {
+      "ref_min": 0.0,
+      "ref_max": 0.03692246365317826
+    },
+    "commission_per_value_6m": {
+      "ref_min": 0.0,
+      "ref_max": 0.03224460294136237
+    },
+    "payment_value_3m": {
+      "ref_min": 0.0,
+      "ref_max": 4781676.080000006
+    },
+    "tenure_years": {
+      "ref_min": 0.0,
+      "ref_max": 10.817248459958932
+    }
+  },
+  "score_scale": "0_to_1",
+  "cutoffs": [
+    0.03239686155403695,
+    0.06666666666666667,
+    0.10635574586519536,
+    0.1519804027862048,
+    0.21794154729034587,
+    0.3127683090882455,
+    0.4690062182313715
+  ],
+  "tiers": [
+    "Below Threshold",
+    "New Bronze",
+    "Bronze",
+    "Silver",
+    "Gold",
+    "Platinum",
+    "Titanium",
+    "Diamond"
+  ],
+  "safety": {
+    "min_tenure_years": 0.25
+  },
+  "calibration_metadata": {
+    "population_description": "mfs_daily_agent_mart_20260731.csv, ~467,830 agents, 1m/3m/6m KPI windows",
+    "n_agents": 467830,
+    "expected_tier_proportions": {
+      "Below Threshold": 0.24996900583545306,
+      "New Bronze": 0.19878160870401643,
+      "Bronze": 0.15124938546053054,
+      "Silver": 0.11999871748284634,
+      "Gold": 0.1,
+      "Platinum": 0.08000128251715366,
+      "Titanium": 0.059998289977128444,
+      "Diamond": 0.040001710022871555
+    },
+    "is_provisional": true
+  }
+}
