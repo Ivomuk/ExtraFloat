@@ -30,8 +30,22 @@ score:
     script's own composite calculation is verified to match production
     exactly rather than silently drifting from it
 
+  - for each --target-dormant-proportion given (may be repeated): the
+    composite-score threshold VALUE that would achieve that dormant rate on
+    THIS population (composite.quantile(target)), mirroring how
+    calibrate_capacity_scorecard derives cutoffs from target_tier_proportions
+    -- i.e. computed from the real distribution, not guessed. Prints nothing
+    to any file and changes no code default; it's the number you'd plug into
+    --dormancy-config '{"dormant_composite_threshold": ...}' once you've
+    picked a target.
+
 Usage:
     python scripts\\check_dormancy_composite_distribution.py --agents data\\mfs_daily_agent_mart_20260731_retail_filtered.csv
+
+    REM Compare candidate dormancy-rate targets and see what threshold each implies:
+    python scripts\\check_dormancy_composite_distribution.py --agents data\\mfs_daily_agent_mart_20260731_retail_filtered.csv ^
+        --target-dormant-proportion 0.05 --target-dormant-proportion 0.10 ^
+        --target-dormant-proportion 0.15 --target-dormant-proportion 0.20
 """
 
 import argparse
@@ -55,6 +69,15 @@ DEFAULT_WEIGHTS = [0.5, 0.25, 0.15, 0.10]
 def main(argv: list[str] | None = None) -> None:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--agents", required=True, metavar="PATH")
+    p.add_argument(
+        "--target-dormant-proportion", type=float, action="append", default=None,
+        metavar="FLOAT",
+        help=(
+            "Target dormant rate (e.g. 0.10 for 10%%). May be given multiple "
+            "times to compare candidates. For each, prints the composite-"
+            "score threshold that achieves it on --agents."
+        ),
+    )
     args = p.parse_args(argv)
 
     df = pd.read_csv(args.agents)
@@ -99,6 +122,18 @@ def main(argv: list[str] | None = None) -> None:
     for t in CANDIDATE_THRESHOLDS:
         n = int((composite <= t).sum())
         print(f"  threshold <= {t:.2f}   n={n:>7,}  ({n / total:.1%})")
+
+    targets = args.target_dormant_proportion or [0.05, 0.10, 0.15, 0.20]
+    print("\n=== Threshold VALUE implied by each target dormant proportion ===")
+    print("(computed as composite.quantile(target) on THIS population --")
+    print(" plug the chosen value into --dormancy-config for calibration)")
+    for target in targets:
+        threshold_value = float(composite.quantile(target))
+        n = int((composite <= threshold_value).sum())
+        print(
+            f"  target={target:.1%}   threshold={threshold_value:.4f}   "
+            f"n={n:>7,}  achieved={n / total:.1%}"
+        )
 
     # Cross-check: this script's own composite calculation must agree
     # exactly with the real production function's boolean output.
