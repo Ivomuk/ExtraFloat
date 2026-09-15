@@ -107,6 +107,7 @@ def main(argv: list[str] | None = None) -> None:
     raw_frame = pd.DataFrame(index=df.index)
     normalized_frame = pd.DataFrame(index=df.index)
     composite = pd.Series(0.0, index=df.index)
+    degenerate_cols: list[str] = []
     for col, w in zip(present_cols, norm_weights):
         series = df[col].fillna(0.0).clip(lower=0.0)
         raw_frame[col] = series
@@ -115,12 +116,31 @@ def main(argv: list[str] | None = None) -> None:
         normalized_frame[col] = normalized
         composite += w * normalized
 
+        pct_zero = float((series == 0).mean())
         print(f"\n=== Raw {col} -- percentiles ===")
         print(series.describe(percentiles=PERCENTILES).to_string())
-        print(f"  (p95 used as normalization ceiling: {p95:.4f})")
+        print(f"  {pct_zero:.1%} of agents are exactly 0 on this column")
+        if p95 <= 0:
+            degenerate_cols.append(col)
+            print(
+                f"  *** DEAD COLUMN: p95={p95:.4f} -- at least 95% of agents are 0 here, "
+                f"so this column contributes EXACTLY ZERO to every agent's composite score "
+                f"(the code's own div-by-zero guard), for agents with real activity on it too. "
+                f"Its weight ({w:.1%}) is being wasted, capping the maximum achievable composite "
+                f"below 1.0. Not a candidate signal for dormancy on this population as configured. ***"
+            )
+        else:
+            print(f"  (p95 used as normalization ceiling: {p95:.4f})")
         print(f"\n=== Normalized {col} (value / own p95, clipped to 1.0) -- percentiles ===")
         for q in PERCENTILES:
             print(f"  p{int(q * 100):>2}  {normalized_frame[col].quantile(q):.4f}")
+
+    if degenerate_cols:
+        print(
+            f"\n*** SUMMARY: {len(degenerate_cols)} dead/non-meaningful column(s) found: "
+            f"{degenerate_cols} -- consider dropping from dormant_inactivity_cols or "
+            f"replacing with a column that actually varies on this population. ***"
+        )
 
     print("\n" + "=" * 70)
     print("=== BLENDED dormancy composite score -- percentiles ===")
