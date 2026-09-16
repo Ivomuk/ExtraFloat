@@ -15,7 +15,13 @@ Reports:
            ceiling (--gmm-max-k-probe, default 2x the configured
            gmm_max_k) to directly answer "is the configured ceiling
            actually constraining the search" -- i.e. would BIC keep
-           improving past the default cutoff.
+           improving past the default cutoff. Then re-runs once more with
+           covariance_type='diag' instead of the default 'full', since
+           'full' can cheaply "buy" a BIC improvement by carving a
+           near-zero-variance component around a single extreme outlier
+           point -- reports how many degenerate (<10 agent) clusters each
+           covariance type produces, so you can see whether 'full' is
+           doing that here or the tiny clusters are genuine.
   UMAP   : embedding shape + per-dimension min/max/mean/std, so you can
            see it isn't degenerate (e.g. collapsed to a single point).
   HDBSCAN + tier mapping : cluster count/sizes/noise on the UMAP
@@ -23,10 +29,14 @@ Reports:
            tune_hdbscan_params.py to sweep those), plus the diagnostic
            tier label (_map_hdb_to_tier) each cluster resolves to and
            that label's total agent share.
-  LOF    : from flag_anomalies's real Stage 1 (HDBSCAN on PCA space,
-           independent of the UMAP-based diagnostics HDBSCAN above) +
-           Stage 2 (per-cluster LOF): per-cluster population, n flagged
-           local anomaly, and the overall lof_meta status/counts.
+  LOF    : from flag_anomalies's real Stage 1 + Stage 2 (per-cluster
+           LOF), run TWICE for a direct before/after comparison: once
+           with Stage 1 on raw PCA space (today's default, cheap) and
+           once with `anomaly_hdbscan_use_umap=True` (Stage 1 on the same
+           UMAP embedding diagnostics uses) -- reports is_global_anomaly/
+           is_local_anomaly/is_anomaly rates and the per-cluster
+           population/anomaly breakdown for both, plus a one-line
+           before -> after summary.
 
 Usage:
     python scripts\\check_diagnostic_stages_output.py --agents data\\mfs_daily_agent_mart_20260731_retail_filtered.csv
@@ -136,6 +146,35 @@ def main(argv: list[str] | None = None) -> None:
                 )
         else:
             print("\nBIC search found an interior optimum below the ceiling -- no probe needed.")
+
+        print(f"\n-- comparing cov='{cfg['gmm_covariance_type']}' against cov='diag' "
+              f"(diag can't collapse to a near-singular Gaussian around one point) --")
+        cfg_diag = dict(cfg)
+        cfg_diag["gmm_covariance_type"] = "diag"
+        labels_diag, gmm_model_diag = _run_gmm(X_pca_active, cfg_diag, np.random.RandomState(cfg["random_state"]))
+        best_k_diag = gmm_model_diag.n_components
+        ids_diag, counts_diag = np.unique(labels_diag, return_counts=True)
+        print(f"best_k (cov='diag')  = {best_k_diag}")
+        print(f"cluster sizes (diag) = {dict(zip(ids_diag.tolist(), counts_diag.tolist()))}")
+
+        tiny_full = sum(1 for c in counts.tolist() if c < 10)
+        tiny_diag = sum(1 for c in counts_diag.tolist() if c < 10)
+        top_share_full = max(counts.tolist()) / n_active
+        top_share_diag = max(counts_diag.tolist()) / n_active
+        print(f"\ncov='{cfg['gmm_covariance_type']}': {tiny_full} cluster(s) with <10 agents, "
+              f"largest cluster = {top_share_full:.1%} of active")
+        print(f"cov='diag': {tiny_diag} cluster(s) with <10 agents, "
+              f"largest cluster = {top_share_diag:.1%} of active")
+        if tiny_full > tiny_diag:
+            print("CONCLUSION: the configured covariance type is producing degenerate "
+                  "outlier-only micro-clusters that 'diag' avoids -- consider switching.")
+        elif tiny_diag > tiny_full:
+            print("CONCLUSION: 'diag' produced more small clusters here -- inspect both "
+                  "before switching away from the configured type.")
+        else:
+            print("CONCLUSION: both covariance types show a similar number of tiny "
+                  "clusters -- the small clusters likely reflect real structure, not "
+                  "a covariance-type artifact.")
     except Exception as exc:  # noqa: BLE001
         print(f"GMM failed: {exc}")
     print()
@@ -175,29 +214,51 @@ def main(argv: list[str] | None = None) -> None:
     print()
 
     # ── Stage: LOF (via flag_anomalies, its real Stage-1/Stage-2 chain) ────
+    # Run twice for a direct before/after comparison: Stage 1 on raw PCA
+    # space (today's production default) vs. Stage 1 on the UMAP embedding
+    # (clustering.anomaly_hdbscan_use_umap=True).
     print("=" * 78)
-    print("flag_anomalies (Stage 1: HDBSCAN on PCA space; Stage 2: per-cluster LOF)")
+    print("flag_anomalies (Stage 1: HDBSCAN; Stage 2: per-cluster LOF) -- PCA vs UMAP for Stage 1")
     print("=" * 78)
-    anomalies_df = flag_anomalies(features_df, selected_cols, active_mask, config=cfg)
-    lof_meta = anomalies_df.attrs.get("lof_meta", {})
-    print(f"lof_meta: {lof_meta}")
 
-    active_view = anomalies_df.loc[active_mask]
-    n_global = int(active_view["is_global_anomaly"].sum())
-    n_local = int(active_view["is_local_anomaly"].sum())
-    n_any = int(active_view["is_anomaly"].sum())
-    print(f"\nis_global_anomaly (Stage 1, HDBSCAN noise): {n_global:,} / {n_active:,} ({n_global / n_active:.1%})")
-    print(f"is_local_anomaly  (Stage 2, per-cluster LOF): {n_local:,} / {n_active:,} ({n_local / n_active:.1%})")
-    print(f"is_anomaly        (either stage):             {n_any:,} / {n_active:,} ({n_any / n_active:.1%})")
+    def _report_anomalies(label: str, cfg_variant: dict) -> dict:
+        anomalies_df = flag_anomalies(features_df, selected_cols, active_mask, config=cfg_variant)
+        lof_meta = anomalies_df.attrs.get("lof_meta", {})
+        active_view = anomalies_df.loc[active_mask]
+        n_global = int(active_view["is_global_anomaly"].sum())
+        n_local = int(active_view["is_local_anomaly"].sum())
+        n_any = int(active_view["is_anomaly"].sum())
+        print(f"\n-- {label} --")
+        print(f"lof_meta: {lof_meta}")
+        print(f"is_global_anomaly : {n_global:,} / {n_active:,} ({n_global / n_active:.1%})")
+        print(f"is_local_anomaly  : {n_local:,} / {n_active:,} ({n_local / n_active:.1%})")
+        print(f"is_anomaly        : {n_any:,} / {n_active:,} ({n_any / n_active:.1%})")
+        print("Per Stage-1-HDBSCAN-cluster: population vs. LOF-flagged local anomalies:")
+        per_cluster = (
+            active_view.assign(_cid=active_view["anomaly_cluster_hdb_raw"])
+            .groupby("_cid", dropna=False)["is_local_anomaly"]
+            .agg(population="count", local_anomalies="sum")
+        )
+        per_cluster["anomaly_rate"] = per_cluster["local_anomalies"] / per_cluster["population"]
+        print(per_cluster.sort_values("population", ascending=False).to_string())
+        return {"n_global": n_global, "n_local": n_local, "n_any": n_any}
 
-    print("\nPer Stage-1-HDBSCAN-cluster: population vs. LOF-flagged local anomalies:")
-    per_cluster = (
-        active_view.assign(_cid=active_view["anomaly_cluster_hdb_raw"])
-        .groupby("_cid", dropna=False)["is_local_anomaly"]
-        .agg(population="count", local_anomalies="sum")
+    cfg_before = dict(cfg)
+    cfg_before["anomaly_hdbscan_use_umap"] = False
+    before = _report_anomalies("BEFORE: Stage 1 on raw PCA space (today's production default)", cfg_before)
+
+    cfg_after = dict(cfg)
+    cfg_after["anomaly_hdbscan_use_umap"] = True
+    after = _report_anomalies("AFTER: Stage 1 on UMAP embedding (anomaly_hdbscan_use_umap=True)", cfg_after)
+
+    print(
+        f"\nis_global_anomaly rate: {before['n_global'] / n_active:.1%} (PCA, before) "
+        f"-> {after['n_global'] / n_active:.1%} (UMAP, after)"
     )
-    per_cluster["anomaly_rate"] = per_cluster["local_anomalies"] / per_cluster["population"]
-    print(per_cluster.sort_values("population", ascending=False).to_string())
+    print(
+        f"is_anomaly rate:        {before['n_any'] / n_active:.1%} (PCA, before) "
+        f"-> {after['n_any'] / n_active:.1%} (UMAP, after)"
+    )
     print()
 
 
