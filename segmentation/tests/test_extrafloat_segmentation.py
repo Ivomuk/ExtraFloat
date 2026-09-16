@@ -2002,7 +2002,18 @@ class TestScoringOrchestration:
         assert "anomaly_report" not in result.attrs
 
     def test_anomaly_detection_missing_hdbscan_degrades_and_alerts(self, tmp_path, monkeypatch):
-        import extrafloat_segmentation_pipeline as pipe
+        # run_extrafloat_segmentation.py imports this module via the
+        # package-qualified path (`import segmentation.extrafloat_
+        # segmentation_pipeline as _segmentation_pipeline_module`), which
+        # re-executes the module under a SEPARATE sys.modules entry from
+        # the bare `import extrafloat_segmentation_pipeline` this test file
+        # uses elsewhere (both resolve because tests run with `cd
+        # segmentation` on sys.path). That means flag_anomalies() as called
+        # from inside run_extrafloat_segmentation() closes over the
+        # package-qualified module's own _HDBSCAN_AVAILABLE, not the bare
+        # module's — so the patch has to target the same module object the
+        # code path under test actually reads, or it's silently a no-op.
+        import segmentation.extrafloat_segmentation_pipeline as pipe
         from run_extrafloat_segmentation import run_extrafloat_segmentation
 
         agents_df = self._small_agents_df()
@@ -2108,8 +2119,14 @@ class TestScoringOrchestration:
         """Two independent problems in one run — hdbscan missing and an
         invalid LOF config — must both be visible via separate alerts,
         rather than the hdbscan-unavailable path swallowing the config
-        problem until hdbscan is reinstalled."""
-        import extrafloat_segmentation_pipeline as pipe
+        problem until hdbscan is reinstalled.
+
+        Patches the package-qualified module (segmentation.extrafloat_
+        segmentation_pipeline), not the bare-imported one used elsewhere in
+        this file — run_extrafloat_segmentation() reads the former (see
+        test_anomaly_detection_missing_hdbscan_degrades_and_alerts above
+        for why patching the latter is silently a no-op here)."""
+        import segmentation.extrafloat_segmentation_pipeline as pipe
         from run_extrafloat_segmentation import run_extrafloat_segmentation
 
         agents_df = self._small_agents_df()
