@@ -75,6 +75,9 @@ if %ERRORLEVEL% neq 0 (
 
 echo.
 echo === Step 6/6: Running the credit risk pipeline on the retail-only population ===
+echo NOTE: --allow-provisional-scorecard is set since capacity_scorecard_v1.json
+echo has not been through human sign-off yet -- this run is for pipeline
+echo testing only, not a business-approved scoring run.
 python run_credit_risk_pipeline.py ^
     --transaction-file retail_agents_filtered.csv ^
     --loan-file data\loan_summary_retail_filtered.csv ^
@@ -83,6 +86,7 @@ python run_credit_risk_pipeline.py ^
     --snapshot-date 20260817 ^
     --artifacts-dir pd_model/artifacts/ ^
     --scorecard-path scorecards/capacity_scorecard_v1.json ^
+    --allow-provisional-scorecard ^
     --output output/engine_test_output.csv > engine_log.txt 2>&1
 
 if %ERRORLEVEL% neq 0 (

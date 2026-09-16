@@ -227,6 +227,7 @@ def run_credit_risk_pipeline(
     engine_config: dict | None = None,
     allow_unverified_artifacts: bool = False,
     scorecard_path: str | Path | None = None,
+    allow_provisional_scorecard: bool = False,
 ) -> pd.DataFrame:
     """
     Run the full PD model -> credit limit engine pipeline.
@@ -268,6 +269,15 @@ def run_credit_risk_pipeline(
                                  produces deterministic capacity_tier values.  When omitted,
                                  segmentation runs in degraded mode (allow_missing_scorecard=True)
                                  and capacity_tier is derived from heuristic scoring only.
+    allow_provisional_scorecard : if True, permits scorecard_path to point at a scorecard
+                                 whose calibration_metadata.is_provisional=True (the default
+                                 for anything calibrate_scorecard.py produces until a human
+                                 explicitly finalizes it). Mirrors segmentation's own
+                                 scoring.allow_provisional_scorecard guard, which otherwise
+                                 raises here with no way to opt in from this CLI. Use for
+                                 testing the full pipeline against a not-yet-finalized
+                                 scorecard.  Never set True to make an unreviewed scorecard's
+                                 output stand in for a business-approved run.
 
     Returns
     -------
@@ -338,6 +348,7 @@ def run_credit_risk_pipeline(
         "scoring": {
             "scorecard_path": str(scorecard_path) if scorecard_path else "",
             "allow_missing_scorecard": scorecard_path is None,
+            "allow_provisional_scorecard": allow_provisional_scorecard,
         },
         "clustering": {"enable_diagnostics": False},
     }
@@ -616,6 +627,17 @@ def _parse_args(argv=None):
             "artifacts.  Never use in production."
         ),
     )
+    p.add_argument(
+        "--allow-provisional-scorecard",
+        action="store_true",
+        help=(
+            "Allow --scorecard-path to point at a scorecard still marked provisional "
+            "(calibration_metadata.is_provisional=True -- the default until a human "
+            "finalizes it). Without this flag, segmentation raises rather than silently "
+            "treating an unreviewed scorecard as business-approved. Use ONLY for testing "
+            "the full pipeline against a not-yet-finalized scorecard."
+        ),
+    )
     return p.parse_args(argv)
 
 
@@ -634,6 +656,7 @@ def main(argv=None):
         keep_intermediate=args.keep_intermediate,
         allow_unverified_artifacts=args.allow_unverified_artifacts,
         scorecard_path=args.scorecard_path,
+        allow_provisional_scorecard=args.allow_provisional_scorecard,
     )
 
     if args.output:
