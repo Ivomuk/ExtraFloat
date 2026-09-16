@@ -58,8 +58,12 @@ agents_df
   │
   ▼
 [2b] flag_anomalies()                  default on (clustering.enable_anomaly_detection,
-  │                                     default True) — two-stage, on the same PCA
-  │                                     space (no GMM, no UMAP). Stage 1: HDBSCAN
+  │                                     default True) — two-stage (no GMM). Stage 1:
+  │                                     HDBSCAN on a UMAP embedding by default
+  │                                     (clustering.anomaly_hdbscan_use_umap, default
+  │                                     True; set False for the cheaper raw-PCA space
+  │                                     — real numbers: 30.0% is_global_anomaly on PCA
+  │                                     vs. 1.3% on UMAP for identical settings) —
   │                                     flags global noise (is_global_anomaly).
   │                                     Stage 2: LOF re-examines only the
   │                                     HDBSCAN-survivors for local anomalies
@@ -227,10 +231,21 @@ Required input columns are listed in `extrafloat_segmentation_features.REQUIRED_
   escape hatch for offline calibration.
 - **Anomaly detection, on by default but never blocking**
   (`clustering.enable_anomaly_detection`, default `True`): `flag_anomalies`
-  runs a two-stage filter (no GMM, no UMAP) on every production run, on the
-  raw PCA space. Stage 1 runs HDBSCAN over all active agents and flags
-  agents that don't resemble any dense cluster at all
-  (`is_global_anomaly`). Stage 2 runs Local Outlier Factor
+  runs a two-stage filter (no GMM) on every production run. Stage 1 runs
+  HDBSCAN over all active agents on a UMAP embedding by default
+  (`clustering.anomaly_hdbscan_use_umap`, default `True`) and flags agents
+  that don't resemble any dense cluster at all (`is_global_anomaly`). UMAP
+  is the default rather than the cheaper raw PCA space used elsewhere in
+  this module because it materially changes what the flag means: on the
+  retail-filtered population, raw PCA space gave 30.0% `is_global_anomaly`
+  / 30.7% `is_anomaly` overall with the same HDBSCAN settings that gave
+  1.3% noise / 2.5% `is_anomaly` on the UMAP embedding — PCA space is
+  simply more diffuse and fails HDBSCAN's density criterion far more
+  often, not because roughly a third of agents are genuinely anomalous. A
+  ~30% hit rate is useless as a "flag this for review" signal; ~2.5% is
+  usable. Set `anomaly_hdbscan_use_umap=False` to trade that accuracy back
+  for skipping UMAP's single-threaded runtime on every production run.
+  Stage 2 runs Local Outlier Factor
   (`sklearn.neighbors.LocalOutlierFactor`) *separately within each* HDBSCAN
   cluster — never pooled across clusters — re-examining each agent against
   its own cluster's local neighborhood density to catch subtler anomalies

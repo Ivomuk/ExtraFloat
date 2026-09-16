@@ -113,18 +113,21 @@ DEFAULT_CLUSTERING_CONFIG: dict[str, Any] = {
     # missing hdbscan install degrades gracefully here (is_anomaly=False)
     # rather than raising. See flag_anomalies().
     "enable_anomaly_detection": True,
-    # When True, flag_anomalies' Stage 1 (HDBSCAN) runs on a UMAP embedding
-    # (same as run_diagnostic_clustering) instead of raw PCA space. Off by
-    # default because it costs UMAP's single-threaded runtime on *every*
-    # production run, not just diagnostics ones. Real numbers on the retail-
-    # filtered population: PCA space gave 30.0% is_global_anomaly with the
-    # default hdbscan_min_cluster_size/hdbscan_min_samples, vs. 1.3% noise
-    # for the *same* settings on the UMAP embedding used by diagnostics —
-    # PCA space is simply more diffuse, so far more points fail HDBSCAN's
-    # density criterion and get dumped into noise, not because a third of
-    # agents are genuinely anomalous. Turn this on for a tighter, more
-    # meaningful is_global_anomaly if the compute cost is acceptable.
-    "anomaly_hdbscan_use_umap": False,
+    # When True (default), flag_anomalies' Stage 1 (HDBSCAN) runs on a UMAP
+    # embedding (same as run_diagnostic_clustering) instead of raw PCA
+    # space. Real numbers on the retail-filtered population settled this:
+    # raw PCA space gave 30.0% is_global_anomaly with the default
+    # hdbscan_min_cluster_size/hdbscan_min_samples — PCA space is simply
+    # more diffuse, so far more points fail HDBSCAN's density criterion and
+    # get dumped into noise, not because a third of agents are genuinely
+    # anomalous — vs. 1.3% noise for the *same* settings on the UMAP
+    # embedding, with a far more usable is_anomaly rate overall (2.5% vs.
+    # 30.7%) and meaningfully differentiated per-cluster LOF rates instead
+    # of one dominant cluster's local anomalies being swallowed by Stage 1's
+    # bloated noise bucket. Set False to fall back to the cheaper raw-PCA
+    # Stage 1 (skips UMAP's single-threaded runtime) if that cost isn't
+    # acceptable on every production run — accuracy is what's traded away.
+    "anomaly_hdbscan_use_umap": True,
     # ── LOF stage 2 (two-stage anomaly filter) ──────────────────────────────
     # flag_anomalies runs HDBSCAN first as a coarse global filter
     # (is_global_anomaly), then — separately *within each* HDBSCAN cluster,
@@ -859,26 +862,29 @@ def flag_anomalies(
 ) -> pd.DataFrame:
     """Two-stage anomaly filter: HDBSCAN global pass, then per-cluster LOF refinement.
 
-    Stage 1 (HDBSCAN, dependency-graceful) runs alone — no GMM — directly on
-    the same PCA space (`_get_active_pca`) used elsewhere in this module by
-    default, flagging agents that don't belong to *any* dense cluster at all
-    (`is_global_anomaly`). Skipping UMAP here is what makes this cheap
-    enough to run on every production run by default
+    Stage 1 (HDBSCAN, dependency-graceful) runs alone — no GMM — on a UMAP
+    embedding by default (`clustering.anomaly_hdbscan_use_umap`, default
+    True; same embedding function `run_diagnostic_clustering` uses),
+    flagging agents that don't belong to *any* dense cluster at all
+    (`is_global_anomaly`). This runs on every production run by default
     (`clustering.enable_anomaly_detection`, default True), independent of
     the full diagnostics bundle (`clustering.enable_diagnostics`, default
-    False, which additionally runs GMM + UMAP and computes its own,
-    differently-embedded anomaly signal, `diag_is_anomaly`).
+    False, which additionally runs its own GMM + UMAP pass and computes a
+    separately-embedded anomaly signal, `diag_is_anomaly`).
 
-    Set `clustering.anomaly_hdbscan_use_umap=True` to have Stage 1 run on a
-    UMAP embedding instead (same embedding function `run_diagnostic_
-    clustering` uses) — measured on the retail-filtered population, raw PCA
-    space produced 30.0% `is_global_anomaly` vs. 1.3% noise for the
-    identical HDBSCAN settings on the UMAP embedding, because PCA space is
+    UMAP is the default here (not the cheaper raw PCA space used elsewhere
+    in this module) because it materially changes what the flag means:
+    measured on the retail-filtered population, raw PCA space produced
+    30.0% `is_global_anomaly` (30.7% `is_anomaly` overall) with the
+    identical HDBSCAN settings that gave 1.3% noise / 2.5% `is_anomaly` on
+    the UMAP embedding — PCA space is
     simply more diffuse and fails HDBSCAN's density criterion far more
-    often, not because a third of agents are genuinely anomalous. Off by
-    default purely for cost: UMAP is this module's expensive,
-    single-threaded step, and this path runs on every production run
-    whether or not diagnostics are enabled.
+    often, not because roughly a third of agents are genuinely anomalous.
+    A ~30% hit rate makes `is_anomaly` useless as a "flag this for review"
+    signal; ~2.5% is usable. Set `anomaly_hdbscan_use_umap=False` to fall
+    back to the cheaper raw-PCA Stage 1 (skips UMAP's single-threaded
+    runtime) if that cost isn't acceptable on every production run —
+    accuracy is what's traded away for it.
 
     Stage 2 (LOF, `clustering.lof_enabled`, default True) runs Local Outlier
     Factor separately *within each* HDBSCAN cluster — never pooled across
@@ -1015,10 +1021,17 @@ def flag_anomalies(
 
     rng = np.random.RandomState(cfg["random_state"])
     X_pca_active, X_scaled_active = _get_active_pca(features_df, active_mask, selected_cols, cfg, rng)
-    if cfg.get("anomaly_hdbscan_use_umap", False):
-        X_hdbscan_input = _get_active_umap(X_scaled_active, cfg, rng)
-    else:
-        X_hdbscan_input = X_pca_active
+    X_hdbscan_input = X_pca_active
+    if cfg.get("anomaly_hdbscan_use_umap", True):
+        try:
+            X_hdbscan_input = _get_active_umap(X_scaled_active, cfg, rng)
+        except Exception as exc:  # noqa: BLE001 — must never block capacity_tier
+            logger.error(
+                "flag_anomalies: UMAP embedding failed (%s) — falling back to "
+                "raw PCA space for Stage 1 this run. is_global_anomaly may be "
+                "noisier than usual (see anomaly_hdbscan_use_umap docs).",
+                exc,
+            )
     hdb_labels = _run_hdbscan(X_hdbscan_input, cfg)
 
     active_index = features_df.index[active_mask]

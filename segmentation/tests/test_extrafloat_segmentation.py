@@ -278,26 +278,35 @@ class TestFlagAnomalies:
         Produces two real clusters of materially different size (6 and 134
         agents, both >= the default lof_min_cluster_population=5) plus 160
         noise points — deterministic given _make_agents_df's fixed seed and
-        random_state=42 in DEFAULT_CLUSTERING_CONFIG."""
+        random_state=42 in DEFAULT_CLUSTERING_CONFIG. Pins
+        anomaly_hdbscan_use_umap=False: these exact sizes were derived on
+        raw PCA space, and UMAP's embedding on a synthetic population this
+        small (n=300, default umap_n_neighbors=15) isn't the same
+        deterministic, previously-validated shape -- this fixture is about
+        exercising Stage 2's per-cluster LOF logic, not about which
+        embedding Stage 1 uses."""
         from extrafloat_segmentation_pipeline import DEFAULT_CLUSTERING_CONFIG
 
         feat_df, sel_cols, active_mask = self._get_small_inputs(n)
         cfg = dict(DEFAULT_CLUSTERING_CONFIG)
         cfg["hdbscan_min_cluster_size"] = 5
         cfg["hdbscan_min_samples"] = 1
+        cfg["anomaly_hdbscan_use_umap"] = False
         return feat_df, sel_cols, active_mask, cfg
 
     def _get_inputs_with_mixed_cluster_sizes(self, n=50):
         """One real cluster below the default lof_min_cluster_population=5
         (3 agents) and one above it (18 agents), plus noise — for testing
         the per-cluster population floor without needing to override
-        lof_min_cluster_population itself."""
+        lof_min_cluster_population itself. Pins anomaly_hdbscan_use_umap=
+        False for the same reason as _get_inputs_with_real_clusters above."""
         from extrafloat_segmentation_pipeline import DEFAULT_CLUSTERING_CONFIG
 
         feat_df, sel_cols, active_mask = self._get_small_inputs(n)
         cfg = dict(DEFAULT_CLUSTERING_CONFIG)
         cfg["hdbscan_min_cluster_size"] = 3
         cfg["hdbscan_min_samples"] = 1
+        cfg["anomaly_hdbscan_use_umap"] = False
         return feat_df, sel_cols, active_mask, cfg
 
     def test_output_has_required_columns(self):
