@@ -5,6 +5,10 @@ against the raw agent mart file so the KPI columns that might explain *why*
 an agent got flagged are actually visible, since agent_segments.csv itself
 only carries capacity-scoring/anomaly columns, not raw KPIs.
 
+Adds an `anomaly_type` column ("global" / "local" / "both") since
+is_global_anomaly and is_local_anomaly aren't mutually exclusive -- one
+glance-able label beats checking two booleans every row.
+
 Sorted so the most informative rows come first: global anomalies (HDBSCAN
 noise -- doesn't fit any dense cluster at all) before local anomalies
 (fit a cluster but stood out within it), and within local anomalies, most
@@ -22,6 +26,7 @@ import argparse
 import sys
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -71,6 +76,17 @@ def main(argv: list[str] | None = None) -> None:
 
     anomalous = merged.loc[merged["is_anomaly"].fillna(False).astype(bool)].copy()
 
+    # Convenience column: is_global_anomaly/is_local_anomaly aren't mutually
+    # exclusive (an agent can be both), so a single glance-able label beats
+    # checking two booleans every time.
+    is_global = anomalous["is_global_anomaly"].fillna(False).astype(bool)
+    is_local = anomalous["is_local_anomaly"].fillna(False).astype(bool)
+    anomalous["anomaly_type"] = np.select(
+        [is_global & is_local, is_global, is_local],
+        ["both", "global", "local"],
+        default="unknown",  # is_anomaly=True but neither stage flag set -- shouldn't happen, surfaces if it does
+    )
+
     # is_anomaly is always False for dormant agents (anomaly detection only
     # runs on active ones), so the rate over ALL rows understates the real
     # rate among agents it could actually flag. Recompute the active mask
@@ -101,9 +117,8 @@ def main(argv: list[str] | None = None) -> None:
         by=["_sort_global_first", "lof_score"], ascending=[True, True], na_position="last"
     ).drop(columns="_sort_global_first")
 
-    print("\nBreakdown:")
-    print(f"  global anomalies (HDBSCAN noise): {int(anomalous['is_global_anomaly'].fillna(False).sum()):,}")
-    print(f"  local anomalies (LOF within cluster): {int(anomalous['is_local_anomaly'].fillna(False).sum()):,}")
+    print("\nBreakdown (anomaly_type):")
+    print(anomalous["anomaly_type"].value_counts().to_string())
 
     out_path = Path(args.output)
     out_path.parent.mkdir(parents=True, exist_ok=True)
