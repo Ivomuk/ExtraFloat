@@ -1,8 +1,11 @@
 @echo off
 echo === Checking ABLATION model output against the August whitelist/blacklist ===
 echo (model trained without the 10 prior-loan magnitude/repayment-ratio/duration
-echo  columns -- compare this run's Part C "Defaulter..." AUC and the
-echo  business-summary numbers against check_blacklist.bat's with-features results)
+echo  columns, re-run to measure the real impact of dropping the two confirmed
+echo  look-ahead-leaked features (most_recent_prior_days_past_due_within_30d,
+echo  prior_avg_repayment_ratio) -- compare this run's Part C "Defaulter..." AUC
+echo  and the business-summary numbers against check_blacklist.bat's with-features
+echo  results from the current, tenure_days-fixed model)
 
 python scripts\check_whitelist_blacklist_eval.py --whitelist-file data\whitelist_aug_20260804.csv --blacklist-file data\blacklist_aug_20260804.csv --output-file output\engine_test_output_ablation.csv --borrower-file borrower_history_retail_filtered.csv --loan-summary-file data\loan_summary.csv --score-col cal_pd --out-prefix wl_bl_eval_ablation
 

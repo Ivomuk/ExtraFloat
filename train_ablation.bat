@@ -1,8 +1,14 @@
 @echo off
 
 echo === Ablation training run: same retail-filtered inputs as train_retail_filtered.bat,
-echo but excluding the 10 recently-added prior-loan magnitude/repayment-ratio/duration
-echo columns, to check whether they're actually improving val/bootstrap AUC.
+echo but excluding the 10 prior-loan magnitude/repayment-ratio/duration columns.
+echo Re-purposed for the look-ahead-leakage investigation: this exclude list already
+echo covers both leak-affected features confirmed still live in the model
+echo (most_recent_prior_days_past_due_within_30d, prior_avg_repayment_ratio) -- see
+echo data/prior_loan_history_candidates_vs_blacklist_export_corrected.sql's header.
+echo Corrected (properly time-bounded) AUCs for these came back near-random
+echo (0.43-0.49) against the Defaulter blacklist reason, vs. the leaky 0.573-0.786
+echo originally documented -- this run measures the real model impact of dropping them.
 echo.
 echo NOTE: assumes train_retail_filtered.bat has already been run at least once, so
 echo the retail-filtered input files below already exist. This script does NOT
