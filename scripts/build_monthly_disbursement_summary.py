@@ -1,23 +1,27 @@
 """
-Two things, against the raw fin_log disbursements export:
+Against the raw fin_log disbursements export, checks -- per agent per month
+-- whether instruct_to_fro_user_prf (profile) and instruct_amount (disbursed
+amount) are BOTH constant across all of that agent's transactions.
 
-1. Check whether any single agent (msisdn) is ever recorded under more than
-   one distinct instruct_to_fro_user_prf profile value. Since
-   summarize_limit_violations_by_agent_profile.py found this field is
-   almost entirely a single constant value ("MTNU Agent Silver Class"),
-   this confirms whether profile can safely be treated as one fixed
-   attribute per agent, or whether some agents genuinely switch profiles.
+This is not a monthly total: the point is to compare what an agent actually
+received against the engine's assigned_limit, and a summed total isn't
+comparable to a per-transaction limit. So for agent/months where every
+transaction disbursed the exact same amount under the exact same profile,
+that single repeated amount unambiguously IS "the disbursement" for that
+agent that month, and gets printed as one row:
 
-2. Build a monthly per-agent summary file: one row per (msisdn, profile,
-   month), with total disbursed amount and transaction count for that
-   month. If an agent used more than one profile within the same month,
-   that agent simply gets more than one row for that month -- this is not
-   collapsed or hidden.
+    msisdn  profile  month  disbursed_amount  n_transactions
+
+Agent/months where the profile or the amount varies across transactions are
+NOT collapsed into a single row (no sum, no average) -- they're written to a
+separate file for inspection, since a single "disbursed_amount" wouldn't
+mean anything for them.
 
 Usage:
     python scripts\\build_monthly_disbursement_summary.py ^
         --disbursements-file data\\fin_log_202609181256 ^
-        --out monthly_disbursement_summary.csv
+        --out monthly_disbursement_summary.csv ^
+        --variable-out variable_disbursement_agents.csv
 """
 
 import argparse
@@ -61,6 +65,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--disbursements-file", required=True)
     ap.add_argument("--out", default="monthly_disbursement_summary.csv")
+    ap.add_argument("--variable-out", default="variable_disbursement_agents.csv")
     args = ap.parse_args()
 
     path = Path(args.disbursements_file)
@@ -85,46 +90,43 @@ def main():
     print(f"Transactions: {n_rows:,}")
     print(f"Distinct agents (msisdn): {n_agents:,}\n")
 
-    # -- Check 1: does any agent carry more than one distinct profile value? --
-    profiles_per_agent = df.groupby("_msisdn")["instruct_to_fro_user_prf"].nunique()
-    multi_profile_agents = profiles_per_agent[profiles_per_agent > 1]
+    # -- Per (msisdn, month): is profile constant? Is instruct_amount constant? --
+    grp = df.groupby(["_msisdn", "_month"])
+    agg = grp.agg(
+        n_distinct_profiles=("instruct_to_fro_user_prf", "nunique"),
+        n_distinct_amounts=("instruct_amount", "nunique"),
+        n_transactions=("instruct_amount", "size"),
+        profile=("instruct_to_fro_user_prf", "first"),
+        disbursed_amount=("instruct_amount", "first"),
+    ).reset_index().rename(columns={"_msisdn": "msisdn", "_month": "month"})
+
+    is_consistent = (agg["n_distinct_profiles"] == 1) & (agg["n_distinct_amounts"] == 1)
+    consistent = agg[is_consistent].copy()
+    variable = agg[~is_consistent].copy()
 
     print("=" * 78)
-    print("Check: agents with more than one distinct instruct_to_fro_user_prf value")
+    print("Check: agent/months where profile AND disbursed amount are both constant")
     print("=" * 78)
-    if len(multi_profile_agents) == 0:
-        print("NONE. Every agent in this file is recorded under exactly one profile value. "
-              "Profile can be treated as a fixed per-agent attribute.")
+    print(f"Consistent agent/months (single profile, single amount): {len(consistent):,}")
+    print(f"Variable agent/months (profile and/or amount changes):   {len(variable):,}")
+
+    out_cols = ["msisdn", "profile", "month", "disbursed_amount", "n_transactions"]
+    consistent[out_cols].sort_values(["msisdn", "month"]).to_csv(args.out, index=False)
+    print(f"\nConsistent agent/months written: {args.out}  ({len(consistent):,} rows)")
+
+    if len(variable):
+        variable_cols = ["msisdn", "month", "n_distinct_profiles", "n_distinct_amounts", "n_transactions"]
+        variable[variable_cols].sort_values(["msisdn", "month"]).to_csv(args.variable_out, index=False)
+        print(f"Variable agent/months written for inspection: {args.variable_out}  ({len(variable):,} rows)")
+        print(
+            "\nThese were NOT summed or averaged -- a single 'disbursed_amount' figure "
+            "isn't meaningful for an agent/month where the profile or amount actually "
+            "changed across transactions. Inspect them separately before deciding how "
+            "(or whether) to compare them to the engine's assigned_limit."
+        )
     else:
-        print(f"{len(multi_profile_agents):,} / {n_agents:,} agents have more than one distinct "
-              f"profile value:")
-        detail = (
-            df[df["_msisdn"].isin(multi_profile_agents.index)]
-            .groupby("_msisdn")["instruct_to_fro_user_prf"]
-            .unique()
-        )
-        print(detail.to_string())
-
-    # -- Build the monthly summary, one row per (msisdn, profile, month) --
-    monthly = (
-        df.groupby(["_msisdn", "instruct_to_fro_user_prf", "_month"], as_index=False)
-        .agg(
-            disbursed_amount=("instruct_amount", "sum"),
-            n_transactions=("instruct_amount", "size"),
-        )
-        .rename(columns={"_msisdn": "msisdn", "instruct_to_fro_user_prf": "profile", "_month": "month"})
-        .sort_values(["msisdn", "month"])
-    )
-
-    n_agent_months_multi_profile = (
-        monthly.groupby(["msisdn", "month"])["profile"].transform("nunique") > 1
-    ).sum()
-    if n_agent_months_multi_profile:
-        print(f"\nNOTE: {n_agent_months_multi_profile:,} row(s) belong to an agent/month that has "
-              f"more than one profile row for that same month -- not collapsed, kept as separate rows.")
-
-    monthly.to_csv(args.out, index=False)
-    print(f"\nMonthly summary written: {args.out}  ({len(monthly):,} rows: one per msisdn/profile/month)")
+        print("\nEvery agent/month in this file has a single constant profile and amount -- "
+              "no variable cases to inspect separately.")
 
 
 if __name__ == "__main__":
