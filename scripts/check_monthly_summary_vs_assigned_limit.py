@@ -15,6 +15,7 @@ import argparse
 import sys
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 BUCKET_EDGES = [-0.01, 0.25, 0.50, 0.75, 0.90, 1.10, 1.25, 1.50, 2.00, 100]
@@ -73,7 +74,8 @@ def main():
     scored = merged[merged["assigned_limit"].notna()].copy()
     scored["exceeds_limit"] = scored["disbursed_amount"] > scored["assigned_limit"]
     scored["excess_amount"] = (scored["disbursed_amount"] - scored["assigned_limit"]).clip(lower=0)
-    scored["pct_of_limit"] = scored["disbursed_amount"] / scored["assigned_limit"].replace(0, pd.NA)
+    safe_limit = scored["assigned_limit"].astype(float).replace(0, np.nan)
+    scored["pct_of_limit"] = scored["disbursed_amount"] / safe_limit
 
     n_exceed = int(scored["exceeds_limit"].sum())
     n_zero_limit_disbursed = int(((scored["assigned_limit"] == 0) & (scored["disbursed_amount"] > 0)).sum())
