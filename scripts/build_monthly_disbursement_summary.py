@@ -15,12 +15,14 @@ agent that month, and gets printed as one row:
 Agent/months where the profile or the amount varies across transactions are
 NOT collapsed into a single row (no sum, no average) -- they're written to a
 separate file for inspection, since a single "disbursed_amount" wouldn't
-mean anything for them. For those, two extra columns show each distinct
-amount and the date it was first received, in chronological order and
-positionally aligned, e.g.:
+mean anything for them. For those, extra columns show each distinct
+profile value seen (distinct_profiles), and each distinct amount and the
+date it was first received, in chronological order and positionally
+aligned, e.g.:
 
-    dates_received:   2026-08-02; 2026-08-13
-    distinct_amounts: 750,000; 200,000
+    distinct_profiles: MTNU Agent Silver Class; MTNU Agent Silver Commission
+    dates_received:    2026-08-02; 2026-08-13
+    distinct_amounts:  750,000; 200,000
 
 Usage:
     python scripts\\build_monthly_disbursement_summary.py ^
@@ -103,6 +105,7 @@ def main():
         n_transactions=("instruct_amount", "size"),
         profile=("instruct_to_fro_user_prf", "first"),
         disbursed_amount=("instruct_amount", "first"),
+        distinct_profiles=("instruct_to_fro_user_prf", lambda s: "; ".join(sorted(set(s.astype(str))))),
     ).reset_index().rename(columns={"_msisdn": "msisdn", "_month": "month"})
 
     is_consistent = (agg["n_distinct_profiles"] == 1) & (agg["n_distinct_amounts"] == 1)
@@ -141,7 +144,7 @@ def main():
         )
         variable = variable.merge(detail, on=["msisdn", "month"], how="left")
 
-        variable_cols = ["msisdn", "month", "n_distinct_profiles", "n_distinct_amounts",
+        variable_cols = ["msisdn", "month", "n_distinct_profiles", "distinct_profiles", "n_distinct_amounts",
                           "n_transactions", "dates_received", "distinct_amounts"]
         variable[variable_cols].sort_values(["msisdn", "month"]).to_csv(args.variable_out, index=False)
         print(f"Variable agent/months written for inspection: {args.variable_out}  ({len(variable):,} rows)")

@@ -124,9 +124,10 @@ def main():
     })
     print(tbl.round(4).to_string())
 
-    out_cols = ["msisdn", "month", "agent_category", "category_limit", "max_disbursed_amount",
-                "exceeds_category_limit", "excess_over_category_limit", "assigned_limit",
-                "exceeds_assigned_limit", "dates_received", "distinct_amounts", "n_transactions"]
+    out_cols = ["msisdn", "month", "distinct_profiles", "agent_category", "category_limit",
+                "max_disbursed_amount", "exceeds_category_limit", "excess_over_category_limit",
+                "assigned_limit", "exceeds_assigned_limit", "dates_received", "distinct_amounts",
+                "n_transactions"]
     out_cols = [c for c in out_cols if c in known.columns]
     known[out_cols].sort_values("excess_over_category_limit", ascending=False).to_csv(args.out, index=False)
     print(f"\nPer-agent-month detail written: {args.out}")
