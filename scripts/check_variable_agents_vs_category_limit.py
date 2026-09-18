@@ -24,6 +24,7 @@ import argparse
 import sys
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 CATEGORY_LIMITS = {
@@ -35,6 +36,21 @@ CATEGORY_LIMITS = {
     "titanium": 750_000,
     "diamond": 1_000_000,
 }
+
+# Same bucket edges/labels as check_monthly_summary_vs_assigned_limit.py, so
+# the two populations (consistent vs. variable agents) can be compared
+# directly on how closely their disbursed amount tracks assigned_limit.
+BUCKET_EDGES = [-0.01, 0.25, 0.50, 0.75, 0.90, 1.10, 1.25, 1.50, 2.00, 100]
+BUCKET_LABELS = [
+    "0-25% (well under)", "25-50% (under)", "50-75% (under)",
+    "75-90% (near, under)", "90-110% (AGREEMENT band)", "110-125% (near, over)",
+    "125-150% (over)", "150-200% (well over)", "200%+ (far over)",
+]
+AGREEMENT_EDGES = [-0.01, 0.50, 0.90, 1.10, 100]
+AGREEMENT_LABELS = [
+    "Well under limit (0-50%)", "Moderately under (50-90%)",
+    "Agreement band (90-110%)", "Over limit (110%+)",
+]
 
 
 def _normalize_msisdn(s: pd.Series) -> pd.Series:
@@ -102,6 +118,10 @@ def main():
     known["exceeds_category_limit"] = known["max_disbursed_amount"] > known["category_limit"]
     known["excess_over_category_limit"] = (known["max_disbursed_amount"] - known["category_limit"]).clip(lower=0)
     known["exceeds_assigned_limit"] = known["max_disbursed_amount"] > known["assigned_limit"]
+    safe_assigned = known["assigned_limit"].astype(float).replace(0, np.nan)
+    known["pct_of_assigned_limit"] = known["max_disbursed_amount"] / safe_assigned
+    known["pct_of_assigned_limit_band"] = pd.cut(known["pct_of_assigned_limit"], bins=BUCKET_EDGES, labels=BUCKET_LABELS)
+    known["vs_assigned_limit_band"] = pd.cut(known["pct_of_assigned_limit"], bins=AGREEMENT_EDGES, labels=AGREEMENT_LABELS)
 
     n_exceed_cat = int(known["exceeds_category_limit"].sum())
     n_exceed_assigned = int(known["exceeds_assigned_limit"].sum())
@@ -111,6 +131,23 @@ def main():
     print(f"Exceeds category limit: {n_exceed_cat:,} / {len(known):,} ({n_exceed_cat / len(known):.1%})")
     print(f"Exceeds engine's assigned_limit (for comparison): {n_exceed_assigned:,} / {len(known):,} "
           f"({n_exceed_assigned / len(known):.1%})")
+
+    print(f"\n{'=' * 78}")
+    print("How closely max_disbursed_amount tracks assigned_limit (max of several draws)")
+    print("=" * 78)
+    counts = known["pct_of_assigned_limit_band"].value_counts().reindex(BUCKET_LABELS)
+    pct = (counts / len(known) * 100).round(1)
+    print(pd.DataFrame({"n": counts, "pct": pct}).to_string())
+    print("\nCoarser vs_assigned_limit_band grouping:")
+    agr_counts = known["vs_assigned_limit_band"].value_counts().reindex(AGREEMENT_LABELS)
+    print(pd.DataFrame({"n": agr_counts, "pct": (agr_counts / len(known) * 100).round(1)}).to_string())
+    print(
+        "\nCompare this AGREEMENT band share against the same band's share in "
+        "monthly_summary_vs_assigned_limit.csv (the consistent-agent population) -- "
+        "if variable agents cluster near 100% distinctly tighter, that's evidence their "
+        "max disbursement genuinely tracks assigned_limit; a similar spread suggests the "
+        "earlier 'they tend to agree' impression was just a few salient rows."
+    )
 
     print(f"\n{'=' * 78}")
     print("Breakdown by agent_category")
@@ -126,8 +163,9 @@ def main():
 
     out_cols = ["msisdn", "month", "distinct_profiles", "agent_category", "category_limit",
                 "max_disbursed_amount", "exceeds_category_limit", "excess_over_category_limit",
-                "assigned_limit", "exceeds_assigned_limit", "dates_received", "distinct_amounts",
-                "n_transactions"]
+                "assigned_limit", "exceeds_assigned_limit", "pct_of_assigned_limit",
+                "pct_of_assigned_limit_band", "vs_assigned_limit_band", "dates_received",
+                "distinct_amounts", "n_transactions"]
     out_cols = [c for c in out_cols if c in known.columns]
     known[out_cols].sort_values("excess_over_category_limit", ascending=False).to_csv(args.out, index=False)
     print(f"\nPer-agent-month detail written: {args.out}")
