@@ -31,6 +31,20 @@ AGREEMENT_LABELS = [
     "Agreement band (90-110%)", "Over limit (110%+)",
 ]
 
+# Same fixed, business-rule agent-category ceiling table as
+# check_variable_agents_vs_category_limit.py -- restated independently here
+# (rather than imported) as a cross-check against the engine's own config in
+# extrafloat_limit_engine_caps.py's DEFAULT_CAP_CONFIG["agent_tier"].
+CATEGORY_LIMITS = {
+    "new bronze": 50_000,
+    "bronze": 100_000,
+    "silver": 250_000,
+    "gold": 350_000,
+    "platinum": 500_000,
+    "titanium": 750_000,
+    "diamond": 1_000_000,
+}
+
 
 def _normalize_msisdn(s: pd.Series) -> pd.Series:
     return s.astype(str).str.replace(r"[^0-9]", "", regex=True).replace("", pd.NA)
@@ -91,6 +105,20 @@ def main():
     print("=" * 78)
     print(f"Agent/months exceeding assigned_limit: {n_exceed:,} / {len(scored):,} ({n_exceed / len(scored):.1%})")
     print(f"  of which, assigned_limit == 0 but still disbursed: {n_zero_limit_disbursed:,}")
+    if "exceeds_category_limit" in scored.columns:
+        known_cat = scored[scored["category_limit"].notna()]
+        n_exceed_cat = int(known_cat["exceeds_category_limit"].sum())
+        print(f"Agent/months exceeding the fixed agent-category ceiling: {n_exceed_cat:,} / {len(known_cat):,} "
+              f"({n_exceed_cat / len(known_cat):.1%})")
+
+    if "agent_category" in scored.columns:
+        scored["category_limit"] = scored["agent_category"].astype(str).str.strip().str.lower().map(CATEGORY_LIMITS)
+        scored["exceeds_category_limit"] = scored["disbursed_amount"] > scored["category_limit"]
+        n_unmapped_cat = int(scored["category_limit"].isna().sum())
+        if n_unmapped_cat:
+            unmapped_values = sorted(scored.loc[scored["category_limit"].isna(), "agent_category"].unique())
+            print(f"NOTE: {n_unmapped_cat:,} agent/month(s) have an agent_category not in the fixed "
+                  f"table (likely 'Below Threshold'): {unmapped_values}")
 
     scored["pct_of_limit_band"] = pd.cut(scored["pct_of_limit"], bins=BUCKET_EDGES, labels=BUCKET_LABELS)
     scored["vs_limit_band"] = pd.cut(scored["pct_of_limit"], bins=AGREEMENT_EDGES, labels=AGREEMENT_LABELS)
@@ -131,7 +159,8 @@ def main():
     out_cols = ["msisdn", "profile", "month", "disbursed_amount", "n_transactions", "assigned_limit",
                 "exceeds_limit", "excess_amount", "pct_of_limit", "pct_of_limit_band", "vs_limit_band",
                 "severe_breach_25pct_plus", "severe_breach_2x_plus"] + \
-        [c for c in ["cal_pd", "risk_tier", "pd_decile", "agent_category"] if c in scored.columns]
+        [c for c in ["cal_pd", "risk_tier", "pd_decile", "agent_category", "category_limit",
+                      "exceeds_category_limit"] if c in scored.columns]
     scored[out_cols].sort_values("excess_amount", ascending=False).to_csv(args.out, index=False)
     print(f"\nPer-agent-month detail written: {args.out}")
 
