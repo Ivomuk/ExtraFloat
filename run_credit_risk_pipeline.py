@@ -555,6 +555,18 @@ def run_credit_risk_pipeline(
             seg_passthrough_cols,
         )
 
+    # -- Stage 7b: Re-attach agent_category (commission-based tier label) ----
+    # Computed in prepare_transaction_capacity_features() before Stage 6, but
+    # the engine's FINAL_OUTPUT_COLUMNS whitelist doesn't include it, so it
+    # would otherwise be silently dropped -- needed downstream to check real
+    # disbursements against the fixed agent-tier ceiling table (New Bronze
+    # through Diamond) in extrafloat_limit_engine_caps.py's agent_tier config.
+    if "agent_category" in features_df.columns:
+        cat_reattach = features_df[["msisdn", "agent_category"]].copy()
+        cat_reattach["msisdn"] = _norm_msisdn(cat_reattach["msisdn"].astype(str).str.strip())
+        result_df = result_df.merge(cat_reattach, on="msisdn", how="left")
+        logger.info("Stage 7b: re-attached agent_category to output")
+
     # -- Stage 8: Audit columns ---------------------------------------------
     # score_source distinguishes legitimate population misses (agents not in
     # PD output -> "7_signal_fallback") from calibration failures that now
