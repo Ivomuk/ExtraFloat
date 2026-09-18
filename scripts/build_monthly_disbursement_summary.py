@@ -15,7 +15,12 @@ agent that month, and gets printed as one row:
 Agent/months where the profile or the amount varies across transactions are
 NOT collapsed into a single row (no sum, no average) -- they're written to a
 separate file for inspection, since a single "disbursed_amount" wouldn't
-mean anything for them.
+mean anything for them. For those, two extra columns show each distinct
+amount and the date it was first received, in chronological order and
+positionally aligned, e.g.:
+
+    dates_received:   2026-08-02; 2026-08-13
+    distinct_amounts: 750,000; 200,000
 
 Usage:
     python scripts\\build_monthly_disbursement_summary.py ^
@@ -115,7 +120,29 @@ def main():
     print(f"\nConsistent agent/months written: {args.out}  ({len(consistent):,} rows)")
 
     if len(variable):
-        variable_cols = ["msisdn", "month", "n_distinct_profiles", "n_distinct_amounts", "n_transactions"]
+        df["_key"] = list(zip(df["_msisdn"], df["_month"]))
+        var_keys = set(zip(variable["msisdn"], variable["month"]))
+        df_var = df[df["_key"].isin(var_keys)]
+
+        amt_dates = (
+            df_var.groupby(["_msisdn", "_month", "instruct_amount"], as_index=False)["_date"]
+            .min()
+            .rename(columns={"_date": "first_date"})
+            .sort_values(["_msisdn", "_month", "first_date"])
+        )
+        detail = (
+            amt_dates.groupby(["_msisdn", "_month"])
+            .agg(
+                dates_received=("first_date", lambda s: "; ".join(d.strftime("%Y-%m-%d") for d in s)),
+                distinct_amounts=("instruct_amount", lambda s: "; ".join(f"{v:,.0f}" for v in s)),
+            )
+            .reset_index()
+            .rename(columns={"_msisdn": "msisdn", "_month": "month"})
+        )
+        variable = variable.merge(detail, on=["msisdn", "month"], how="left")
+
+        variable_cols = ["msisdn", "month", "n_distinct_profiles", "n_distinct_amounts",
+                          "n_transactions", "dates_received", "distinct_amounts"]
         variable[variable_cols].sort_values(["msisdn", "month"]).to_csv(args.variable_out, index=False)
         print(f"Variable agent/months written for inspection: {args.variable_out}  ({len(variable):,} rows)")
         print(
