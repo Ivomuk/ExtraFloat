@@ -25,6 +25,12 @@ BUCKET_LABELS = [
     "125-150% (over)", "150-200% (well over)", "200%+ (far over)",
 ]
 
+AGREEMENT_EDGES = [-0.01, 0.50, 0.90, 1.10, 100]
+AGREEMENT_LABELS = [
+    "Well under limit (0-50%)", "Moderately under (50-90%)",
+    "Agreement band (90-110%)", "Over limit (110%+)",
+]
+
 
 def _normalize_msisdn(s: pd.Series) -> pd.Series:
     return s.astype(str).str.replace(r"[^0-9]", "", regex=True).replace("", pd.NA)
@@ -86,11 +92,29 @@ def main():
     print(f"Agent/months exceeding assigned_limit: {n_exceed:,} / {len(scored):,} ({n_exceed / len(scored):.1%})")
     print(f"  of which, assigned_limit == 0 but still disbursed: {n_zero_limit_disbursed:,}")
 
-    buckets = pd.cut(scored["pct_of_limit"], bins=BUCKET_EDGES, labels=BUCKET_LABELS)
-    counts = buckets.value_counts().reindex(BUCKET_LABELS)
+    scored["pct_of_limit_band"] = pd.cut(scored["pct_of_limit"], bins=BUCKET_EDGES, labels=BUCKET_LABELS)
+    scored["agreement_band"] = pd.cut(scored["pct_of_limit"], bins=AGREEMENT_EDGES, labels=AGREEMENT_LABELS)
+    scored["severe_breach_25pct_plus"] = scored["pct_of_limit"] >= 1.25
+    scored["severe_breach_2x_plus"] = scored["pct_of_limit"] >= 2.00
+
+    counts = scored["pct_of_limit_band"].value_counts().reindex(BUCKET_LABELS)
     pct = (counts / len(scored) * 100).round(1)
     print(f"\nFull distribution of disbursed_amount as % of assigned_limit:")
     print(pd.DataFrame({"n": counts, "pct": pct}).to_string())
+
+    print(f"\nCoarser agreement_band grouping:")
+    agr_counts = scored["agreement_band"].value_counts().reindex(AGREEMENT_LABELS)
+    print(pd.DataFrame({"n": agr_counts, "pct": (agr_counts / len(scored) * 100).round(1)}).to_string())
+
+    n_25 = int(scored["severe_breach_25pct_plus"].sum())
+    n_2x = int(scored["severe_breach_2x_plus"].sum())
+    print(f"\nSevere breaches: {n_25:,} at 25%+ over limit ({n_25 / n_exceed:.1%} of all violations), "
+          f"{n_2x:,} at 2x+ over limit ({n_2x / n_exceed:.1%} of all violations)")
+    for label, col in [("25%+ breach", "severe_breach_25pct_plus"), ("2x+ breach", "severe_breach_2x_plus")]:
+        subset = scored[scored[col]]
+        if len(subset) and "risk_tier" in subset.columns:
+            dist = subset["risk_tier"].value_counts(normalize=True).sort_index()
+            print(f"  {label} by risk_tier: " + ", ".join(f"{t}={p:.1%}" for t, p in dist.items()))
 
     if "risk_tier" in scored.columns:
         print(f"\n{'=' * 78}")
@@ -105,7 +129,8 @@ def main():
         print(tbl.round(4).to_string())
 
     out_cols = ["msisdn", "profile", "month", "disbursed_amount", "n_transactions", "assigned_limit",
-                "exceeds_limit", "excess_amount", "pct_of_limit"] + \
+                "exceeds_limit", "excess_amount", "pct_of_limit", "pct_of_limit_band", "agreement_band",
+                "severe_breach_25pct_plus", "severe_breach_2x_plus"] + \
         [c for c in ["cal_pd", "risk_tier", "pd_decile", "agent_category"] if c in scored.columns]
     scored[out_cols].sort_values("excess_amount", ascending=False).to_csv(args.out, index=False)
     print(f"\nPer-agent-month detail written: {args.out}")
