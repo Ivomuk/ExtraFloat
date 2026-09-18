@@ -128,6 +128,8 @@ def main():
 
     out_cols = ["_key", "tbl_dt", "instruct_amount", "assigned_limit", "exceeds_limit",
                 "excess_amount", "pct_of_limit"] + [c for c in ["cal_pd", "risk_tier", "pd_decile"] if c in scored.columns]
+    if "instruct_to_fro_user_prf" in scored.columns:
+        out_cols.append("instruct_to_fro_user_prf")
     out_path = f"{args.out_prefix}_per_transaction.csv"
     scored[out_cols].rename(columns={"_key": "msisdn"}).sort_values("excess_amount", ascending=False).to_csv(out_path, index=False)
     print(f"\nPer-transaction detail written: {out_path}")
