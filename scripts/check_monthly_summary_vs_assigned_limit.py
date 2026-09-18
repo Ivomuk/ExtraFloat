@@ -93,7 +93,7 @@ def main():
     print(f"  of which, assigned_limit == 0 but still disbursed: {n_zero_limit_disbursed:,}")
 
     scored["pct_of_limit_band"] = pd.cut(scored["pct_of_limit"], bins=BUCKET_EDGES, labels=BUCKET_LABELS)
-    scored["agreement_band"] = pd.cut(scored["pct_of_limit"], bins=AGREEMENT_EDGES, labels=AGREEMENT_LABELS)
+    scored["vs_limit_band"] = pd.cut(scored["pct_of_limit"], bins=AGREEMENT_EDGES, labels=AGREEMENT_LABELS)
     scored["severe_breach_25pct_plus"] = scored["pct_of_limit"] >= 1.25
     scored["severe_breach_2x_plus"] = scored["pct_of_limit"] >= 2.00
 
@@ -102,8 +102,8 @@ def main():
     print(f"\nFull distribution of disbursed_amount as % of assigned_limit:")
     print(pd.DataFrame({"n": counts, "pct": pct}).to_string())
 
-    print(f"\nCoarser agreement_band grouping:")
-    agr_counts = scored["agreement_band"].value_counts().reindex(AGREEMENT_LABELS)
+    print(f"\nCoarser vs_limit_band grouping:")
+    agr_counts = scored["vs_limit_band"].value_counts().reindex(AGREEMENT_LABELS)
     print(pd.DataFrame({"n": agr_counts, "pct": (agr_counts / len(scored) * 100).round(1)}).to_string())
 
     n_25 = int(scored["severe_breach_25pct_plus"].sum())
@@ -129,7 +129,7 @@ def main():
         print(tbl.round(4).to_string())
 
     out_cols = ["msisdn", "profile", "month", "disbursed_amount", "n_transactions", "assigned_limit",
-                "exceeds_limit", "excess_amount", "pct_of_limit", "pct_of_limit_band", "agreement_band",
+                "exceeds_limit", "excess_amount", "pct_of_limit", "pct_of_limit_band", "vs_limit_band",
                 "severe_breach_25pct_plus", "severe_breach_2x_plus"] + \
         [c for c in ["cal_pd", "risk_tier", "pd_decile", "agent_category"] if c in scored.columns]
     scored[out_cols].sort_values("excess_amount", ascending=False).to_csv(args.out, index=False)
