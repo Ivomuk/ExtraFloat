@@ -572,8 +572,11 @@ xtrafloat_penalty_loan_daily_ranked AS (
         ) AS penalty_day_rn
 
     FROM analytics.momo_loan_book_tracker_xtrafloat_loan_state_daily pen
+    CROSS JOIN snapshots s
     WHERE pen.ova = 'XTRAFLOAT-AGENT'
       AND pen.date_key >= 20260101
+      AND CAST(DATE_PARSE(CAST(pen.date_key AS VARCHAR), '%Y%m%d') AS DATE)
+              <= CAST(DATE_PARSE(CAST(s.snapshot_dt AS VARCHAR), '%Y%m%d') AS DATE)
 ),
 
 xtrafloat_penalty_loan_summary AS (
@@ -648,8 +651,14 @@ penalty_history_features AS (
 -- substring) and DPD_ALLOW_PATTERNS/DPD_BLOCK_PATTERNS ("dpd" substring).
 --
 -- xtrafloat_loan_final_state: one row per loan, its most recently
--- observed daily state (distinct from xtrafloat_penalty_loan_summary
--- above, which aggregates ever/max across a loan's ENTIRE history).
+-- observed daily state AS OF snapshot_date (distinct from
+-- xtrafloat_penalty_loan_summary above, which aggregates ever/max across
+-- a loan's ENTIRE history up to that same cutoff). Bounded via the
+-- CROSS JOIN snapshots filter below -- this file has one global
+-- snapshot_dt (see the snapshots CTE), so this is a single static
+-- cutoff, not a per-agent one, unlike the training files' equivalent fix
+-- (which needs a per-target-loan cutoff since each target loan has its
+-- own date).
 -- ---------------------------------------------------------------------
 xtrafloat_loan_final_state_ranked AS (
     SELECT
@@ -667,8 +676,11 @@ xtrafloat_loan_final_state_ranked AS (
         ) AS final_state_rn
 
     FROM analytics.momo_loan_book_tracker_xtrafloat_loan_state_daily pen
+    CROSS JOIN snapshots s
     WHERE pen.ova = 'XTRAFLOAT-AGENT'
       AND pen.date_key >= 20260101
+      AND CAST(DATE_PARSE(CAST(pen.date_key AS VARCHAR), '%Y%m%d') AS DATE)
+              <= CAST(DATE_PARSE(CAST(s.snapshot_dt AS VARCHAR), '%Y%m%d') AS DATE)
 ),
 
 xtrafloat_loan_final_state AS (
@@ -1076,8 +1088,10 @@ SELECT
     COALESCE(lhm.principal_unsettled_count, 0)
         AS principal_unsettled_count,
 
-    mrd.most_recent_prior_days_past_due_within_30d
-        AS most_recent_days_past_due_within_30d,
+    CASE
+        WHEN mrd.most_recent_prior_loan_confirmed = 1
+        THEN mrd.most_recent_prior_days_past_due_within_30d
+    END AS most_recent_days_past_due_within_30d,
 
     CASE WHEN mrd.most_recent_prior_disbursement_fid IS NULL
          THEN 1 ELSE 0
