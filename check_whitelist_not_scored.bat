@@ -8,6 +8,7 @@ python scripts\check_whitelist_not_scored.py ^
     --whitelist-file data\whitelist_aug_20260804.csv ^
     --stage "raw_agent_mart=data\mfs_daily_agent_mart_20260731.csv" ^
     --stage "retail_filtered=retail_agents_filtered.csv" ^
+    --stage "agent_mart_retail_filtered=data\mfs_daily_agent_mart_20260731_retail_filtered.csv" ^
     --stage "borrower_raw=data\borrower_history.csv" ^
     --stage "borrower_filtered=borrower_history_retail_filtered.csv" ^
     --stage "loan_summary_filtered=data\loan_summary_retail_filtered.csv" ^
