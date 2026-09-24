@@ -15,7 +15,10 @@ python scripts\check_whitelist_not_scored.py ^
     --stage "loan_history_filtered=data\loan_history_snapshot_20260817_retail_filtered.csv" ^
     --stage "scored_output=output\engine_test_output.csv" ^
     --final-stage scored_output ^
-    --out-missing whitelist_agents_not_scored.csv
+    --loan-summary-file data\loan_summary.csv ^
+    --out-missing whitelist_agents_not_scored.csv ^
+    --out-real-gap whitelist_real_gap_agents.csv ^
+    --out-borrower-filter-drop whitelist_borrower_filter_drop_overlap.csv
 
 if %ERRORLEVEL% neq 0 (
     echo.
@@ -26,5 +29,8 @@ if %ERRORLEVEL% neq 0 (
 
 echo.
 echo Complete. See whitelist_agents_not_scored.csv for the full per-agent
-echo presence trace across every stage, if any agents are missing.
+echo presence trace across every stage, whitelist_real_gap_agents.csv for
+echo agents missing from borrower_history despite having a real disbursement,
+echo and whitelist_borrower_filter_drop_overlap.csv for whether borrower-history
+echo retail-filtering drops overlap with the retail-agent filter's own exclusions.
 pause
