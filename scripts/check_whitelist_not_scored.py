@@ -114,10 +114,12 @@ def main(argv: list[str] | None = None) -> None:
 
     missing = presence.loc[presence[final_stage] == False].drop(columns="_key")  # noqa: E712
     if len(missing) > 0:
-        print(f"\nPer-agent presence trace for the {len(missing):,} missing agents "
-              f"(True/False per stage; NaN = stage file unavailable):")
-        with pd.option_context("display.max_rows", 20, "display.width", 200):
-            print(missing.to_string(index=False))
+        sample_n = min(20, len(missing))
+        print(f"\nPer-agent presence trace -- showing {sample_n:,} of {len(missing):,} missing agents "
+              f"on screen (True/False per stage; NaN = stage file unavailable). "
+              f"{'See --out-missing for the full list.' if args.out_missing else 'Pass --out-missing to save the full list to a CSV instead of scrolling.'}")
+        with pd.option_context("display.width", 200):
+            print(missing.head(sample_n).to_string(index=False))
 
         if args.out_missing:
             out_path = Path(args.out_missing)
