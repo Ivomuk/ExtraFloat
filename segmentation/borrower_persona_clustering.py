@@ -38,13 +38,13 @@ from segmentation.extrafloat_segmentation_pipeline import (
     flag_anomalies,
 )
 
-MOMO_PATH = r"F:\AGENT DATA\mfs_daily_agent_mart_20260831.csv"
+MOMO_PATH = r"F:\AGENT DATA\mfs_daily_agent_mart_20260731.csv"
 LOANS_PATH = r"F:\AGENT DATA\pipeline\output\borrower_history_features.csv"
 ENGINE_OUTPUT_PATH = r"F:\AGENT DATA\pipeline\output\engine_output.csv"
 OUT_DIR = Path(r"F:\AGENT DATA\pipeline\output\borrower_persona_output")
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
-SNAPSHOT_DATE = pd.Timestamp("2026-08-31")
+SNAPSHOT_DATE = pd.Timestamp("2026-07-31")
 EXPECTED_JOIN_COUNT = 28063
 
 
