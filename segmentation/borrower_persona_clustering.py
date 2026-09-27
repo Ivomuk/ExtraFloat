@@ -49,7 +49,16 @@ EXPECTED_JOIN_COUNT = 28063
 
 
 def digits(s: pd.Series) -> pd.Series:
-    return s.astype(str).str.replace(r"\D", "", regex=True)
+    """Strip to digits only.
+
+    A missing/blank/non-numeric input strips down to an empty string, not
+    NaN -- masked to NA here so it can never become a shared join key. Left
+    unmasked, every row with a missing agent_msisdn/phonenumber on either
+    side would collapse onto the same "" key and silently many-to-many
+    join against every other missing-msisdn row on the opposite side.
+    """
+    out = s.astype(str).str.replace(r"\D", "", regex=True)
+    return out.mask(out == "")
 
 
 def load_and_join() -> pd.DataFrame:
@@ -72,11 +81,31 @@ def load_and_join() -> pd.DataFrame:
     momo["_id"] = digits(momo["agent_msisdn"])
     loans["_id"] = digits(loans["phonenumber"])
 
+    # Guard: a null join key must never reach the merge -- drop (not fill)
+    # rows with a missing/unparseable msisdn on either side, and say how
+    # many, so a genuine data problem upstream stays visible instead of
+    # silently vanishing into the join.
+    n_momo_null = int(momo["_id"].isna().sum())
+    n_loans_null = int(loans["_id"].isna().sum())
+    if n_momo_null:
+        print(f"  WARNING: {n_momo_null:,} momo rows have a missing/unparseable "
+              f"agent_msisdn -- dropping before join.")
+    if n_loans_null:
+        print(f"  WARNING: {n_loans_null:,} loan rows have a missing/unparseable "
+              f"phonenumber -- dropping before join.")
+    momo = momo.dropna(subset=["_id"])
+    loans = loans.dropna(subset=["_id"])
+
     df = momo.merge(loans, on="_id", how="inner", suffixes=("_momo", "_loan"))
     print(f"Joined population: {len(df):,} (expected {EXPECTED_JOIN_COUNT:,})")
     assert len(df) == EXPECTED_JOIN_COUNT, (
         f"Join count changed since plan-time verification: got {len(df)}, "
-        f"expected {EXPECTED_JOIN_COUNT}. Investigate before proceeding."
+        f"expected {EXPECTED_JOIN_COUNT}. Investigate before proceeding -- "
+        f"if this is the first run after fixing the NaN-key join guard, a "
+        f"LOWER count than {EXPECTED_JOIN_COUNT:,} is expected (bogus rows "
+        f"that used to collide on an empty-string key are now correctly "
+        f"excluded) and EXPECTED_JOIN_COUNT should be updated to match, not "
+        f"treated as a new bug."
     )
     df = df.set_index("_id")
     return df
