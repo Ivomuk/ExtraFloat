@@ -4,25 +4,29 @@ borrower_persona_clustering.py
 Combines MoMo transaction-capacity data (mfs_daily_agent_mart) with loan/
 credit-behavior data (borrower_history_features) to cluster the population
 that has BOTH, into "borrower personas" -- something no existing module in
-AgentFloat-integrated-solution does (segmentation/ only ever looks at MoMo
-KPIs, never joins loan data).
+this repo does (segmentation/ only ever looks at MoMo KPIs, never joins
+loan data).
 
 Reuses the generic (column-list-driven) stages of segmentation's feature
 engineering and clustering pipeline via direct import -- nothing under
-AgentFloat-integrated-solution is modified. See the approved plan for the
-full design rationale (feature framework, missing-value handling, why
-dormancy filtering and hdb-to-tier mapping are bypassed).
+segmentation/ is modified. See the approved plan for the full design
+rationale (feature framework, missing-value handling, why dormancy
+filtering and hdb-to-tier mapping are bypassed).
 
 Run order: after pipeline/run_pipeline.py (needs borrower_history_features.csv)
-and after a credit-engine run (needs engine_output.csv for profiling-only
-risk/limit columns -- optional, degrades gracefully if absent).
+and after a credit-engine run (needs output/engine_test_output.csv for
+profiling-only risk/limit columns -- optional, degrades gracefully if absent).
 """
 
 import sys
 from pathlib import Path
 
-REPO = r"F:\AGENT DATA\AgentFloat-integrated-solution"
-sys.path.insert(0, REPO)
+# Repo root: this file lives directly under segmentation/, same depth as
+# scripts/*.py -- .parent.parent resolves the same way those scripts do,
+# so `from segmentation....` (this package's own parent) is importable
+# regardless of the current working directory this is run from.
+REPO = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO))
 
 import numpy as np
 import pandas as pd
@@ -38,10 +42,22 @@ from segmentation.extrafloat_segmentation_pipeline import (
     flag_anomalies,
 )
 
-MOMO_PATH = r"F:\AGENT DATA\mfs_daily_agent_mart_20260731.csv"
-LOANS_PATH = r"F:\AGENT DATA\pipeline\output\borrower_history_features.csv"
-ENGINE_OUTPUT_PATH = r"F:\AGENT DATA\pipeline\output\engine_output.csv"
-OUT_DIR = Path(r"F:\AGENT DATA\pipeline\output\borrower_persona_output")
+# data/ and segmentation_outputs/ match this repo's established conventions
+# (see e.g. run_retail_filtered.bat for data/mfs_daily_agent_mart_*.csv and
+# data/borrower_history.csv; run_segmentation_standalone.bat for
+# segmentation_outputs/; run_retail_filtered.bat for output/engine_test_output.csv).
+# NOTE: borrower_history_features.csv is NOT the same file as the existing
+# data/borrower_history.csv used elsewhere in this repo (that one feeds the
+# credit engine's prior-exposure cap) -- this script's docstring treats
+# "loan/credit-behavior data (borrower_history_features)" as its own,
+# separately-produced source (from pipeline/run_pipeline.py). If that's
+# wrong and this should actually read data/borrower_history.csv or
+# borrower_history_retail_filtered.csv instead, say so and this needs
+# updating again.
+MOMO_PATH = REPO / "data" / "mfs_daily_agent_mart_20260731.csv"
+LOANS_PATH = REPO / "data" / "borrower_history_features.csv"
+ENGINE_OUTPUT_PATH = REPO / "output" / "engine_test_output.csv"
+OUT_DIR = REPO / "segmentation_outputs" / "borrower_persona_output"
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 SNAPSHOT_DATE = pd.Timestamp("2026-07-31")
