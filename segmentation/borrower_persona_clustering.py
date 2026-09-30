@@ -77,11 +77,21 @@ def load_and_join() -> pd.DataFrame:
         "payment_vol_3m", "voucher_vol_3m", "cust_3m",
         "rev_1m", "rev_3m", "activation_dt",
     ]
+    # Column names confirmed against BORROWER_LIMIT_REQUIRED_COLUMNS in
+    # extrafloat/engine/extrafloat_limit_engine_features.py, this repo's own
+    # established schema for borrower_history-family files. The 24h variant
+    # is used for on-time/default rate (the schema's dominant convention --
+    # recent_5_default_24h_rate, prior_on_time_24h_rate, etc. are all 24h;
+    # 26h only exists as an alternate for the two "lifetime" rates
+    # specifically -- swap to lifetime_on_time_26h_rate/lifetime_default_26h_rate
+    # if that's the window this analysis should actually use). Cure time is
+    # tracked in HOURS, not days, in this schema. latest_product has no
+    # equivalent column anywhere in this schema -- dropped, not renamed.
     loan_cols = [
         "phonenumber", "total_loans", "avg_loan_size_lifetime",
-        "lifetime_on_time_rate", "lifetime_default_rate", "recent_5_default_rate",
-        "lifetime_avg_days_to_principal_cure", "lifetime_cure_time_volatility",
-        "cure_time_trend", "borrower_trend", "borrower_profile_type", "latest_product",
+        "lifetime_on_time_24h_rate", "lifetime_default_24h_rate", "recent_5_default_24h_rate",
+        "lifetime_avg_hours_to_principal_cure", "lifetime_cure_time_volatility",
+        "cure_time_trend", "borrower_trend", "borrower_profile_type",
     ]
 
     momo = pd.read_csv(MOMO_PATH, usecols=momo_cols)
@@ -152,13 +162,13 @@ def build_features(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
     feat["avg_loan_size_lifetime"] = df["avg_loan_size_lifetime"]
 
     # -- Credit quality --
-    feat["lifetime_on_time_rate"] = df["lifetime_on_time_rate"]
-    feat["lifetime_default_rate"] = df["lifetime_default_rate"]
+    feat["lifetime_on_time_24h_rate"] = df["lifetime_on_time_24h_rate"]
+    feat["lifetime_default_24h_rate"] = df["lifetime_default_24h_rate"]
 
-    feat["has_recent_history"] = df["recent_5_default_rate"].notna().astype(int)
-    feat["recent_5_default_rate"] = df["recent_5_default_rate"].fillna(0.0)
+    feat["has_recent_history"] = df["recent_5_default_24h_rate"].notna().astype(int)
+    feat["recent_5_default_24h_rate"] = df["recent_5_default_24h_rate"].fillna(0.0)
 
-    feat["lifetime_avg_days_to_principal_cure"] = df["lifetime_avg_days_to_principal_cure"]
+    feat["lifetime_avg_hours_to_principal_cure"] = df["lifetime_avg_hours_to_principal_cure"]
 
     feat["has_volatility_history"] = df["lifetime_cure_time_volatility"].notna().astype(int)
     feat["lifetime_cure_time_volatility"] = df["lifetime_cure_time_volatility"].fillna(0.0)
@@ -231,7 +241,7 @@ def main():
     chosen_name, chosen_cfg, anomaly_out = try_hdbscan_configs(df_features, selected_cols, active_mask)
 
     print("\n=== Step 5: assemble output ===")
-    result = df[["agent_msisdn", "phonenumber", "borrower_trend", "borrower_profile_type", "latest_product"]].copy()
+    result = df[["agent_msisdn", "phonenumber", "borrower_trend", "borrower_profile_type"]].copy()
     for c in all_cols:
         result[c] = feat[c]
     result["persona_cluster"] = anomaly_out["anomaly_cluster_hdb_raw"]
