@@ -338,9 +338,26 @@ def main():
     X_scaled, X_pca = _scale_and_reduce(X_final, feat_cfg)
     print(f"  final PCA shape: {X_pca.shape}")
 
-    # Rebuild the full feature frame flag_anomalies expects (raw, unscaled --
-    # it does its own RobustScaler+PCA internally via _get_active_pca).
-    df_features = feat[selected_cols].copy()
+    # DEVIATION from run_extrafloat_segmentation.py's own production
+    # convention: it feeds flag_anomalies raw, un-logged features (confirmed
+    # by code trace -- prepare_features() returns features_df_raw, and that
+    # exact raw frame is what reaches flag_anomalies there, never its own
+    # log-transformed X_scaled/X_pca). That convention was validated against
+    # segmentation's own MoMo-KPI-only feature set. This script also mixes in
+    # heavy-tailed monetary columns (avg_loan_size_lifetime, account_balance,
+    # commission, ...) that RobustScaler's median/IQR centering alone doesn't
+    # fix the skew of. An exhaustive real-data tuning pass (8 UMAP/HDBSCAN
+    # parameter combinations) found only two regimes -- ~93% of agents in one
+    # cluster, or umap_min_dist=0.0 overcorrecting to 204 micro-clusters --
+    # with no middle ground, which is what motivated trying the feature space
+    # itself next: X_final is the same selected_cols, log1p+winsorized (see
+    # _apply_log_winsorize) and NaN-imputed (median, matching this repo's own
+    # "safety re-impute after pruning" pattern in prepare_features()), instead
+    # of the raw feat[selected_cols] this used to pass. flag_anomalies still
+    # does its own RobustScaler+PCA/UMAP internally via _get_active_pca --
+    # only the values handed to that scaler change here, not the pipeline
+    # shape.
+    df_features = X_final.copy()
 
     print("\n=== Step 4: HDBSCAN sizing comparison ===")
     active_mask = pd.Series(True, index=df_features.index)
