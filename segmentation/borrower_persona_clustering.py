@@ -305,7 +305,21 @@ def main():
 
     engine_path = Path(ENGINE_OUTPUT_PATH)
     if engine_path.exists():
-        eng = pd.read_csv(engine_path, usecols=["msisdn", "assigned_limit", "risk_tier", "capacity_cap", "combined_cap"])
+        # capacity_cap/combined_cap are intermediate-stage columns (see
+        # docs/engine_output_data_dictionary.md) only present when the
+        # engine run used keep_intermediate=True -- assigned_limit/risk_tier
+        # are the only ones guaranteed by every run. Check the real header
+        # first so a run without keep_intermediate degrades gracefully
+        # (fewer profiling columns) instead of crashing on a missing usecol.
+        wanted_cols = ["msisdn", "assigned_limit", "risk_tier", "capacity_cap", "combined_cap"]
+        available_cols = set(pd.read_csv(engine_path, nrows=0).columns)
+        missing_cols = [c for c in wanted_cols if c not in available_cols]
+        read_cols = [c for c in wanted_cols if c in available_cols]
+        if missing_cols:
+            print(f"  WARNING: {ENGINE_OUTPUT_PATH} is missing {missing_cols} "
+                  f"(likely produced without keep_intermediate=True) -- "
+                  f"continuing without them.")
+        eng = pd.read_csv(engine_path, usecols=read_cols)
         eng["_id"] = digits(eng["msisdn"])
         eng = eng.drop(columns=["msisdn"]).set_index("_id")
         result = result.join(eng, how="left")
