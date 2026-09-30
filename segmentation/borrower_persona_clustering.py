@@ -274,6 +274,14 @@ MAX_DISCOVERY_CLUSTERS = 80
 # case would have failed this even though it passed DOMINANT_CLUSTER_MAX_SHARE).
 NOISE_MAX_PCT = 15.0
 
+# Not a qualification bound, just a diagnostic: a cluster holding less than
+# this share of the CLUSTERED (non-noise) population is "tiny". top5_pct
+# alone can't tell "55% top5 + a healthy remainder" apart from "55% top5 +
+# 40 tiny fragments" -- two very different segmentations that could report
+# the same top5_pct. Reported per candidate so that distinction is visible
+# before any micro-segment consolidation work starts.
+TINY_CLUSTER_MAX_SHARE_PCT = 0.5
+
 
 def try_hdbscan_configs(df_features: pd.DataFrame, selected_cols: list[str], active_mask: pd.Series):
     """Empirically compare a few HDBSCAN/UMAP sizings; return (chosen_name, chosen_cfg, chosen_result).
@@ -330,10 +338,22 @@ def try_hdbscan_configs(df_features: pd.DataFrame, selected_cols: list[str], act
         # meaningful micro-segments" from "3 large clusters + 49 fragments",
         # which the dominant-cluster guard alone can't tell apart.
         top5_share_pct = (cluster_sizes.sort_values(ascending=False).head(5) / n_active * 100).round(1).tolist()
+        # Long-tail severity: two candidates can share the same top5_pct
+        # while one has a healthy remaining distribution and the other has
+        # dozens of near-empty clusters -- count/pop-share of clusters
+        # under TINY_CLUSTER_MAX_SHARE_PCT of the CLUSTERED (non-noise)
+        # population makes that visible.
+        n_clustered = int(cluster_sizes.sum())
+        tiny_threshold = TINY_CLUSTER_MAX_SHARE_PCT / 100 * n_clustered
+        tiny_mask = cluster_sizes < tiny_threshold
+        n_tiny_clusters = int(tiny_mask.sum())
+        tiny_clusters_pop_pct = round(float(cluster_sizes[tiny_mask].sum()) / n_active * 100, 2) if n_clustered else 0.0
         print(f"  {name}: n_clusters={n_clusters}, noise={noise_pct:.1f}%, "
               f"largest_cluster={dominant_share:.1%} of active agents, "
-              f"top5={top5_share_pct}%")
-        results[name] = (cfg, out, noise_pct, n_clusters, dominant_share, top5_share_pct)
+              f"top5={top5_share_pct}%, tiny_clusters={n_tiny_clusters} "
+              f"({tiny_clusters_pop_pct}% of active agents)")
+        results[name] = (cfg, out, noise_pct, n_clusters, dominant_share, top5_share_pct,
+                          n_tiny_clusters, tiny_clusters_pop_pct)
 
     # Full ranked table of every candidate (not just the winner) -- same
     # sort order the selector below uses (qualifies first, then the
@@ -341,7 +361,8 @@ def try_hdbscan_configs(df_features: pd.DataFrame, selected_cols: list[str], act
     # were even in contention and why one beat another near the boundary.
     print("\n  --- candidate summary (all configs) ---")
     summary_rows = []
-    for name, (cfg, out, noise_pct, n_clusters, dominant_share, top5_share_pct) in results.items():
+    for name, (cfg, out, noise_pct, n_clusters, dominant_share, top5_share_pct,
+               n_tiny_clusters, tiny_clusters_pop_pct) in results.items():
         qualifies = (
             MIN_CLUSTERS <= n_clusters <= MAX_DISCOVERY_CLUSTERS
             and dominant_share <= DOMINANT_CLUSTER_MAX_SHARE
@@ -357,6 +378,8 @@ def try_hdbscan_configs(df_features: pd.DataFrame, selected_cols: list[str], act
             "noise_pct": round(noise_pct, 1),
             "dominant_pct": round(dominant_share * 100, 1),
             "top5_pct": top5_share_pct,
+            "n_tiny_clusters": n_tiny_clusters,
+            "tiny_clusters_pop_pct": tiny_clusters_pop_pct,
             "qualifies": qualifies,
         })
     summary_df = pd.DataFrame(summary_rows).sort_values(
@@ -425,7 +448,7 @@ def try_hdbscan_configs(df_features: pd.DataFrame, selected_cols: list[str], act
               f"widening the candidate grid further.")
         best_name = min(pool, key=lambda k: pool[k][2])
     print(f"  -> selected: {best_name}")
-    cfg, out, noise_pct, n_clusters, dominant_share, top5_share_pct = results[best_name]
+    cfg, out, noise_pct, n_clusters, dominant_share, top5_share_pct, n_tiny_clusters, tiny_clusters_pop_pct = results[best_name]
     return best_name, cfg, out
 
 
