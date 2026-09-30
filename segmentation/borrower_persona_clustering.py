@@ -65,7 +65,16 @@ def digits(s: pd.Series) -> pd.Series:
     unmasked, every row with a missing agent_msisdn/phonenumber on either
     side would collapse onto the same "" key and silently many-to-many
     join against every other missing-msisdn row on the opposite side.
+
+    If even one row anywhere in the source column is missing, pandas reads
+    the WHOLE column as float64, not just that row -- str() on a float
+    appends ".0", and naive digit-stripping keeps that trailing zero as
+    a spurious extra digit on every otherwise-valid id in the column.
+    Round-tripping through nullable Int64 first strips the decimal point
+    (and preserves NaN as NA) before the id ever becomes a string.
     """
+    if pd.api.types.is_float_dtype(s):
+        s = s.astype("Int64")
     out = s.astype(str).str.replace(r"\D", "", regex=True)
     return out.mask(out == "")
 
