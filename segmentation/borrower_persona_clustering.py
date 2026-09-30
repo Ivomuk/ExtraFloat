@@ -240,31 +240,59 @@ def build_features(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
     return feat, numeric_cols + flag_cols
 
 
+# Reject a config if its single largest non-noise cluster holds more than
+# this share of active agents. "13 clusters, lowest noise%" can still be a
+# useless segmentation if one of those 13 swallows 93% of the population --
+# this guard is what actually catches that case in the selection below.
+DOMINANT_CLUSTER_MAX_SHARE = 0.50
+
+
 def try_hdbscan_configs(df_features: pd.DataFrame, selected_cols: list[str], active_mask: pd.Series):
-    """Empirically compare a few HDBSCAN sizings; return (chosen_cfg, chosen_result)."""
+    """Empirically compare a few HDBSCAN/UMAP sizings; return (chosen_name, chosen_cfg, chosen_result).
+
+    Varies both HDBSCAN's min_cluster_size/min_samples and UMAP's
+    n_neighbors -- lower n_neighbors makes UMAP preserve more local
+    structure, which is what's needed to split a population that would
+    otherwise collapse into one dominant blob (see DOMINANT_CLUSTER_MAX_SHARE).
+    """
     candidates = [
-        ("defaults_1000_150", {"hdbscan_min_cluster_size": 1000, "hdbscan_min_samples": 150}),
-        ("scaled_300_40", {"hdbscan_min_cluster_size": 300, "hdbscan_min_samples": 40}),
-        ("scaled_150_20", {"hdbscan_min_cluster_size": 150, "hdbscan_min_samples": 20}),
+        ("defaults_1000_150_umap15", {"hdbscan_min_cluster_size": 1000, "hdbscan_min_samples": 150, "umap_n_neighbors": 15}),
+        ("scaled_300_40_umap15", {"hdbscan_min_cluster_size": 300, "hdbscan_min_samples": 40, "umap_n_neighbors": 15}),
+        ("scaled_150_20_umap15", {"hdbscan_min_cluster_size": 150, "hdbscan_min_samples": 20, "umap_n_neighbors": 15}),
+        ("scaled_150_20_umap10", {"hdbscan_min_cluster_size": 150, "hdbscan_min_samples": 20, "umap_n_neighbors": 10}),
+        ("scaled_100_15_umap10", {"hdbscan_min_cluster_size": 100, "hdbscan_min_samples": 15, "umap_n_neighbors": 10}),
     ]
     results = {}
+    n_active = int(active_mask.sum())
     for name, overrides in candidates:
         cfg = _get_clustering_config(overrides)
         out = flag_anomalies(df_features, selected_cols, active_mask, config=cfg)
         labels = out["anomaly_cluster_hdb_raw"]
-        n_active = int(active_mask.sum())
         noise_pct = (labels == -1).sum() / n_active * 100
-        n_clusters = labels[labels != -1].nunique()
-        print(f"  {name}: n_clusters={n_clusters}, noise={noise_pct:.1f}%")
-        results[name] = (cfg, out, noise_pct, n_clusters)
+        cluster_sizes = labels[labels != -1].value_counts()
+        n_clusters = len(cluster_sizes)
+        dominant_share = (cluster_sizes.max() / n_active) if n_clusters else 1.0
+        print(f"  {name}: n_clusters={n_clusters}, noise={noise_pct:.1f}%, "
+              f"largest_cluster={dominant_share:.1%} of active agents")
+        results[name] = (cfg, out, noise_pct, n_clusters, dominant_share)
 
-    # Pick the config with the lowest noise% among those producing >=3 clusters;
-    # fall back to lowest noise% overall if none qualify.
+    # Prefer configs that (a) produce >=3 clusters and (b) don't dump most of
+    # the population into one dominant cluster; among those, pick lowest
+    # noise%. Relax constraints in order -- drop the dominant-cluster check,
+    # then the cluster-count check -- only if nothing satisfies the stricter
+    # tier, so degenerate data still returns something rather than crashing.
+    well_separated = {k: v for k, v in results.items() if v[3] >= 3 and v[4] <= DOMINANT_CLUSTER_MAX_SHARE}
     qualifying = {k: v for k, v in results.items() if v[3] >= 3}
-    pool = qualifying if qualifying else results
+    pool = well_separated or qualifying or results
+    if not well_separated:
+        print(f"  WARNING: no candidate kept its largest cluster under "
+              f"{DOMINANT_CLUSTER_MAX_SHARE:.0%} of active agents -- falling "
+              f"back to {'>=3 clusters' if qualifying else 'all candidates'} "
+              f"and picking lowest noise%. Segmentation quality may still be "
+              f"poor; consider widening the candidate grid further.")
     best_name = min(pool, key=lambda k: pool[k][2])
     print(f"  -> selected: {best_name}")
-    cfg, out, noise_pct, n_clusters = results[best_name]
+    cfg, out, noise_pct, n_clusters, dominant_share = results[best_name]
     return best_name, cfg, out
 
 
