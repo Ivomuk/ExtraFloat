@@ -82,7 +82,7 @@ def load_and_join() -> pd.DataFrame:
     momo_cols = [
         "agent_msisdn", "commission", "account_balance",
         "cash_out_vol_3m", "cash_out_value_3m",
-        "payment_vol_3m", "voucher_vol_3m", "cust_3m",
+        "payment_vol_3m", "cust_3m",
         "rev_1m", "rev_3m", "activation_dt",
     ]
     # Column names confirmed against BORROWER_LIMIT_REQUIRED_COLUMNS in
@@ -188,12 +188,18 @@ def build_features(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
     feat = pd.DataFrame(index=df.index)
 
     # -- Capacity --
+    # voucher_vol_3m deliberately excluded: real-data check via
+    # characterize_persona_feature_distributions.py showed p1 through p95
+    # are all exactly 0 (>=95% of active agents used zero vouchers in 3
+    # months). log1p can't fix that -- it compresses long right tails, not a
+    # zero-spike-plus-rare-outlier shape -- and RobustScaler on a near-
+    # constant column risks amplifying noise from the tiny nonzero subset
+    # rather than contributing real signal for the rest of the population.
     feat["commission"] = df["commission"]
     feat["account_balance"] = df["account_balance"]
     feat["cash_out_vol_3m"] = df["cash_out_vol_3m"]
     feat["cash_out_value_3m"] = df["cash_out_value_3m"]
     feat["payment_vol_3m"] = df["payment_vol_3m"]
-    feat["voucher_vol_3m"] = df["voucher_vol_3m"]
     feat["cust_3m"] = df["cust_3m"]
     feat["rev_1m_to_3m_ratio"] = df["rev_1m"] / (df["rev_3m"] + eps)
 
