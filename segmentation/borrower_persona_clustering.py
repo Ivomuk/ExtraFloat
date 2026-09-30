@@ -101,6 +101,8 @@ def load_and_join() -> pd.DataFrame:
         "lifetime_on_time_24h_rate", "lifetime_default_24h_rate", "recent_5_default_24h_rate",
         "lifetime_avg_hours_to_principal_cure", "lifetime_cure_time_volatility",
         "cure_time_trend", "borrower_trend", "borrower_profile_type",
+        # Tiebreakers for the dedup below -- not analysis features themselves.
+        "latest_disbursement_ts", "latest_requestid",
     ]
 
     momo = pd.read_csv(MOMO_PATH, usecols=momo_cols)
@@ -124,16 +126,34 @@ def load_and_join() -> pd.DataFrame:
     momo = momo.dropna(subset=["_id"])
     loans = loans.dropna(subset=["_id"])
 
+    # borrower_history_retail_filtered.csv is NOT guaranteed one row per
+    # borrower -- prepare_borrower_limit_features() in
+    # extrafloat/engine/extrafloat_limit_engine_features.py (this repo's own
+    # engine-facing loader for the same file family) defensively dedupes on
+    # exactly this possibility (raw exports can carry one row per loan
+    # request, not per borrower). Mirror its sort key and direction here:
+    # keep the most recent record per agent (latest disbursement first,
+    # latest_requestid as a tiebreaker for same-timestamp rows).
+    loans["latest_disbursement_ts"] = pd.to_datetime(loans["latest_disbursement_ts"], errors="coerce")
+    loans["latest_requestid"] = loans["latest_requestid"].astype(str)
+    n_loan_rows_before = len(loans)
+    loans = loans.sort_values(
+        ["_id", "latest_disbursement_ts", "latest_requestid"],
+        ascending=[True, False, False],
+        na_position="last",
+    ).drop_duplicates(subset=["_id"], keep="first")
+    if len(loans) != n_loan_rows_before:
+        print(f"  deduped loans: {n_loan_rows_before:,} -> {len(loans):,} rows "
+              f"(kept most recent record per agent)")
+
     df = momo.merge(loans, on="_id", how="inner", suffixes=("_momo", "_loan"))
     print(f"Joined population: {len(df):,} (expected {EXPECTED_JOIN_COUNT:,})")
     assert len(df) == EXPECTED_JOIN_COUNT, (
         f"Join count changed since plan-time verification: got {len(df)}, "
         f"expected {EXPECTED_JOIN_COUNT}. Investigate before proceeding -- "
-        f"if this is the first run after fixing the NaN-key join guard, a "
-        f"LOWER count than {EXPECTED_JOIN_COUNT:,} is expected (bogus rows "
-        f"that used to collide on an empty-string key are now correctly "
-        f"excluded) and EXPECTED_JOIN_COUNT should be updated to match, not "
-        f"treated as a new bug."
+        f"if this is the first run after fixing the NaN-key join guard and "
+        f"the loans-side dedup, EXPECTED_JOIN_COUNT should simply be updated "
+        f"to match this corrected count, not treated as a new bug."
     )
     df = df.set_index("_id")
     return df
