@@ -2,10 +2,10 @@
 borrower_persona_clustering.py
 ================================
 Combines MoMo transaction-capacity data (mfs_daily_agent_mart) with loan/
-credit-behavior data (borrower_history_features) to cluster the population
-that has BOTH, into "borrower personas" -- something no existing module in
-this repo does (segmentation/ only ever looks at MoMo KPIs, never joins
-loan data).
+credit-behavior data (borrower_history_retail_filtered.csv) to cluster the
+population that has BOTH, into "borrower personas" -- something no existing
+module in this repo does (segmentation/ only ever looks at MoMo KPIs, never
+joins loan data).
 
 Reuses the generic (column-list-driven) stages of segmentation's feature
 engineering and clustering pipeline via direct import -- nothing under
@@ -13,9 +13,9 @@ segmentation/ is modified. See the approved plan for the full design
 rationale (feature framework, missing-value handling, why dormancy
 filtering and hdb-to-tier mapping are bypassed).
 
-Run order: after pipeline/run_pipeline.py (needs borrower_history_features.csv)
-and after a credit-engine run (needs output/engine_test_output.csv for
-profiling-only risk/limit columns -- optional, degrades gracefully if absent).
+Run order: after run_retail_filtered.bat (needs the borrower_history_retail_filtered.csv
+it produces) and after a credit-engine run (needs output/engine_test_output.csv
+for profiling-only risk/limit columns -- optional, degrades gracefully if absent).
 """
 
 import sys
@@ -42,20 +42,13 @@ from segmentation.extrafloat_segmentation_pipeline import (
     flag_anomalies,
 )
 
-# data/ and segmentation_outputs/ match this repo's established conventions
-# (see e.g. run_retail_filtered.bat for data/mfs_daily_agent_mart_*.csv and
-# data/borrower_history.csv; run_segmentation_standalone.bat for
-# segmentation_outputs/; run_retail_filtered.bat for output/engine_test_output.csv).
-# NOTE: borrower_history_features.csv is NOT the same file as the existing
-# data/borrower_history.csv used elsewhere in this repo (that one feeds the
-# credit engine's prior-exposure cap) -- this script's docstring treats
-# "loan/credit-behavior data (borrower_history_features)" as its own,
-# separately-produced source (from pipeline/run_pipeline.py). If that's
-# wrong and this should actually read data/borrower_history.csv or
-# borrower_history_retail_filtered.csv instead, say so and this needs
-# updating again.
+# data/, segmentation_outputs/, and the repo-root borrower_history_retail_
+# filtered.csv all match this repo's established conventions -- see
+# run_retail_filtered.bat (produces borrower_history_retail_filtered.csv at
+# the repo root, data/mfs_daily_agent_mart_*.csv, output/engine_test_output.csv)
+# and run_segmentation_standalone.bat (segmentation_outputs/).
 MOMO_PATH = REPO / "data" / "mfs_daily_agent_mart_20260731.csv"
-LOANS_PATH = REPO / "data" / "borrower_history_features.csv"
+LOANS_PATH = REPO / "borrower_history_retail_filtered.csv"
 ENGINE_OUTPUT_PATH = REPO / "output" / "engine_test_output.csv"
 OUT_DIR = REPO / "segmentation_outputs" / "borrower_persona_output"
 OUT_DIR.mkdir(parents=True, exist_ok=True)
