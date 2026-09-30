@@ -326,9 +326,45 @@ def try_hdbscan_configs(df_features: pd.DataFrame, selected_cols: list[str], act
         cluster_sizes = labels[labels != -1].value_counts()
         n_clusters = len(cluster_sizes)
         dominant_share = (cluster_sizes.max() / n_active) if n_clusters else 1.0
+        # Top-5 cluster shares (not just the largest) -- distinguishes "52
+        # meaningful micro-segments" from "3 large clusters + 49 fragments",
+        # which the dominant-cluster guard alone can't tell apart.
+        top5_share_pct = (cluster_sizes.sort_values(ascending=False).head(5) / n_active * 100).round(1).tolist()
         print(f"  {name}: n_clusters={n_clusters}, noise={noise_pct:.1f}%, "
-              f"largest_cluster={dominant_share:.1%} of active agents")
-        results[name] = (cfg, out, noise_pct, n_clusters, dominant_share)
+              f"largest_cluster={dominant_share:.1%} of active agents, "
+              f"top5={top5_share_pct}%")
+        results[name] = (cfg, out, noise_pct, n_clusters, dominant_share, top5_share_pct)
+
+    # Full ranked table of every candidate (not just the winner) -- same
+    # sort order the selector below uses (qualifies first, then the
+    # hierarchical tiebreak), so it's legible at a glance which candidates
+    # were even in contention and why one beat another near the boundary.
+    print("\n  --- candidate summary (all configs) ---")
+    summary_rows = []
+    for name, (cfg, out, noise_pct, n_clusters, dominant_share, top5_share_pct) in results.items():
+        qualifies = (
+            MIN_CLUSTERS <= n_clusters <= MAX_DISCOVERY_CLUSTERS
+            and dominant_share <= DOMINANT_CLUSTER_MAX_SHARE
+            and noise_pct <= NOISE_MAX_PCT
+        )
+        summary_rows.append({
+            "name": name,
+            "min_cluster_size": cfg["hdbscan_min_cluster_size"],
+            "min_samples": cfg["hdbscan_min_samples"],
+            "umap_n_neighbors": cfg["umap_n_neighbors"],
+            "umap_min_dist": cfg["umap_min_dist"],
+            "n_clusters": n_clusters,
+            "noise_pct": round(noise_pct, 1),
+            "dominant_pct": round(dominant_share * 100, 1),
+            "top5_pct": top5_share_pct,
+            "qualifies": qualifies,
+        })
+    summary_df = pd.DataFrame(summary_rows).sort_values(
+        ["qualifies", "n_clusters", "dominant_pct", "noise_pct"],
+        ascending=[False, True, True, True],
+    )
+    with pd.option_context("display.max_rows", None, "display.width", 220, "display.max_colwidth", 80):
+        print(summary_df.to_string(index=False))
 
     # Hard qualification on three independent bounds -- cluster count in a
     # discovery-safe range, dominant-cluster share capped, noise capped --
@@ -339,6 +375,18 @@ def try_hdbscan_configs(df_features: pd.DataFrame, selected_cols: list[str], act
     # share and noise bounds, further minimizing either one just rewards
     # additional fragmentation (more clusters) for a marginal gain on an
     # axis that no longer matters as much as cluster count does.
+    #
+    # Nuance worth knowing: because fewer clusters is the FIRST tiebreak, a
+    # candidate at "12 clusters / 49% dominant / 14.8% noise" beats one at
+    # "40 clusters / 30% dominant / 5% noise" the moment both clear the
+    # hard bounds -- the selector stops caring how much better the second
+    # one did on dominant-share/noise once cluster count alone decides it.
+    # That's intentional for now (fewer clusters is a real business-value
+    # axis, not just tie-breaking noise), but it means the three hard
+    # bounds are carrying real weight: a candidate barely inside them still
+    # wins outright against one that cleared them by a wide margin. Revisit
+    # if the full candidate table above shows this producing a bad pick
+    # near the boundary.
     qualified = {
         k: v for k, v in results.items()
         if MIN_CLUSTERS <= v[3] <= MAX_DISCOVERY_CLUSTERS
@@ -377,7 +425,7 @@ def try_hdbscan_configs(df_features: pd.DataFrame, selected_cols: list[str], act
               f"widening the candidate grid further.")
         best_name = min(pool, key=lambda k: pool[k][2])
     print(f"  -> selected: {best_name}")
-    cfg, out, noise_pct, n_clusters, dominant_share = results[best_name]
+    cfg, out, noise_pct, n_clusters, dominant_share, top5_share_pct = results[best_name]
     return best_name, cfg, out
 
 
