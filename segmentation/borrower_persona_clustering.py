@@ -246,6 +246,16 @@ def build_features(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
 # this guard is what actually catches that case in the selection below.
 DOMINANT_CLUSTER_MAX_SHARE = 0.50
 
+# Keep the winning config's cluster count in a range a human can actually
+# use as "borrower personas". Real run: umap_min_dist=0.0 broke the 93%+
+# dominant-cluster problem, but at min_cluster_size=100 it overcorrected to
+# 204 clusters / 40.1% noise -- technically under DOMINANT_CLUSTER_MAX_SHARE
+# (4.4%) but useless as a business segmentation. This bounds candidates on
+# cluster count too, so an extreme like that can't win just because no
+# competing candidate happens to satisfy the dominant-cluster check.
+MIN_CLUSTERS = 3
+MAX_CLUSTERS = 30
+
 
 def try_hdbscan_configs(df_features: pd.DataFrame, selected_cols: list[str], active_mask: pd.Series):
     """Empirically compare a few HDBSCAN/UMAP sizings; return (chosen_name, chosen_cfg, chosen_result).
@@ -256,7 +266,8 @@ def try_hdbscan_configs(df_features: pd.DataFrame, selected_cols: list[str], act
     umap-learn's own docs recommend min_dist=0.0 specifically for a
     downstream clustering task like this, not its 0.1 default). All aimed
     at splitting a population that would otherwise collapse into one
-    dominant blob (see DOMINANT_CLUSTER_MAX_SHARE).
+    dominant blob (see DOMINANT_CLUSTER_MAX_SHARE), without overcorrecting
+    into unusably many micro-clusters (see MIN_CLUSTERS/MAX_CLUSTERS).
     """
     candidates = [
         ("defaults_1000_150_umap15", {"hdbscan_min_cluster_size": 1000, "hdbscan_min_samples": 150, "umap_n_neighbors": 15}),
@@ -266,6 +277,7 @@ def try_hdbscan_configs(df_features: pd.DataFrame, selected_cols: list[str], act
         ("scaled_100_15_umap10", {"hdbscan_min_cluster_size": 100, "hdbscan_min_samples": 15, "umap_n_neighbors": 10}),
         ("scaled_150_20_umap10_mindist0", {"hdbscan_min_cluster_size": 150, "hdbscan_min_samples": 20, "umap_n_neighbors": 10, "umap_min_dist": 0.0}),
         ("scaled_100_15_umap10_mindist0", {"hdbscan_min_cluster_size": 100, "hdbscan_min_samples": 15, "umap_n_neighbors": 10, "umap_min_dist": 0.0}),
+        ("scaled_100_15_umap10_mindist005", {"hdbscan_min_cluster_size": 100, "hdbscan_min_samples": 15, "umap_n_neighbors": 10, "umap_min_dist": 0.05}),
     ]
     results = {}
     n_active = int(active_mask.sum())
@@ -281,20 +293,28 @@ def try_hdbscan_configs(df_features: pd.DataFrame, selected_cols: list[str], act
               f"largest_cluster={dominant_share:.1%} of active agents")
         results[name] = (cfg, out, noise_pct, n_clusters, dominant_share)
 
-    # Prefer configs that (a) produce >=3 clusters and (b) don't dump most of
-    # the population into one dominant cluster; among those, pick lowest
-    # noise%. Relax constraints in order -- drop the dominant-cluster check,
-    # then the cluster-count check -- only if nothing satisfies the stricter
-    # tier, so degenerate data still returns something rather than crashing.
-    well_separated = {k: v for k, v in results.items() if v[3] >= 3 and v[4] <= DOMINANT_CLUSTER_MAX_SHARE}
-    qualifying = {k: v for k, v in results.items() if v[3] >= 3}
-    pool = well_separated or qualifying or results
+    # Four-tier fallback, strictest first, so degenerate data still returns
+    # something rather than crashing:
+    #   1. in a usable cluster-count range AND no dominant cluster
+    #   2. in a usable cluster-count range (drop the dominant-cluster check)
+    #   3. >=MIN_CLUSTERS (drop the upper bound too -- the pre-existing rule)
+    #   4. everything (last resort)
+    # Lowest noise% is the tiebreaker within whichever tier is used.
+    in_range = {k: v for k, v in results.items() if MIN_CLUSTERS <= v[3] <= MAX_CLUSTERS}
+    well_separated = {k: v for k, v in in_range.items() if v[4] <= DOMINANT_CLUSTER_MAX_SHARE}
+    qualifying = {k: v for k, v in results.items() if v[3] >= MIN_CLUSTERS}
+    pool = well_separated or in_range or qualifying or results
     if not well_separated:
-        print(f"  WARNING: no candidate kept its largest cluster under "
-              f"{DOMINANT_CLUSTER_MAX_SHARE:.0%} of active agents -- falling "
-              f"back to {'>=3 clusters' if qualifying else 'all candidates'} "
-              f"and picking lowest noise%. Segmentation quality may still be "
-              f"poor; consider widening the candidate grid further.")
+        if in_range:
+            tier = f"{MIN_CLUSTERS}-{MAX_CLUSTERS} clusters (none of those also stayed under {DOMINANT_CLUSTER_MAX_SHARE:.0%} dominant-cluster share)"
+        elif qualifying:
+            tier = f">={MIN_CLUSTERS} clusters (none stayed within {MIN_CLUSTERS}-{MAX_CLUSTERS}, the usable range)"
+        else:
+            tier = "all candidates"
+        print(f"  WARNING: no candidate satisfied both the {MIN_CLUSTERS}-{MAX_CLUSTERS} "
+              f"cluster-count range and the {DOMINANT_CLUSTER_MAX_SHARE:.0%} dominant-cluster "
+              f"cap -- falling back to {tier} and picking lowest noise%. Segmentation "
+              f"quality may still be poor; consider widening the candidate grid further.")
     best_name = min(pool, key=lambda k: pool[k][2])
     print(f"  -> selected: {best_name}")
     cfg, out, noise_pct, n_clusters, dominant_share = results[best_name]
