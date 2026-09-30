@@ -250,10 +250,13 @@ DOMINANT_CLUSTER_MAX_SHARE = 0.50
 def try_hdbscan_configs(df_features: pd.DataFrame, selected_cols: list[str], active_mask: pd.Series):
     """Empirically compare a few HDBSCAN/UMAP sizings; return (chosen_name, chosen_cfg, chosen_result).
 
-    Varies both HDBSCAN's min_cluster_size/min_samples and UMAP's
-    n_neighbors -- lower n_neighbors makes UMAP preserve more local
-    structure, which is what's needed to split a population that would
-    otherwise collapse into one dominant blob (see DOMINANT_CLUSTER_MAX_SHARE).
+    Varies HDBSCAN's min_cluster_size/min_samples, UMAP's n_neighbors (lower
+    preserves more local structure), and UMAP's min_dist (lower packs points
+    by local similarity instead of spreading them out for visualization --
+    umap-learn's own docs recommend min_dist=0.0 specifically for a
+    downstream clustering task like this, not its 0.1 default). All aimed
+    at splitting a population that would otherwise collapse into one
+    dominant blob (see DOMINANT_CLUSTER_MAX_SHARE).
     """
     candidates = [
         ("defaults_1000_150_umap15", {"hdbscan_min_cluster_size": 1000, "hdbscan_min_samples": 150, "umap_n_neighbors": 15}),
@@ -261,6 +264,8 @@ def try_hdbscan_configs(df_features: pd.DataFrame, selected_cols: list[str], act
         ("scaled_150_20_umap15", {"hdbscan_min_cluster_size": 150, "hdbscan_min_samples": 20, "umap_n_neighbors": 15}),
         ("scaled_150_20_umap10", {"hdbscan_min_cluster_size": 150, "hdbscan_min_samples": 20, "umap_n_neighbors": 10}),
         ("scaled_100_15_umap10", {"hdbscan_min_cluster_size": 100, "hdbscan_min_samples": 15, "umap_n_neighbors": 10}),
+        ("scaled_150_20_umap10_mindist0", {"hdbscan_min_cluster_size": 150, "hdbscan_min_samples": 20, "umap_n_neighbors": 10, "umap_min_dist": 0.0}),
+        ("scaled_100_15_umap10_mindist0", {"hdbscan_min_cluster_size": 100, "hdbscan_min_samples": 15, "umap_n_neighbors": 10, "umap_min_dist": 0.0}),
     ]
     results = {}
     n_active = int(active_mask.sum())
