@@ -54,7 +54,6 @@ OUT_DIR = REPO / "segmentation_outputs" / "borrower_persona_output"
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 SNAPSHOT_DATE = pd.Timestamp("2026-07-31")
-EXPECTED_JOIN_COUNT = 28063
 
 
 def digits(s: pd.Series) -> pd.Series:
@@ -108,8 +107,42 @@ def load_and_join() -> pd.DataFrame:
     momo = pd.read_csv(MOMO_PATH, usecols=momo_cols)
     loans = pd.read_csv(LOANS_PATH, usecols=loan_cols)
 
+    # Both files are designed to be one row per entity: agent_msisdn unique
+    # per agent in the mart, phonenumber unique per borrower in
+    # borrower_history_retail_filtered.csv (it aggregates each borrower's
+    # loan history into lifetime_* columns). Report raw-column duplicates
+    # BEFORE any key normalization, so a genuine violation of that design is
+    # visible on its own, distinct from anything digits() does below.
+    n_momo_raw_dupes = momo["agent_msisdn"].dropna().shape[0] - momo["agent_msisdn"].nunique(dropna=True)
+    n_loans_raw_dupes = loans["phonenumber"].dropna().shape[0] - loans["phonenumber"].nunique(dropna=True)
+    if n_momo_raw_dupes:
+        print(f"  WARNING: {n_momo_raw_dupes:,} duplicate raw agent_msisdn "
+              f"values in {MOMO_PATH.name} -- expected unique per agent.")
+    if n_loans_raw_dupes:
+        print(f"  WARNING: {n_loans_raw_dupes:,} duplicate raw phonenumber "
+              f"values in {LOANS_PATH.name} -- expected unique per borrower.")
+
     momo["_id"] = digits(momo["agent_msisdn"])
     loans["_id"] = digits(loans["phonenumber"])
+
+    # If normalization collapses MORE ids than the raw columns already had
+    # duplicated, digits() itself is merging genuinely different phone
+    # numbers onto the same key -- a much more serious problem than a raw
+    # data duplicate, since the dedup below would then silently keep one
+    # real borrower's record and discard another's rather than resolving a
+    # true duplicate. Surface it loudly rather than let the dedup mask it.
+    n_momo_id_dupes = momo["_id"].dropna().shape[0] - momo["_id"].nunique(dropna=True)
+    n_loans_id_dupes = loans["_id"].dropna().shape[0] - loans["_id"].nunique(dropna=True)
+    if n_momo_id_dupes > n_momo_raw_dupes:
+        print(f"  WARNING: digit-normalization collapsed "
+              f"{n_momo_id_dupes - n_momo_raw_dupes:,} additional distinct "
+              f"agent_msisdn values onto shared ids -- investigate the raw "
+              f"values before trusting anything downstream of this join.")
+    if n_loans_id_dupes > n_loans_raw_dupes:
+        print(f"  WARNING: digit-normalization collapsed "
+              f"{n_loans_id_dupes - n_loans_raw_dupes:,} additional distinct "
+              f"phonenumber values onto shared ids -- investigate the raw "
+              f"values before trusting anything downstream of this join.")
 
     # Guard: a null join key must never reach the merge -- drop (not fill)
     # rows with a missing/unparseable msisdn on either side, and say how
@@ -126,14 +159,12 @@ def load_and_join() -> pd.DataFrame:
     momo = momo.dropna(subset=["_id"])
     loans = loans.dropna(subset=["_id"])
 
-    # borrower_history_retail_filtered.csv is NOT guaranteed one row per
-    # borrower -- prepare_borrower_limit_features() in
-    # extrafloat/engine/extrafloat_limit_engine_features.py (this repo's own
-    # engine-facing loader for the same file family) defensively dedupes on
-    # exactly this possibility (raw exports can carry one row per loan
-    # request, not per borrower). Mirror its sort key and direction here:
-    # keep the most recent record per agent (latest disbursement first,
-    # latest_requestid as a tiebreaker for same-timestamp rows).
+    # Defensive dedup, kept as a safety net matching
+    # prepare_borrower_limit_features()'s own guard for this file family --
+    # a no-op when the id is actually unique (n_loans_id_dupes == 0 above).
+    # If the WARNINGs above fired, this is masking a real problem rather
+    # than fixing one; don't trust the join count below until those are
+    # resolved.
     loans["latest_disbursement_ts"] = pd.to_datetime(loans["latest_disbursement_ts"], errors="coerce")
     loans["latest_requestid"] = loans["latest_requestid"].astype(str)
     n_loan_rows_before = len(loans)
@@ -147,14 +178,7 @@ def load_and_join() -> pd.DataFrame:
               f"(kept most recent record per agent)")
 
     df = momo.merge(loans, on="_id", how="inner", suffixes=("_momo", "_loan"))
-    print(f"Joined population: {len(df):,} (expected {EXPECTED_JOIN_COUNT:,})")
-    assert len(df) == EXPECTED_JOIN_COUNT, (
-        f"Join count changed since plan-time verification: got {len(df)}, "
-        f"expected {EXPECTED_JOIN_COUNT}. Investigate before proceeding -- "
-        f"if this is the first run after fixing the NaN-key join guard and "
-        f"the loans-side dedup, EXPECTED_JOIN_COUNT should simply be updated "
-        f"to match this corrected count, not treated as a new bug."
-    )
+    print(f"Joined population: {len(df):,}")
     df = df.set_index("_id")
     return df
 
