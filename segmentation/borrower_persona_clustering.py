@@ -283,6 +283,30 @@ NOISE_MAX_PCT = 15.0
 TINY_CLUSTER_MAX_SHARE_PCT = 0.5
 
 
+def evaluate_cluster_labels(labels: pd.Series, n_active: int):
+    """Compute the standard diagnostic bundle for one HDBSCAN labeling.
+
+    Shared between try_hdbscan_configs() and any standalone script that
+    needs to score a clustering result the same way (e.g. a seed-stability
+    check) -- keeps one source of truth for what "tiny cluster" and
+    "dominant share" mean rather than reimplementing this per caller.
+
+    Returns (noise_pct, n_clusters, dominant_share, top5_share_pct,
+    n_tiny_clusters, tiny_clusters_pop_pct).
+    """
+    noise_pct = (labels == -1).sum() / n_active * 100
+    cluster_sizes = labels[labels != -1].value_counts()
+    n_clusters = len(cluster_sizes)
+    dominant_share = (cluster_sizes.max() / n_active) if n_clusters else 1.0
+    top5_share_pct = (cluster_sizes.sort_values(ascending=False).head(5) / n_active * 100).round(1).tolist()
+    n_clustered = int(cluster_sizes.sum())
+    tiny_threshold = TINY_CLUSTER_MAX_SHARE_PCT / 100 * n_clustered
+    tiny_mask = cluster_sizes < tiny_threshold
+    n_tiny_clusters = int(tiny_mask.sum())
+    tiny_clusters_pop_pct = round(float(cluster_sizes[tiny_mask].sum()) / n_active * 100, 2) if n_clustered else 0.0
+    return noise_pct, n_clusters, dominant_share, top5_share_pct, n_tiny_clusters, tiny_clusters_pop_pct
+
+
 def try_hdbscan_configs(df_features: pd.DataFrame, selected_cols: list[str], active_mask: pd.Series):
     """Empirically compare a few HDBSCAN/UMAP sizings; return (chosen_name, chosen_cfg, chosen_result).
 
@@ -330,24 +354,8 @@ def try_hdbscan_configs(df_features: pd.DataFrame, selected_cols: list[str], act
         cfg = _get_clustering_config(overrides)
         out = flag_anomalies(df_features, selected_cols, active_mask, config=cfg)
         labels = out["anomaly_cluster_hdb_raw"]
-        noise_pct = (labels == -1).sum() / n_active * 100
-        cluster_sizes = labels[labels != -1].value_counts()
-        n_clusters = len(cluster_sizes)
-        dominant_share = (cluster_sizes.max() / n_active) if n_clusters else 1.0
-        # Top-5 cluster shares (not just the largest) -- distinguishes "52
-        # meaningful micro-segments" from "3 large clusters + 49 fragments",
-        # which the dominant-cluster guard alone can't tell apart.
-        top5_share_pct = (cluster_sizes.sort_values(ascending=False).head(5) / n_active * 100).round(1).tolist()
-        # Long-tail severity: two candidates can share the same top5_pct
-        # while one has a healthy remaining distribution and the other has
-        # dozens of near-empty clusters -- count/pop-share of clusters
-        # under TINY_CLUSTER_MAX_SHARE_PCT of the CLUSTERED (non-noise)
-        # population makes that visible.
-        n_clustered = int(cluster_sizes.sum())
-        tiny_threshold = TINY_CLUSTER_MAX_SHARE_PCT / 100 * n_clustered
-        tiny_mask = cluster_sizes < tiny_threshold
-        n_tiny_clusters = int(tiny_mask.sum())
-        tiny_clusters_pop_pct = round(float(cluster_sizes[tiny_mask].sum()) / n_active * 100, 2) if n_clustered else 0.0
+        metrics = evaluate_cluster_labels(labels, n_active)
+        noise_pct, n_clusters, dominant_share, top5_share_pct, n_tiny_clusters, tiny_clusters_pop_pct = metrics
         print(f"  {name}: n_clusters={n_clusters}, noise={noise_pct:.1f}%, "
               f"largest_cluster={dominant_share:.1%} of active agents, "
               f"top5={top5_share_pct}%, tiny_clusters={n_tiny_clusters} "
