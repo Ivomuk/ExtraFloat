@@ -283,6 +283,33 @@ NOISE_MAX_PCT = 15.0
 TINY_CLUSTER_MAX_SHARE_PCT = 0.5
 
 
+def winsorize_all_columns(df: pd.DataFrame, lower_pct: float, upper_pct: float) -> pd.DataFrame:
+    """Clip every column to its own [lower_pct, upper_pct] percentile range.
+
+    segmentation's own _apply_log_winsorize() only winsorizes the columns it
+    also log1p-transforms (skewed AND non-negative) -- a column that's
+    extreme-tailed but not skewed enough to cross skew_threshold, or that can
+    go negative (so is never log-eligible at all), passes through untouched.
+    cure_time_trend is exactly this case: skew ~-0.26 (well under the 1.0
+    threshold) but a real range of roughly -113 to +1279 around a median of
+    0. PCA is NOT robust to outliers the way a skew-based transform is -- a
+    single extreme-tailed column can dominate total variance regardless of
+    its skew statistic, and did: cure_time_trend alone captured 88.3% of ALL
+    PCA variance in a real run, making every downstream K-means/GMM result
+    just a trivial outlier-vs-everyone-else split (e.g. K=3 cluster sizes of
+    98.2%/1.2%/0.6%) rather than real persona structure. This is an
+    unconditional safety net applied to every clustering column right before
+    PCA, regardless of whether _apply_log_winsorize already touched it
+    (idempotent if it did -- clipping an already-clipped column is a no-op).
+    """
+    out = df.copy()
+    for col in out.columns:
+        lo = out[col].quantile(lower_pct)
+        hi = out[col].quantile(upper_pct)
+        out[col] = out[col].clip(lower=lo, upper=hi)
+    return out
+
+
 def evaluate_cluster_labels(labels: pd.Series, n_active: int):
     """Compute the standard diagnostic bundle for one HDBSCAN labeling.
 
@@ -472,6 +499,11 @@ def main():
     print("\n=== Step 3: log/winsorize + correlation pruning + scale ===")
     feat_cfg = _get_features_config(None)
     X_log = _apply_log_winsorize(feat[numeric_cols].copy(), feat_cfg)
+    # Unconditional winsorize pass on EVERY column, not just the ones
+    # _apply_log_winsorize also log-transformed -- see winsorize_all_columns()
+    # for why (a low-skew, negative-capable column like cure_time_trend can
+    # still have an extreme raw tail that skew-based selection never catches).
+    X_log = winsorize_all_columns(X_log, feat_cfg["winsorize_lower_pct"], feat_cfg["winsorize_upper_pct"])
     X_pruned, selected_cols = _prune_correlated_features(X_log, feat_cfg)
     X_final = X_pruned.fillna(X_pruned.median()).fillna(0.0)
     X_scaled, X_pca = _scale_and_reduce(X_final, feat_cfg)

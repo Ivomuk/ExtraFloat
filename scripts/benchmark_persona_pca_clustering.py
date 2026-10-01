@@ -72,7 +72,11 @@ from sklearn.mixture import GaussianMixture
 from sklearn.preprocessing import RobustScaler
 from sklearn.decomposition import PCA
 
-from segmentation.borrower_persona_clustering import build_features, load_and_join  # noqa: E402
+from segmentation.borrower_persona_clustering import (  # noqa: E402
+    build_features,
+    load_and_join,
+    winsorize_all_columns,
+)
 from segmentation.extrafloat_segmentation_features import (  # noqa: E402
     _apply_log_winsorize,
     _get_features_config,
@@ -138,6 +142,13 @@ def main(argv: list[str] | None = None) -> None:
     numeric_cols = [c for c in all_cols if not c.startswith("has_")]
     feat_cfg = _get_features_config(None)
     X_log = _apply_log_winsorize(feat[numeric_cols].copy(), feat_cfg)
+    # Unconditional winsorize pass on EVERY column -- see
+    # winsorize_all_columns()'s docstring. Without this, a low-skew,
+    # negative-capable column (cure_time_trend) with an extreme raw tail can
+    # single-handedly dominate PCA's total variance regardless of its skew
+    # statistic, since _apply_log_winsorize only winsorizes what it also
+    # log-transforms.
+    X_log = winsorize_all_columns(X_log, feat_cfg["winsorize_lower_pct"], feat_cfg["winsorize_upper_pct"])
     X_pruned, selected_cols = _prune_correlated_features(X_log, feat_cfg)
     X_final = X_pruned.fillna(X_pruned.median()).fillna(0.0)
     n_active = len(X_final)
