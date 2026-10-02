@@ -25,15 +25,29 @@ pipeline (log-winsorize -> correlation-prune -> impute -> quantile-
 normalize -> RobustScaler -> PCA) the benchmark script used, so the K=8
 fit here is the exact same input space that produced the sweep's numbers.
 
-borrower_trend / borrower_profile_type / thin-file status and every
-outcome variable (risk_score, risk_tier, assigned_limit, repayment/default
-rates not used as clustering features) are brought in ONLY for the
-cross-tab validation artifact below -- never fed back into the KMeans/GMM
-fit. is_thin_file is derived locally (total_loans < 3, matching the
-engine's own is_thin_file definition in extrafloat_limit_engine_features.py/
-docs/engine_output_data_dictionary.md) rather than requiring
-engine_test_output.csv, so this validation artifact doesn't depend on a
-keep_intermediate=True engine run existing.
+borrower_trend / borrower_profile_type / thin-file status / commission tier
+and every outcome variable (risk_score, risk_tier, assigned_limit,
+repayment/default rates not used as clustering features) are brought in
+ONLY for the cross-tab validation artifact below -- never fed back into
+the KMeans/GMM fit. is_thin_file and the commission tier are both derived
+locally rather than requiring engine_test_output.csv, so this validation
+artifact doesn't depend on a keep_intermediate=True engine run existing:
+  - is_thin_file: total_loans < 3, matching the engine's own definition in
+    extrafloat_limit_engine_features.py / docs/engine_output_data_dictionary.md.
+  - commission tier: the business's actual 8-category tier scheme
+    (diamond/titanium/platinum/gold/silver/bronze/new bronze/below_threshold)
+    -- NOT borrower_profile_type (confirmed to be a data-maturity flag --
+    no_history/thin_file/insufficient_history/thick_file -- not a persona
+    taxonomy) and NOT agent_profile (MTN's own top-level classification,
+    a different, unrelated field). This is XtraFloat's own "authoritative
+    second-level classification" (extrafloat_limit_engine_features.py:583-585),
+    computed purely from 6-month commission via DEFAULT_CAP_CONFIG["agent_tier"]
+    in extrafloat_limit_engine_caps.py -- imported directly here (not
+    duplicated) so this stays in sync if the business ever changes the
+    thresholds. Reuses the same "commission" column already loaded from
+    the MoMo mart for clustering, since that IS the 6-month commission
+    figure the engine's own tier assignment reads (confirmed via
+    extrafloat_limit_engine_features.py:589-598).
 
 Outputs (segmentation_outputs/persona_k8_profile/):
   k8_cluster_profile.csv       tidy cluster x feature profile (medians,
@@ -42,7 +56,8 @@ Outputs (segmentation_outputs/persona_k8_profile/):
   k8_persona_fingerprint.csv   wide cluster x feature standardized-deviation
                                 matrix (the same standardized diffs, pivoted)
   k8_validation_crosstabs.xlsx multi-sheet cross-tabs: borrower_profile_type,
-                                borrower_trend, thin/thick file, held-out
+                                borrower_trend, thin/thick file, commission
+                                tier (diamond/.../below_threshold), held-out
                                 outcome summary, KMeans-vs-GMM agreement
                                 (falls back to one CSV per sheet if
                                 openpyxl isn't installed)
@@ -79,6 +94,7 @@ from segmentation.extrafloat_segmentation_features import (  # noqa: E402
     _get_features_config,
     _prune_correlated_features,
 )
+from extrafloat.engine.extrafloat_limit_engine_caps import DEFAULT_CAP_CONFIG  # noqa: E402
 
 K = 8
 RANDOM_STATE = 42
@@ -90,6 +106,20 @@ N_LOADING_PCS = 8  # printed/saved loadings table width; PC1-3 are the ones
 REPO = Path(__file__).resolve().parent.parent
 ENGINE_OUTPUT_PATH = REPO / "output" / "engine_test_output.csv"
 OUT_DIR = REPO / "segmentation_outputs" / "persona_k8_profile"
+
+# commission_thresholds is ordered highest -> lowest in DEFAULT_CAP_CONFIG
+# (first match wins, matching extrafloat_limit_engine_features.py's own
+# _commission_to_multiplier()/agent_category logic exactly) -- imported
+# live rather than hardcoded so this never drifts from the engine's real
+# tier cutoffs.
+_COMMISSION_TIER_THRESHOLDS = DEFAULT_CAP_CONFIG["agent_tier"]["commission_thresholds"]
+
+
+def _commission_tier(commission: float) -> str:
+    for tier_name, threshold in _COMMISSION_TIER_THRESHOLDS.items():
+        if commission >= threshold:
+            return tier_name
+    return "below_threshold"
 
 
 def _standardized_profile(raw_features: pd.DataFrame, labels: pd.Series) -> pd.DataFrame:
@@ -225,6 +255,7 @@ def main() -> None:
     val["total_loans"] = df["total_loans"]
     val["is_thin_file"] = (df["total_loans"].fillna(0) < 3).astype(int)
     val["file_status"] = np.where(val["is_thin_file"] == 1, "thin_file", "thick_file")
+    val["commission_tier"] = df["commission"].apply(_commission_tier)
 
     # Outcome / descriptive variables NOT used as clustering inputs. Several
     # repayment-behavior columns (lifetime_on_time_24h_rate etc.) WERE used
@@ -273,10 +304,18 @@ def main() -> None:
     size_tbl.index.name = "persona_cluster"
     sheets["cluster_sizes"] = size_tbl.reset_index()
 
-    for cat_col in ("borrower_profile_type", "borrower_trend", "file_status"):
+    # Highest-to-lowest tier order (matching DEFAULT_CAP_CONFIG's own
+    # ordering), not crosstab's default alphabetical column order -- makes
+    # the commission_tier sheet readable at a glance.
+    tier_order = list(_COMMISSION_TIER_THRESHOLDS.keys()) + ["below_threshold"]
+
+    for cat_col in ("borrower_profile_type", "borrower_trend", "file_status", "commission_tier"):
         pct = pd.crosstab(val["persona_cluster"], val[cat_col], normalize="index").round(4) * 100
-        pct.columns = [f"{c}_pct" for c in pct.columns]
         cnt = pd.crosstab(val["persona_cluster"], val[cat_col])
+        if cat_col == "commission_tier":
+            present_order = [t for t in tier_order if t in cnt.columns]
+            pct, cnt = pct[present_order], cnt[present_order]
+        pct.columns = [f"{c}_pct" for c in pct.columns]
         cnt.columns = [f"{c}_n" for c in cnt.columns]
         sheets[f"{cat_col}_crosstab"] = pd.concat([cnt, pct], axis=1).reset_index()
 
