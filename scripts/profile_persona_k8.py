@@ -49,15 +49,18 @@ artifact doesn't depend on a keep_intermediate=True engine run existing:
     figure the engine's own tier assignment reads (confirmed via
     extrafloat_limit_engine_features.py:589-598).
 
-PERSONA_NAMES (below) carries the provisional persona names drafted from
-this profiling work; every output artifact includes a persona_name
-column/row alongside the raw cluster ID so the names show up everywhere,
-not just in this file.
+PERSONA_NAMES/PERSONA_RATIONALE (below) carry the provisional persona
+names and their one-line "why" drafted from this profiling work; every
+summary-level output artifact includes persona_name + persona_rationale
+columns/rows alongside the raw cluster ID, so both travel with the data
+rather than staying only in chat/commit history. The per-borrower
+assignments file carries persona_name only (rationale is cluster-level,
+not worth repeating 143k times).
 
 Outputs (segmentation_outputs/persona_k8_profile/):
   k8_cluster_profile.csv       tidy cluster x feature profile (medians,
                                 ratios, standardized diffs, percentiles),
-                                with persona_name
+                                with persona_name + persona_rationale
   pca_loadings.csv             Feature x PC loadings
   k8_persona_fingerprint.csv   wide cluster x feature standardized-deviation
                                 matrix (the same standardized diffs, pivoted)
@@ -127,6 +130,20 @@ PERSONA_NAMES = {
     5: "Flagship Power Users",
     6: "Dormant Legacy Borrowers",
     7: "Mainstream Elevated Risk",
+}
+
+# One-line rationale behind each name above, so the "why" travels with the
+# name into every output artifact rather than staying only in chat/commit
+# history. Same provisional caveat as PERSONA_NAMES.
+PERSONA_RATIONALE = {
+    0: "High commission tier (90% top-3), solidly good on-time/default -- the backbone segment",
+    1: "Meaningfully higher commission tier than C7, but below-average quality and a worsening trend",
+    2: "Thick-file, ~6 prior loans, consistently poor on-time/default throughout",
+    3: "Newest, mostly no-history, one large first loan, poor early signal",
+    4: "Near-perfect on-time/default, fastest cure, high tier, but very few loans",
+    5: "Near-pure diamond tier, best quality, by far the highest loan volume",
+    6: "Zero commission/balance/limit, 74.5% below-threshold, yet real loan history",
+    7: "Ordinary tier, below-average quality, largest at-risk population by sheer scale",
 }
 
 REPO = Path(__file__).resolve().parent.parent
@@ -239,7 +256,9 @@ def main() -> None:
     print("  KMeans cluster sizes:")
     for cluster_id, size in kmeans_labels.value_counts().sort_index().items():
         name = PERSONA_NAMES.get(cluster_id, "(unnamed)")
+        rationale = PERSONA_RATIONALE.get(cluster_id, "")
         print(f"    C{cluster_id} {name:32s} n={size:,}")
+        print(f"       {rationale}")
     print(f"  KMeans vs GMM-{GMM_COVARIANCE_TYPE} agreement at K={K}: ARI={ari:.3f} NMI={nmi:.3f}")
 
     # ── Artifact 1: PCA loadings ────────────────────────────────────────────
@@ -262,6 +281,7 @@ def main() -> None:
     raw_features = feat[selected_cols].copy()
     profile = _standardized_profile(raw_features, kmeans_labels)
     profile.insert(1, "persona_name", profile["persona_cluster"].map(PERSONA_NAMES))
+    profile.insert(2, "persona_rationale", profile["persona_cluster"].map(PERSONA_RATIONALE))
     profile_path = OUT_DIR / "k8_cluster_profile.csv"
     profile.to_csv(profile_path, index=False)
     print(f"\n  wrote {profile_path} ({len(profile)} rows = {K} clusters x {len(selected_cols)} features)")
@@ -270,8 +290,9 @@ def main() -> None:
     fingerprint = fingerprint[selected_cols]  # stable, deliberate column order (not alphabetical)
     sizes = kmeans_labels.value_counts().sort_index()
     fingerprint.insert(0, "persona_name", pd.Series(PERSONA_NAMES))
-    fingerprint.insert(1, "n_borrowers", sizes)
-    fingerprint.insert(2, "pct_of_population", (sizes / n_active * 100).round(2))
+    fingerprint.insert(1, "persona_rationale", pd.Series(PERSONA_RATIONALE))
+    fingerprint.insert(2, "n_borrowers", sizes)
+    fingerprint.insert(3, "pct_of_population", (sizes / n_active * 100).round(2))
     fingerprint_path = OUT_DIR / "k8_persona_fingerprint.csv"
     fingerprint.to_csv(fingerprint_path)
     print(f"  wrote {fingerprint_path} ({fingerprint.shape[0]} clusters x {fingerprint.shape[1]} columns)")
@@ -330,6 +351,7 @@ def main() -> None:
 
     size_tbl = pd.DataFrame({
         "persona_name": pd.Series(PERSONA_NAMES),
+        "persona_rationale": pd.Series(PERSONA_RATIONALE),
         "n_borrowers": sizes,
         "pct_of_population": (sizes / n_active * 100).round(2),
     })
