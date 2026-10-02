@@ -49,9 +49,15 @@ artifact doesn't depend on a keep_intermediate=True engine run existing:
     figure the engine's own tier assignment reads (confirmed via
     extrafloat_limit_engine_features.py:589-598).
 
+PERSONA_NAMES (below) carries the provisional persona names drafted from
+this profiling work; every output artifact includes a persona_name
+column/row alongside the raw cluster ID so the names show up everywhere,
+not just in this file.
+
 Outputs (segmentation_outputs/persona_k8_profile/):
   k8_cluster_profile.csv       tidy cluster x feature profile (medians,
-                                ratios, standardized diffs, percentiles)
+                                ratios, standardized diffs, percentiles),
+                                with persona_name
   pca_loadings.csv             Feature x PC loadings
   k8_persona_fingerprint.csv   wide cluster x feature standardized-deviation
                                 matrix (the same standardized diffs, pivoted)
@@ -102,6 +108,26 @@ N_INIT = 20
 GMM_COVARIANCE_TYPE = "spherical"
 N_LOADING_PCS = 8  # printed/saved loadings table width; PC1-3 are the ones
                     # actually asked for, the rest are included for free.
+
+# PROVISIONAL persona names, assigned from the real run's fingerprint +
+# outcome_summary + commission_tier_crosstab (cluster IDs confirmed against
+# that actual run, not synthetic data) -- not yet validated against forward
+# realized outcomes (Persona(t) -> Performance(t+1..n)), so treat these as
+# revisable working labels, not final business names. KMeans with a fixed
+# random_state/n_init is deterministic given the same input, so cluster ID 0
+# will keep meaning the same thing across reruns on the SAME underlying
+# data/feature set -- re-verify this mapping against a fresh fingerprint
+# before trusting it if the upstream snapshot or selected_cols ever changes.
+PERSONA_NAMES = {
+    0: "Core Reliable Majority",
+    1: "Strained High-Earners",
+    2: "Established Repeat Risk",
+    3: "New & Already Struggling",
+    4: "Elite Quality, Underleveraged",
+    5: "Flagship Power Users",
+    6: "Dormant Legacy Borrowers",
+    7: "Mainstream Elevated Risk",
+}
 
 REPO = Path(__file__).resolve().parent.parent
 ENGINE_OUTPUT_PATH = REPO / "output" / "engine_test_output.csv"
@@ -210,7 +236,10 @@ def main() -> None:
 
     ari = adjusted_rand_score(kmeans_labels, gmm_labels)
     nmi = normalized_mutual_info_score(kmeans_labels, gmm_labels)
-    print(f"  KMeans cluster sizes: {kmeans_labels.value_counts().sort_index().to_dict()}")
+    print("  KMeans cluster sizes:")
+    for cluster_id, size in kmeans_labels.value_counts().sort_index().items():
+        name = PERSONA_NAMES.get(cluster_id, "(unnamed)")
+        print(f"    C{cluster_id} {name:32s} n={size:,}")
     print(f"  KMeans vs GMM-{GMM_COVARIANCE_TYPE} agreement at K={K}: ARI={ari:.3f} NMI={nmi:.3f}")
 
     # ── Artifact 1: PCA loadings ────────────────────────────────────────────
@@ -232,6 +261,7 @@ def main() -> None:
     # ── Artifact 2 + 3: cluster profile (tidy) + persona fingerprint (wide) ─
     raw_features = feat[selected_cols].copy()
     profile = _standardized_profile(raw_features, kmeans_labels)
+    profile.insert(1, "persona_name", profile["persona_cluster"].map(PERSONA_NAMES))
     profile_path = OUT_DIR / "k8_cluster_profile.csv"
     profile.to_csv(profile_path, index=False)
     print(f"\n  wrote {profile_path} ({len(profile)} rows = {K} clusters x {len(selected_cols)} features)")
@@ -239,8 +269,9 @@ def main() -> None:
     fingerprint = profile.pivot(index="persona_cluster", columns="feature", values="standardized_diff")
     fingerprint = fingerprint[selected_cols]  # stable, deliberate column order (not alphabetical)
     sizes = kmeans_labels.value_counts().sort_index()
-    fingerprint.insert(0, "n_borrowers", sizes)
-    fingerprint.insert(1, "pct_of_population", (sizes / n_active * 100).round(2))
+    fingerprint.insert(0, "persona_name", pd.Series(PERSONA_NAMES))
+    fingerprint.insert(1, "n_borrowers", sizes)
+    fingerprint.insert(2, "pct_of_population", (sizes / n_active * 100).round(2))
     fingerprint_path = OUT_DIR / "k8_persona_fingerprint.csv"
     fingerprint.to_csv(fingerprint_path)
     print(f"  wrote {fingerprint_path} ({fingerprint.shape[0]} clusters x {fingerprint.shape[1]} columns)")
@@ -298,6 +329,7 @@ def main() -> None:
     sheets: dict[str, pd.DataFrame] = {}
 
     size_tbl = pd.DataFrame({
+        "persona_name": pd.Series(PERSONA_NAMES),
         "n_borrowers": sizes,
         "pct_of_population": (sizes / n_active * 100).round(2),
     })
@@ -363,6 +395,7 @@ def main() -> None:
         "agent_msisdn": df["agent_msisdn"],
         "phonenumber": df["phonenumber"],
         "persona_cluster": kmeans_labels,
+        "persona_name": kmeans_labels.map(PERSONA_NAMES),
         f"gmm_{GMM_COVARIANCE_TYPE}_cluster": gmm_labels,
     })
     assignments_path = OUT_DIR / "k8_cluster_assignments.csv"
