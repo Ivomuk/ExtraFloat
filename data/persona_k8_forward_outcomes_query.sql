@@ -55,9 +55,21 @@
 -- after digit-normalization) via
 -- scripts/analyze_persona_k8_forward_outcomes.py.
 --
--- FIRST DRAFT -- not yet run against real data. Sanity-check row counts
--- and a handful of known agents before trusting the output, matching this
--- project's established write-code/run-on-real-data/paste-back workflow.
+-- FIX HISTORY
+--   fwd_new_loans_closed_good_count / fwd_new_loans_closed_bad_count --
+--   a real run on the full population (143,217 borrowers, 42-day window)
+--   came back with closed_bad_count_total == 0 for every one of the 8
+--   personas, despite fwd_any_bad_3dpd_rate_pct showing 14-86% bad rates
+--   for that same population. Root cause: these two columns classified a
+--   loan as good/bad using days_aging off its CLOSURE row only, and
+--   loan_state_daily almost certainly resets days_aging once a loan
+--   reaches SETTLED/CLOSED/OVERPAID (there's no "current" aging state for
+--   a closed loan) -- so every closed loan silently read as "never late,"
+--   regardless of how overdue it ran beforehand. Fixed in the
+--   loan_worst_aging_in_window CTE (step 4b): now takes the MAX
+--   days_aging across EVERY daily row that loan has in the window, the
+--   same approach step 7's fwd_any_bad_3dpd already used correctly.
+--   Every other column was unaffected by this bug.
 -- =============================================================================
 
 WITH
@@ -148,18 +160,47 @@ loan_final_state AS (
 ),
 
 -- ---------------------------------------------------------------------
+-- 4b. Worst-ever days_aging each loan reached ANYWHERE in the window --
+--     NOT its closure-row value. A real run surfaced why this matters:
+--     fwd_new_loans_closed_bad_count came back exactly 0 for every single
+--     persona despite fwd_any_bad_3dpd_rate_pct (step 7, which already
+--     takes a MAX across every daily row) showing 14-86% bad rates for
+--     the same population. Root cause: loan_state_daily almost certainly
+--     resets days_aging to 0/NULL once a loan reaches SETTLED/CLOSED/
+--     OVERPAID -- "days currently aging" is undefined for a closed loan
+--     -- so reading days_aging off only the closure row (as step 5 used
+--     to) silently classifies every closed loan as "never late"
+--     regardless of how overdue it ran beforehand. Fixed by computing
+--     the worst value reached across ALL of that loan's rows in the
+--     window, mirroring step 7's own (correct) approach, and joining it
+--     into classified_loans below instead of trusting the closure row.
+-- ---------------------------------------------------------------------
+loan_worst_aging_in_window AS (
+    SELECT
+        customer_msisdn,
+        loan_uid,
+        MAX(COALESCE(days_aging, 0)) AS worst_days_aging_in_window
+    FROM loans_in_window
+    GROUP BY customer_msisdn, loan_uid
+),
+
+-- ---------------------------------------------------------------------
 -- 5. Classify each loan touching the window as NEW (originated after t0)
 --    or CARRIED_OVER (already open at or before t0).
 -- ---------------------------------------------------------------------
 classified_loans AS (
     SELECT
         lfs.*,
+        wla.worst_days_aging_in_window,
         CASE
             WHEN lfs.current_loan_start_date > w.t0 THEN 'new'
             ELSE 'carried_over'
         END AS loan_window_role
     FROM loan_final_state lfs
     CROSS JOIN window_bounds w
+    JOIN loan_worst_aging_in_window wla
+      ON wla.customer_msisdn = lfs.customer_msisdn
+     AND wla.loan_uid = lfs.loan_uid
 ),
 
 -- ---------------------------------------------------------------------
@@ -175,12 +216,12 @@ new_loan_aggregates AS (
         COUNT_IF(
             closure_date IS NOT NULL
             AND loan_status IN ('SETTLED', 'CLOSED', 'OVERPAID')
-            AND COALESCE(days_aging, 0) <= 3
+            AND worst_days_aging_in_window <= 3
         ) AS fwd_new_loans_closed_good_count,
         COUNT_IF(
             closure_date IS NOT NULL
             AND loan_status IN ('SETTLED', 'CLOSED', 'OVERPAID')
-            AND COALESCE(days_aging, 0) > 3
+            AND worst_days_aging_in_window > 3
         ) AS fwd_new_loans_closed_bad_count
     FROM classified_loans
     WHERE loan_window_role = 'new'
