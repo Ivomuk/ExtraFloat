@@ -21,6 +21,13 @@ payment_value_*, payment_cust_*, cust_1m/6m, cash_out_cust_*) -- so a
 single run tells you exactly which of these are safe to add as clustering
 features and which aren't.
 
+Also flags constant/zero-variance columns (a single distinct value across
+the whole file), not just NaN-missingness. A May-2026 EDA sample showed
+revenue_1m/revenue_3m/revenue_6m at 0% missing but Distinct=1, value
+always "0.0" -- i.e. functionally as dead as 100% missing despite passing
+a naive missingness check. Checking only isna() would silently repeat
+that mistake against the real file.
+
 Usage:
     python scripts\\check_mart_column_completeness.py
     python scripts\\check_mart_column_completeness.py --transaction-file data\\mfs_daily_agent_mart_20260731.csv
@@ -81,7 +88,19 @@ def main(argv: list[str] | None = None) -> None:
         s = df[col]
         n_missing = int(s.isna().sum())
         pct_missing = round(n_missing / n_rows * 100, 2) if n_rows else float("nan")
-        row = {"column": col, "pct_missing": pct_missing, "n_missing": n_missing, "dtype": str(s.dtype)}
+        non_null = s.dropna()
+        n_distinct = int(non_null.nunique())
+        is_constant = n_distinct <= 1
+        constant_value = non_null.iloc[0] if is_constant and len(non_null) else None
+        row = {
+            "column": col,
+            "pct_missing": pct_missing,
+            "n_missing": n_missing,
+            "dtype": str(s.dtype),
+            "n_distinct": n_distinct,
+            "is_constant": is_constant,
+            "constant_value": constant_value,
+        }
         numeric = pd.to_numeric(s, errors="coerce")
         if numeric.notna().any():
             row["median"] = numeric.median()
@@ -93,10 +112,17 @@ def main(argv: list[str] | None = None) -> None:
         print(summary.to_string(index=False))
 
     fully_missing = summary[summary["pct_missing"] == 100.0]["column"].tolist()
+    constant = summary[summary["is_constant"] & (summary["pct_missing"] < 100.0)]
     if fully_missing:
         print(f"\n  100% MISSING -- do not use these: {fully_missing}")
     else:
         print("\n  No column in this list is 100% missing.")
+
+    if len(constant):
+        details = [f"{r.column} (always {r.constant_value!r})" for r in constant.itertuples()]
+        print(f"  CONSTANT / ZERO-VARIANCE -- not missing but functionally dead, do not use these: {details}")
+    else:
+        print("  No column in this list is constant.")
 
 
 if __name__ == "__main__":
