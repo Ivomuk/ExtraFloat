@@ -114,7 +114,9 @@ def main(argv: list[str] | None = None) -> None:
         print("\n=== Load forward-window outcomes ===")
         fwd = pd.read_csv(args.forward_outcomes_file)
         fwd["_id"] = digits(fwd["customer_msisdn"])
-        fwd_cols = [c for c in ["fwd_any_bad_3dpd", "fwd_worst_days_aging"] if c in fwd.columns]
+        fwd_cols = [c for c in ["fwd_any_bad_3dpd", "fwd_worst_days_aging",
+                                 "fwd_new_loans_closed_good_count", "fwd_new_loans_closed_bad_count"]
+                    if c in fwd.columns]
         if not fwd_cols:
             print("  WARNING: neither fwd_any_bad_3dpd nor fwd_worst_days_aging found -- "
                   "PD-band tables will have no forward columns.")
@@ -162,7 +164,19 @@ def main(argv: list[str] | None = None) -> None:
             sub = df.loc[idx]
             row = {"pd_band": band, "n": len(sub), "pct_of_group": round(len(sub) / len(df) * 100, 2)}
             if "fwd_any_bad_3dpd" in sub.columns:
-                row["fwd_bad_rate_pct"] = round(sub["fwd_any_bad_3dpd"].mean() * 100, 2) if sub["fwd_any_bad_3dpd"].notna().any() else None
+                # Any-loan-any-day measure -- mechanically sensitive to loan
+                # VOLUME, not just per-loan risk (the same "C5 volume effect,
+                # not a quality problem" pattern found earlier this session:
+                # a borrower taking many new loans in the window has many
+                # more chances to trip this flag even if each loan is safe).
+                # Reported alongside the volume-robust closed-loan rate below
+                # so the two don't get conflated.
+                row["fwd_any_bad_3dpd_rate_pct"] = round(sub["fwd_any_bad_3dpd"].mean() * 100, 2) if sub["fwd_any_bad_3dpd"].notna().any() else None
+            if {"fwd_new_loans_closed_good_count", "fwd_new_loans_closed_bad_count"} <= set(sub.columns):
+                good = sub["fwd_new_loans_closed_good_count"].sum()
+                bad = sub["fwd_new_loans_closed_bad_count"].sum()
+                row["fwd_closed_loan_bad_rate_pct"] = round(bad / (good + bad) * 100, 2) if (good + bad) > 0 else None
+                row["fwd_closed_loan_n"] = int(good + bad)
             if "fwd_worst_days_aging" in sub.columns:
                 row["fwd_worst_days_aging_median"] = sub["fwd_worst_days_aging"].median()
             top_personas = sub["persona_name"].value_counts(normalize=True).head(3)
@@ -185,11 +199,16 @@ def main(argv: list[str] | None = None) -> None:
     band_breakdown(merged, f"full population (n={len(merged):,})", "pd_band_breakdown_full_population.csv")
 
     print(
-        "\nReading this: Table 3's fwd_bad_rate_pct column, read band-by-band, is the monotonicity check -- "
-        "if it rises steadily with the PD band, the continuous cal_pd score already carries real "
-        "information the 4-tier bucketing discards, and tier boundaries should be set where that rate "
-        "changes materially, not at round PD numbers. top_personas shows which personas actually make up "
-        "each band, rather than assuming a persona's modal tier describes all of it."
+        "\nReading this: use fwd_closed_loan_bad_rate_pct (volume-robust -- bad / (good+bad) among loans "
+        "that actually closed in the window) as the primary monotonicity check, not "
+        "fwd_any_bad_3dpd_rate_pct alone. The any-bad measure can rise at the SAFEST PD bands purely "
+        "because the safest borrowers often take the most new loans (more chances to trip a 3dpd flag on "
+        "any one of them) -- the same volume artifact found earlier in this persona analysis, now showing "
+        "up by PD band instead of by persona. Check fwd_closed_loan_n at the low end before trusting either "
+        "rate there; a small closed-loan count makes the rate noisy regardless of direction. Tier "
+        "boundaries should be set where the closed-loan rate changes materially, not at round PD numbers. "
+        "top_personas shows which personas actually make up each band, rather than assuming a persona's "
+        "modal tier describes all of it."
     )
 
 
