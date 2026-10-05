@@ -91,6 +91,12 @@ def load_and_join() -> pd.DataFrame:
         # check_mart_column_completeness.py -- 0% missing, not constant.
         "cash_in_vol_1m", "cash_in_vol_3m", "cash_in_value_1m", "cash_in_value_3m",
         "payment_vol_1m", "payment_value_1m", "payment_value_3m",
+        # Customers served -- cust_3m is already above; cust_1m added so
+        # build_features() can derive a 1m-vs-3m trend the same way as
+        # float_util_value_1m_to_3m_ratio. cust_6m deliberately not added,
+        # matching the 3m-only magnitude convention used for cash_out/
+        # payment/float_util -- no feature here currently reaches past 3m.
+        "cust_1m",
     ]
     # rev_1m/rev_3m dropped -- 100% missing in the real mart export (see
     # build_features()'s comment on the removed rev_1m_to_3m_ratio feature).
@@ -222,6 +228,10 @@ def build_features(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
     feat["float_util_vol_3m"] = df["cash_in_vol_3m"] + df["payment_vol_3m"]
     feat["float_util_value_3m"] = float_util_value_3m
     feat["float_util_value_1m_to_3m_ratio"] = float_util_value_1m / (float_util_value_3m + eps)
+
+    # Customers served -- cust_3m magnitude is already above; add the
+    # 1m-vs-3m trend, same convention as float_util_value_1m_to_3m_ratio.
+    feat["cust_1m_to_3m_ratio"] = df["cust_1m"] / (df["cust_3m"] + eps)
 
     # rev_1m_to_3m_ratio removed -- real-data check against the actual July
     # mart file found rev_1m/rev_3m AND their revenue_1m/revenue_3m
