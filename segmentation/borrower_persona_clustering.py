@@ -83,9 +83,10 @@ def load_and_join() -> pd.DataFrame:
     momo_cols = [
         "agent_msisdn", "commission", "account_balance",
         "cash_out_vol_3m", "cash_out_value_3m",
-        "payment_vol_3m", "cust_3m",
-        "rev_1m", "rev_3m", "activation_dt",
+        "payment_vol_3m", "cust_3m", "activation_dt",
     ]
+    # rev_1m/rev_3m dropped -- 100% missing in the real mart export (see
+    # build_features()'s comment on the removed rev_1m_to_3m_ratio feature).
     # Column names confirmed against BORROWER_LIMIT_REQUIRED_COLUMNS in
     # extrafloat/engine/extrafloat_limit_engine_features.py, this repo's own
     # established schema for borrower_history-family files. The 24h variant
@@ -185,7 +186,6 @@ def load_and_join() -> pd.DataFrame:
 
 
 def build_features(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
-    eps = 1.0
     feat = pd.DataFrame(index=df.index)
 
     # -- Capacity --
@@ -202,7 +202,17 @@ def build_features(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
     feat["cash_out_value_3m"] = df["cash_out_value_3m"]
     feat["payment_vol_3m"] = df["payment_vol_3m"]
     feat["cust_3m"] = df["cust_3m"]
-    feat["rev_1m_to_3m_ratio"] = df["rev_1m"] / (df["rev_3m"] + eps)
+    # rev_1m_to_3m_ratio removed -- real-data check against the actual July
+    # mart file found rev_1m/rev_3m AND their revenue_1m/revenue_3m
+    # near-duplicates ALL 100% missing (confirmed via an EDA profiling
+    # report on a May sample for the rev_*/revenue_* naming confusion, then
+    # directly by the user for the real July file including revenue_*).
+    # No usable revenue-trend source column exists in this mart export today
+    # under either name. This was already contributing nothing -- it never
+    # survived correlation-pruning into the real K=8 fit's selected_cols --
+    # so removing it changes no existing result, just removes dead code
+    # computing a ratio from two always-null columns. Re-add once the mart
+    # export has a populated revenue column at 1m/3m granularity.
 
     # activation_dt is stored as a plain YYYYMMDD float (e.g. 20240913.0) --
     # pd.to_datetime without an explicit format silently treats a bare
