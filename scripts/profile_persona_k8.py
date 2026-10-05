@@ -362,7 +362,14 @@ def main() -> None:
     engine_path = Path(ENGINE_OUTPUT_PATH)
     held_out_outcome_cols = []
     if engine_path.exists():
-        wanted_cols = ["msisdn", "assigned_limit", "risk_tier", "risk_score"]
+        # cal_pd (NOT "risk_score" -- that column doesn't exist in the real
+        # engine output; see run_credit_risk_pipeline.py's own "cal_pd"
+        # naming) is the actual calibrated PD probability the engine
+        # thresholds into risk_tier. The previous "risk_score" name silently
+        # matched nothing against a real engine_test_output.csv, so cal_pd
+        # never made it into outcome_summary -- this was a naming bug, not
+        # a missing-data gap.
+        wanted_cols = ["msisdn", "assigned_limit", "risk_tier", "cal_pd"]
         available_cols = set(pd.read_csv(engine_path, nrows=0).columns)
         missing_cols = [c for c in wanted_cols if c not in available_cols]
         read_cols = [c for c in wanted_cols if c in available_cols]
@@ -372,11 +379,11 @@ def main() -> None:
         eng["_id"] = digits(eng["msisdn"])
         eng = eng.drop(columns=["msisdn"]).set_index("_id")
         val = val.join(eng, how="left")
-        held_out_outcome_cols = [c for c in ["assigned_limit", "risk_tier", "risk_score"] if c in val.columns]
+        held_out_outcome_cols = [c for c in ["assigned_limit", "risk_tier", "cal_pd"] if c in val.columns]
         print(f"  joined {ENGINE_OUTPUT_PATH.name}: {held_out_outcome_cols} "
               f"(these are TRUE held-out validation signals -- never touched the clustering fit)")
     else:
-        print(f"  WARNING: {ENGINE_OUTPUT_PATH} not found -- skipping assigned_limit/risk_tier/risk_score "
+        print(f"  WARNING: {ENGINE_OUTPUT_PATH} not found -- skipping assigned_limit/risk_tier/cal_pd "
               f"held-out validation columns. Run a credit-engine pass first for the strongest validation signal.")
 
     sheets: dict[str, pd.DataFrame] = {}
@@ -416,6 +423,17 @@ def main() -> None:
             if col == "risk_tier":
                 mode = sub[col].mode()
                 row[f"{col}_mode"] = mode.iat[0] if not mode.empty else None
+            elif col == "cal_pd":
+                # Distribution, not just a point estimate -- a tier_mode
+                # match (e.g. C4 and C6 both "tier_2") can hide a real gap
+                # in the underlying continuous score that the engine's
+                # 4-bucket tiering discards. mean/median/std here is what
+                # actually answers whether that gap exists.
+                row["cal_pd_mean"] = sub[col].mean()
+                row["cal_pd_median"] = sub[col].median()
+                row["cal_pd_std"] = sub[col].std()
+                row["cal_pd_p25"] = sub[col].quantile(0.25)
+                row["cal_pd_p75"] = sub[col].quantile(0.75)
             else:
                 row[f"{col}_median"] = sub[col].median()
             row[f"{col}_used_in_clustering"] = col in used_in_clustering
