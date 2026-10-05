@@ -74,8 +74,9 @@ import numpy as np
 import pandas as pd
 from sklearn.isotonic import IsotonicRegression
 
-from segmentation.borrower_persona_clustering import digits  # noqa: E402
 from extrafloat.engine.extrafloat_limit_engine_caps import DEFAULT_CAP_CONFIG  # noqa: E402
+from extrafloat.engine.extrafloat_shadow_risk_multiplier import _policy_3_hybrid  # noqa: E402
+from segmentation.borrower_persona_clustering import digits  # noqa: E402
 
 REPO = Path(__file__).resolve().parent.parent
 ASSIGNMENTS_PATH = REPO / "segmentation_outputs" / "persona_k8_profile" / "k8_cluster_assignments.csv"
@@ -113,13 +114,11 @@ def _policy_2_linear(r: np.ndarray, r_min_obs: float, r_max: float, m_max: float
     return m_max - (m_max - m_min) * np.clip((r - r_min_obs) / span, 0, 1)
 
 
-def _policy_3_hybrid(r: np.ndarray, r_plateau: float, r_floor: float, m_max: float, m_min: float) -> np.ndarray:
-    out = np.full_like(r, m_max, dtype=float)
-    mask = r > r_plateau
-    span = max(r_floor - r_plateau, 1e-9)
-    out[mask] = m_max - (m_max - m_min) * np.clip((r[mask] - r_plateau) / span, 0, 1)
-    out[r > r_floor] = m_min
-    return out
+# _policy_3_hybrid moved to extrafloat.engine.extrafloat_shadow_risk_multiplier
+# (imported above) -- it's now also the live shadow-deployment policy
+# function, so this repo's scripts/-depends-on-extrafloat/engine/ layering
+# convention means the production copy is the source of truth and this
+# script imports it rather than defining its own.
 
 
 def _summarize(df: pd.DataFrame, group_col: str | None) -> pd.DataFrame:

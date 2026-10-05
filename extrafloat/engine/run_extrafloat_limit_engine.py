@@ -1,3 +1,5 @@
+import logging
+
 import numpy as np
 import pandas as pd
 
@@ -14,6 +16,13 @@ from extrafloat.engine.extrafloat_limit_engine_caps import (
     compute_recent_usage_cap,
     compute_risk_cap,
 )
+from extrafloat.engine.extrafloat_shadow_risk_multiplier import (
+    SHADOW_OUTPUT_COLUMNS,
+    STATUS_UNEXPECTED_ERROR,
+    compute_shadow_risk_multiplier,
+)
+
+logger = logging.getLogger(__name__)
 
 # compute_risk_cap() derives risk_score internally from component features
 # (on_time_repayment_rate, lifetime_default_rate, etc.), so no columns are
@@ -72,7 +81,7 @@ FINAL_OUTPUT_COLUMNS = [
     "has_unresolved_loan_at_snapshot",
     "active_loan_days_aging_at_snapshot",
     "anomaly_open_at_snapshot",
-]
+] + SHADOW_OUTPUT_COLUMNS
 
 
 def validate_required_columns(features_df):
@@ -172,6 +181,8 @@ def run_extrafloat_limit_engine(
     config=None,
     keep_intermediate=True,
     validate_inputs=True,
+    shadow_artifacts_dir=None,
+    run_id=None,
 ):
     cfg = _get_config(config)
     _validate_config(cfg)  # validates tier thresholds + weight sums
@@ -187,6 +198,27 @@ def run_extrafloat_limit_engine(
     df = combine_caps(df, cfg)
     df = apply_policy_adjustments(df, cfg)
     df = finalize_limits(df, cfg)
+
+    # Shadow continuous risk multiplier: additive, read-only, never affects
+    # any column above. Belt-and-braces try/except beyond the module's own
+    # internal safety -- a bug inside compute_shadow_risk_multiplier must
+    # never take down the live engine call, but (per the "never fail
+    # silently" requirement) the fallback logs loudly rather than swallowing.
+    try:
+        df = compute_shadow_risk_multiplier(df, artifacts_dir=shadow_artifacts_dir, config=cfg, run_id=run_id)
+    except Exception:
+        logger.exception(
+            "run_extrafloat_limit_engine: unexpected error computing shadow risk multiplier "
+            "(shadow_artifacts_dir=%s run_id=%s) -- live engine output is unaffected; "
+            "shadow columns filled with NaN/%s",
+            shadow_artifacts_dir,
+            run_id,
+            STATUS_UNEXPECTED_ERROR,
+        )
+        for col in SHADOW_OUTPUT_COLUMNS:
+            df[col] = np.nan
+        df["shadow_status"] = STATUS_UNEXPECTED_ERROR
+
     df = _trim_output_columns(df, keep_intermediate=keep_intermediate)
     return df
 

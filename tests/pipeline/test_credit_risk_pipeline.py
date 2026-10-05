@@ -1093,6 +1093,159 @@ def test_preflight_raises_when_no_checksums_and_not_allow_unverified(tmp_path):
         _check_artifacts(tmp_path, allow_unverified=False)
 
 
+def _write_fitted_shadow_artifact(artifacts_dir):
+    """Fit a tiny real isotonic model and write a valid shadow artifact
+    pair into artifacts_dir -- same artifacts_dir the pipeline's own
+    (mocked-out) _check_artifacts looks at, since the shadow artifact is
+    deliberately co-located with the PD model's own joblib files."""
+    import json as _json
+
+    import joblib as _joblib
+    from sklearn.isotonic import IsotonicRegression
+
+    from extrafloat.engine.extrafloat_shadow_risk_multiplier import (
+        ISOTONIC_METADATA_FILENAME,
+        ISOTONIC_MODEL_FILENAME,
+    )
+
+    iso = IsotonicRegression(y_min=0.0, y_max=1.0, increasing=True, out_of_bounds="clip")
+    iso.fit([0.0, 0.1, 0.25, 0.4, 0.6, 0.8, 1.0], [0.0, 0.03, 0.0754, 0.12, 0.18, 0.22, 0.25])
+    r_plateau = float(iso.predict([0.25])[0])
+    _joblib.dump(iso, artifacts_dir / ISOTONIC_MODEL_FILENAME)
+    (artifacts_dir / ISOTONIC_METADATA_FILENAME).write_text(
+        _json.dumps({"version": "pipeline_test_v0", "cal_pd_plateau": 0.25, "r_plateau": r_plateau})
+    )
+
+
+# -----------------------------------------------------------------------------
+# 11. Shadow continuous risk multiplier, threaded through the pipeline
+# -----------------------------------------------------------------------------
+
+
+def test_shadow_columns_present_without_keep_intermediate_when_artifact_exists(tmp_path):
+    """Shadow columns must survive keep_intermediate=False (the pipeline's
+    actual CLI default) when a real shadow artifact is present in
+    artifacts_dir -- they are listed directly in FINAL_OUTPUT_COLUMNS, not
+    gated behind --keep-intermediate."""
+    from extrafloat.engine.extrafloat_shadow_risk_multiplier import SHADOW_OUTPUT_COLUMNS
+    from run_credit_risk_pipeline import run_credit_risk_pipeline
+
+    _write_fitted_shadow_artifact(tmp_path)
+
+    n = 5
+    msisdn_list = [f"256700{i:06d}" for i in range(n)]
+    df_features = _minimal_features_df(n=n)
+    pd_scored = _make_pd_scored(msisdn_list)  # all agents have cal_pd
+
+    with (
+        patch("run_credit_risk_pipeline._check_artifacts"),
+        patch(
+            "run_credit_risk_pipeline.pd.read_csv", return_value=pd.DataFrame({"agent_msisdn": msisdn_list})
+        ),
+        patch("run_credit_risk_pipeline.load_transaction_capacity_features", return_value=MagicMock()),
+        patch("run_credit_risk_pipeline.load_loan_summary_recent_features", return_value=MagicMock()),
+        patch("run_credit_risk_pipeline.load_borrower_limit_features", return_value=MagicMock()),
+        patch("run_credit_risk_pipeline.run_inference_pipeline", return_value=pd_scored),
+        patch("run_credit_risk_pipeline.build_extrafloat_limit_engine_features", return_value=df_features),
+    ):
+        result = run_credit_risk_pipeline(
+            transaction_file="dummy.csv",
+            loan_file="dummy.csv",
+            borrower_file="dummy.csv",
+            artifacts_dir=str(tmp_path),
+            keep_intermediate=False,
+        )
+
+    for col in SHADOW_OUTPUT_COLUMNS:
+        assert col in result.columns, f"{col} missing from trimmed output"
+    assert (result["shadow_status"] == "ok").all()
+    assert result["shadow_calibrated_risk"].notna().all()
+    # combined_cap stays trimmed -- shadow didn't widen FINAL_OUTPUT_COLUMNS
+    # beyond the intended shadow columns.
+    assert "combined_cap" not in result.columns
+
+
+def test_shadow_columns_present_and_nan_when_artifact_missing(tmp_path):
+    """No shadow artifact in artifacts_dir -> live decision is unaffected,
+    shadow columns are present but NaN/skipped, and combined_cap is still
+    absent under keep_intermediate=False."""
+    from run_credit_risk_pipeline import run_credit_risk_pipeline
+
+    # tmp_path deliberately has no shadow joblib/metadata pair.
+    n = 5
+    msisdn_list = [f"256700{i:06d}" for i in range(n)]
+    df_features = _minimal_features_df(n=n)
+    pd_scored = _make_pd_scored(msisdn_list)
+
+    with (
+        patch("run_credit_risk_pipeline._check_artifacts"),
+        patch(
+            "run_credit_risk_pipeline.pd.read_csv", return_value=pd.DataFrame({"agent_msisdn": msisdn_list})
+        ),
+        patch("run_credit_risk_pipeline.load_transaction_capacity_features", return_value=MagicMock()),
+        patch("run_credit_risk_pipeline.load_loan_summary_recent_features", return_value=MagicMock()),
+        patch("run_credit_risk_pipeline.load_borrower_limit_features", return_value=MagicMock()),
+        patch("run_credit_risk_pipeline.run_inference_pipeline", return_value=pd_scored),
+        patch("run_credit_risk_pipeline.build_extrafloat_limit_engine_features", return_value=df_features),
+    ):
+        result = run_credit_risk_pipeline(
+            transaction_file="dummy.csv",
+            loan_file="dummy.csv",
+            borrower_file="dummy.csv",
+            artifacts_dir=str(tmp_path),
+            keep_intermediate=False,
+        )
+
+    assert "shadow_status" in result.columns
+    assert (result["shadow_status"] == "skipped_missing_artifact").all()
+    assert result["shadow_calibrated_risk"].isna().all()
+    assert "combined_cap" not in result.columns
+    # Live decision columns are present and unaffected regardless of shadow.
+    assert result["assigned_limit"].notna().all()
+    assert result["risk_tier"].notna().all()
+
+
+def test_pipeline_threads_artifacts_dir_to_shadow_call(tmp_path):
+    """run_credit_risk_pipeline() passes its own artifacts_dir straight
+    through to compute_shadow_risk_multiplier() -- spied via wraps so the
+    real computation still runs, only the call arguments are inspected."""
+    from extrafloat.engine import run_extrafloat_limit_engine as rele_module
+    from run_credit_risk_pipeline import run_credit_risk_pipeline
+
+    _write_fitted_shadow_artifact(tmp_path)
+
+    n = 3
+    msisdn_list = [f"256700{i:06d}" for i in range(n)]
+    df_features = _minimal_features_df(n=n)
+    pd_scored = _make_pd_scored(msisdn_list)
+
+    with (
+        patch("run_credit_risk_pipeline._check_artifacts"),
+        patch(
+            "run_credit_risk_pipeline.pd.read_csv", return_value=pd.DataFrame({"agent_msisdn": msisdn_list})
+        ),
+        patch("run_credit_risk_pipeline.load_transaction_capacity_features", return_value=MagicMock()),
+        patch("run_credit_risk_pipeline.load_loan_summary_recent_features", return_value=MagicMock()),
+        patch("run_credit_risk_pipeline.load_borrower_limit_features", return_value=MagicMock()),
+        patch("run_credit_risk_pipeline.run_inference_pipeline", return_value=pd_scored),
+        patch("run_credit_risk_pipeline.build_extrafloat_limit_engine_features", return_value=df_features),
+        patch.object(
+            rele_module, "compute_shadow_risk_multiplier", wraps=rele_module.compute_shadow_risk_multiplier
+        ) as spy,
+    ):
+        run_credit_risk_pipeline(
+            transaction_file="dummy.csv",
+            loan_file="dummy.csv",
+            borrower_file="dummy.csv",
+            artifacts_dir=str(tmp_path),
+        )
+
+    spy.assert_called_once()
+    _, kwargs = spy.call_args
+    assert str(kwargs["artifacts_dir"]) == str(tmp_path)
+    assert kwargs["run_id"] is not None
+
+
 def test_preflight_raises_when_artifact_missing_from_manifest(tmp_path):
     """Without allow_unverified, an artifact absent from the hash map raises RuntimeError."""
     import hashlib

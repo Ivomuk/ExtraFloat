@@ -284,6 +284,15 @@ def run_credit_risk_pipeline(
     DataFrame with one row per agent:
         msisdn, assigned_limit, risk_tier, cal_pd, final_decision_reason,
         and (if keep_intermediate=True) all intermediate cap and feature columns.
+        Always also includes the shadow continuous-risk-multiplier columns
+        (shadow_status, shadow_calibrated_risk, shadow_multiplier_<scenario>,
+        shadow_limit_pre_transition_<scenario>, shadow_limit_post_transition_<scenario>,
+        etc. -- see extrafloat.engine.extrafloat_shadow_risk_multiplier.SHADOW_OUTPUT_COLUMNS),
+        computed read-only alongside the live decision and never affecting
+        assigned_limit/risk_tier. Shadow is sourced from the same artifacts_dir;
+        if the shadow calibration artifact isn't present there, these columns
+        are NaN with shadow_status explaining why (the live decision is
+        unaffected either way).
     """
     artifacts_dir = Path(artifacts_dir)
 
@@ -523,10 +532,13 @@ def run_credit_risk_pipeline(
 
     # -- Stage 6: Run credit limit engine -----------------------------------
     logger.info("Stage 6: running credit limit engine")
+    run_id = _dt.datetime.utcnow().isoformat() + "Z"
     result_df = run_extrafloat_limit_engine(
         features_df,
         config=engine_config,
         keep_intermediate=keep_intermediate,
+        shadow_artifacts_dir=artifacts_dir,
+        run_id=run_id,
     )
     logger.info(
         "Engine complete: %d agents | mean_limit=%.0f | risk_tier distribution:\n%s",
@@ -572,7 +584,7 @@ def run_credit_risk_pipeline(
     # PD output -> "7_signal_fallback") from calibration failures that now
     # propagate as exceptions rather than silent NaN.
     result_df["score_source"] = np.where(result_df["cal_pd"].notna(), "pd_model", "7_signal_fallback")
-    result_df["scored_at"] = _dt.datetime.utcnow().isoformat() + "Z"
+    result_df["scored_at"] = run_id
 
     return result_df
 

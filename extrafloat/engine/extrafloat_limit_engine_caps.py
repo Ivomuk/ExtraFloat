@@ -204,6 +204,16 @@ DEFAULT_CAP_CONFIG = {
         "regulatory_cap": 5_000_000.0,  # Bank of Uganda max transaction limit (UGX)
         "regulator": "Bank of Uganda",
     },
+    # -- Shadow continuous risk multiplier (read-only, additive) ---------------
+    # Consumed by extrafloat_shadow_risk_multiplier.compute_shadow_risk_multiplier().
+    # Purely additive -- never read by the live cap functions above, and
+    # _validate_config()/_validate_tier_config() do not inspect this key, so
+    # its presence cannot affect existing validation or live decisions.
+    "shadow": {
+        "enabled": True,
+        "transition_delta_up": 0.25,
+        "transition_delta_down": 0.25,
+    },
 }
 
 # -----------------------------------------------------------------------------
