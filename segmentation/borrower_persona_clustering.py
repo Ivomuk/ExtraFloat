@@ -84,6 +84,13 @@ def load_and_join() -> pd.DataFrame:
         "agent_msisdn", "commission", "account_balance",
         "cash_out_vol_3m", "cash_out_value_3m",
         "payment_vol_3m", "cust_3m", "activation_dt",
+        # Float utilization (business definition: cash-in + payment activity,
+        # at 1m and 3m so build_features() can derive a trend ratio the same
+        # way cure_time_trend/the removed rev_1m_to_3m_ratio do). Confirmed
+        # populated with real variance in the actual July mart export via
+        # check_mart_column_completeness.py -- 0% missing, not constant.
+        "cash_in_vol_1m", "cash_in_vol_3m", "cash_in_value_1m", "cash_in_value_3m",
+        "payment_vol_1m", "payment_value_1m", "payment_value_3m",
     ]
     # rev_1m/rev_3m dropped -- 100% missing in the real mart export (see
     # build_features()'s comment on the removed rev_1m_to_3m_ratio feature).
@@ -202,6 +209,20 @@ def build_features(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
     feat["cash_out_value_3m"] = df["cash_out_value_3m"]
     feat["payment_vol_3m"] = df["payment_vol_3m"]
     feat["cust_3m"] = df["cust_3m"]
+
+    # Float utilization (business definition): cash-in + payment activity.
+    # Magnitude at 3m, matching the existing cash_out/payment/cust
+    # 3m-only convention; a 1m-vs-3m ratio captures the trend, matching
+    # cure_time_trend/the removed rev_1m_to_3m_ratio's convention rather
+    # than feeding all 6 raw vol/value x 1m/3m/6m sums and relying on
+    # _prune_correlated_features() to drop the redundant ones.
+    eps = 1.0
+    float_util_value_1m = df["cash_in_value_1m"] + df["payment_value_1m"]
+    float_util_value_3m = df["cash_in_value_3m"] + df["payment_value_3m"]
+    feat["float_util_vol_3m"] = df["cash_in_vol_3m"] + df["payment_vol_3m"]
+    feat["float_util_value_3m"] = float_util_value_3m
+    feat["float_util_value_1m_to_3m_ratio"] = float_util_value_1m / (float_util_value_3m + eps)
+
     # rev_1m_to_3m_ratio removed -- real-data check against the actual July
     # mart file found rev_1m/rev_3m AND their revenue_1m/revenue_3m
     # near-duplicates ALL 100% missing (confirmed via an EDA profiling
