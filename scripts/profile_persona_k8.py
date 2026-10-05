@@ -133,31 +133,49 @@ N_LOADING_PCS = 8  # printed/saved loadings table width; PC1-3 are the ones
 # are replaced here based on k8_persona_fingerprint.csv's real standardized
 # diffs from THIS run, not reused positionally. Re-verify again next time
 # selected_cols changes -- this dict does not update itself.
+#
+# REVISED AGAIN (C4/C5/C7 only) after the first real
+# persona_k8_forward_outcomes_query.sql run against this same cluster
+# assignment -- exactly the "re-run as more forward data accumulates before
+# revising PERSONA_NAMES from provisional to validated" step
+# analyze_persona_k8_forward_outcomes.py's own closing note calls for.
+# C4's snapshot-time features looked average ("Stable Quality"), but its
+# realized forward severity (44-day median worst-aging, 2nd-worst of all 8)
+# says otherwise -- the snapshot missed it. C5's defining trait turned out
+# to be severity, not just elevated risk: 111-day median worst-aging, ~4x
+# the next-highest persona. C7's snapshot-time quality looked worst-in-class,
+# but realized forward risk is actually mild and infrequent (3.5-day median
+# worst-aging, one of the lowest any-bad-3dpd rates) -- "Highest-Risk"
+# overstated it relative to C0, which the forward data confirms as the
+# actual worst performer. C0/C1/C2/C3/C6 held up against this same forward
+# run and are unchanged.
 PERSONA_NAMES = {
     0: "Low-Activity Recent Defaulters",
     1: "Core Power Earners",
     2: "Mainstream Modest Activity",
     3: "New & Already Struggling",
-    4: "Churning Activity, Stable Quality",
-    5: "Churning Activity, Elevated Risk",
+    4: "Churning Activity, Latent Risk",
+    5: "Churning Activity, Severe Tail Risk",
     6: "Elite Quality, Few Loans",
-    7: "Highest-Risk Thin-File",
+    7: "Thin-File, Shallow Risk",
 }
 
 # One-line rationale behind each name above, so the "why" travels with the
 # name into every output artifact rather than staying only in chat/commit
-# history. Same provisional caveat as PERSONA_NAMES -- figures below are
-# standardized diffs (SD from population mean) read directly from this
-# run's k8_persona_fingerprint.csv.
+# history. Same provisional caveat as PERSONA_NAMES -- C0/C1/C2/C3/C6 cite
+# standardized diffs (SD from population mean) from k8_persona_fingerprint.csv;
+# C4/C5/C7 cite realized forward-outcome figures from
+# persona_k8_forward_outcomes_summary.csv instead, since that's the evidence
+# that actually changed their story.
 PERSONA_RATIONALE = {
     0: "Below-average capacity across the board; weak on-time rate (-0.57 SD) and elevated recent default (+0.76 SD) -- risky despite being small and inactive",
     1: "High commission/cash-out/loan-size (+0.6 to +0.8 SD), and genuinely good quality -- above-average on-time (+0.62 SD), below-average recent default (-0.49 SD)",
     2: "Below-average capacity, near-average loan count (-0.03 SD, not thick-file), mild quality dip (-0.21 SD on-time, +0.35 SD recent default)",
     3: "Newest tenure, fewest loans (-0.99 SD), worst-in-class on-time rate (-1.78 SD), slow cure (+1.08 SD) -- thin-file and struggling from day one",
-    4: "Near-zero capacity with a sharp 1m-vs-3m activity drop (-1.94/-2.10 SD on the float-utilization/customers-served ratios), but average credit quality",
-    5: "Same sharp 1m-vs-3m activity drop as C4 (-1.93/-2.03 SD), plus mild quality deterioration (+0.55 SD recent default, +0.48 SD cure volatility)",
+    4: "Snapshot-time quality looked average, but forward data says otherwise -- 62.71% any-bad-3dpd rate and a 44-day median worst-aging, the 2nd-worst severity of all 8 personas",
+    5: "Lowest new-loan uptake of all personas (15.8%) and by far the most severe delinquency when it does go bad -- 111-day median worst-aging, ~4x the next-highest persona",
     6: "Above-average balance/commission despite few loans (-0.87 SD); the best on-time (+1.30 SD) and default (-1.04 SD) of all 8 clusters",
-    7: "Low capacity, fewest loans (-0.77 SD), newest tenure; the single worst on-time (-1.78 SD) and recent-default (+1.74 SD) of all 8 clusters",
+    7: "Moderate closed-loan bad rate (11.33%, 2nd-worst) but one of the lowest any-bad-3dpd rates (36.83%) and the mildest severity (3.5-day median worst-aging) -- defaults are shallow and infrequent, not severe",
 }
 
 REPO = Path(__file__).resolve().parent.parent
