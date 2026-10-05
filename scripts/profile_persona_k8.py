@@ -121,29 +121,43 @@ N_LOADING_PCS = 8  # printed/saved loadings table width; PC1-3 are the ones
 # will keep meaning the same thing across reruns on the SAME underlying
 # data/feature set -- re-verify this mapping against a fresh fingerprint
 # before trusting it if the upstream snapshot or selected_cols ever changes.
+#
+# REVISED (2nd iteration) after adding float_util_vol_3m/float_util_value_3m/
+# float_util_value_1m_to_3m_ratio/cust_1m_to_3m_ratio to build_features().
+# This is exactly the "selected_cols changes" case the warning above calls
+# out: adding features changed the clustering geometry, so KMeans assigned
+# completely different real borrowers to each cluster ID than the 1st-
+# iteration run that originally earned these names -- e.g. cluster 0 went
+# from 33.70% ("majority") to 6.07% of the population. The 1st-iteration
+# names were caught stale (still describing the OLD cluster contents) and
+# are replaced here based on k8_persona_fingerprint.csv's real standardized
+# diffs from THIS run, not reused positionally. Re-verify again next time
+# selected_cols changes -- this dict does not update itself.
 PERSONA_NAMES = {
-    0: "Core Reliable Majority",
-    1: "Strained High-Earners",
-    2: "Established Repeat Risk",
+    0: "Low-Activity Recent Defaulters",
+    1: "Core Power Earners",
+    2: "Mainstream Modest Activity",
     3: "New & Already Struggling",
-    4: "Elite Quality, Underleveraged",
-    5: "Flagship Power Users",
-    6: "Dormant Legacy Borrowers",
-    7: "Mainstream Elevated Risk",
+    4: "Churning Activity, Stable Quality",
+    5: "Churning Activity, Elevated Risk",
+    6: "Elite Quality, Few Loans",
+    7: "Highest-Risk Thin-File",
 }
 
 # One-line rationale behind each name above, so the "why" travels with the
 # name into every output artifact rather than staying only in chat/commit
-# history. Same provisional caveat as PERSONA_NAMES.
+# history. Same provisional caveat as PERSONA_NAMES -- figures below are
+# standardized diffs (SD from population mean) read directly from this
+# run's k8_persona_fingerprint.csv.
 PERSONA_RATIONALE = {
-    0: "High commission tier (90% top-3), solidly good on-time/default -- the backbone segment",
-    1: "Meaningfully higher commission tier than C7, but below-average quality and a worsening trend",
-    2: "Thick-file, ~6 prior loans, consistently poor on-time/default throughout",
-    3: "Newest, mostly no-history, one large first loan, poor early signal",
-    4: "Near-perfect on-time/default, fastest cure, high tier, but very few loans",
-    5: "Near-pure diamond tier, best quality, by far the highest loan volume",
-    6: "Zero commission/balance/limit, 74.5% below-threshold, yet real loan history",
-    7: "Ordinary tier, below-average quality, largest at-risk population by sheer scale",
+    0: "Below-average capacity across the board; weak on-time rate (-0.57 SD) and elevated recent default (+0.76 SD) -- risky despite being small and inactive",
+    1: "High commission/cash-out/loan-size (+0.6 to +0.8 SD), and genuinely good quality -- above-average on-time (+0.62 SD), below-average recent default (-0.49 SD)",
+    2: "Below-average capacity, near-average loan count (-0.03 SD, not thick-file), mild quality dip (-0.21 SD on-time, +0.35 SD recent default)",
+    3: "Newest tenure, fewest loans (-0.99 SD), worst-in-class on-time rate (-1.78 SD), slow cure (+1.08 SD) -- thin-file and struggling from day one",
+    4: "Near-zero capacity with a sharp 1m-vs-3m activity drop (-1.94/-2.10 SD on the float-utilization/customers-served ratios), but average credit quality",
+    5: "Same sharp 1m-vs-3m activity drop as C4 (-1.93/-2.03 SD), plus mild quality deterioration (+0.55 SD recent default, +0.48 SD cure volatility)",
+    6: "Above-average balance/commission despite few loans (-0.87 SD); the best on-time (+1.30 SD) and default (-1.04 SD) of all 8 clusters",
+    7: "Low capacity, fewest loans (-0.77 SD), newest tenure; the single worst on-time (-1.78 SD) and recent-default (+1.74 SD) of all 8 clusters",
 }
 
 REPO = Path(__file__).resolve().parent.parent
