@@ -66,6 +66,24 @@ LIMIT_COLUMNS = {
     "shadow_conservative": "shadow_limit_post_transition_conservative",
 }
 
+# Same bucket edges/labels as check_monthly_summary_vs_assigned_limit.py and
+# check_variable_agents_vs_category_limit.py -- this repo's established
+# convention for "how close is disbursed_amount to the limit", restated here
+# (not imported) for the same independent-cross-check reason as
+# CATEGORY_LIMITS above. 90-110% is the house definition of "agreement";
+# this is not a new threshold invented for the shadow comparison.
+BUCKET_EDGES = [-0.01, 0.25, 0.50, 0.75, 0.90, 1.10, 1.25, 1.50, 2.00, 100]
+BUCKET_LABELS = [
+    "0-25% (well under)", "25-50% (under)", "50-75% (under)",
+    "75-90% (near, under)", "90-110% (AGREEMENT band)", "110-125% (near, over)",
+    "125-150% (over)", "150-200% (well over)", "200%+ (far over)",
+]
+AGREEMENT_EDGES = [-0.01, 0.50, 0.90, 1.10, 100]
+AGREEMENT_LABELS = [
+    "Well under limit (0-50%)", "Moderately under (50-90%)",
+    "Agreement band (90-110%)", "Over limit (110%+)",
+]
+
 
 def main(argv: list[str] | None = None) -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -180,19 +198,25 @@ def main(argv: list[str] | None = None) -> None:
             disbursement_cols = ["profile", "month", "disbursed_amount", "n_transactions"]
 
             # Did the agent's ACTUAL disbursement fit under each reference ceiling/limit?
+            # And by how much, as a % of that reference -- not just a yes/no flag.
+            pct_cols: dict[str, str] = {}
             for name, ref_col in reference_cols.items():
                 exceeds_col = f"exceeds_{name}_disbursed"
                 excess_col = f"excess_over_{name}_disbursed"
-                valid = known["disbursed_amount"].notna() & known[ref_col].notna()
+                pct_col = f"pct_of_{name}_disbursed"
+                valid = known["disbursed_amount"].notna() & known[ref_col].notna() & (known[ref_col] != 0)
                 if name != "category_limit" and name != "live" and "shadow_status" in known.columns:
                     valid &= known["shadow_status"] == "ok"
                 known[exceeds_col] = pd.NA
                 known[excess_col] = pd.NA
+                known[pct_col] = pd.NA
                 known.loc[valid, exceeds_col] = known.loc[valid, "disbursed_amount"] > known.loc[valid, ref_col]
                 known.loc[valid, excess_col] = (
                     known.loc[valid, "disbursed_amount"] - known.loc[valid, ref_col]
                 ).clip(lower=0)
-                disbursement_cols += [exceeds_col, excess_col]
+                known.loc[valid, pct_col] = known.loc[valid, "disbursed_amount"] / known.loc[valid, ref_col]
+                disbursement_cols += [exceeds_col, excess_col, pct_col]
+                pct_cols[name] = pct_col
 
             disb_summary_rows = []
             for name in reference_cols:
@@ -205,11 +229,36 @@ def main(argv: list[str] | None = None) -> None:
                     "n_checked": n_checked,
                     "n_exceeds": n_exceed,
                     "pct_exceeds": round(n_exceed / n_checked * 100, 4) if n_checked else float("nan"),
+                    "median_pct_of_reference": round(checked[pct_cols[name]].astype(float).median() * 100, 1)
+                    if n_checked else float("nan"),
                 })
             print(f"\n{'=' * 78}")
             print("Actual disbursed_amount vs. category ceiling / live limit / shadow limits")
             print("=" * 78)
             print(pd.DataFrame(disb_summary_rows).to_string(index=False))
+
+            print(f"\n{'=' * 78}")
+            print("How closely disbursed_amount tracks each reference -- agreement-band breakdown")
+            print(f"{'=' * 78}")
+            print("(90-110% = this repo's established 'agreement' convention, same as "
+                  "check_monthly_summary_vs_assigned_limit.py)")
+            agr_table = {}
+            for name, pct_col in pct_cols.items():
+                vals = known[pct_col].dropna().astype(float)
+                if vals.empty:
+                    continue
+                band = pd.cut(vals, bins=AGREEMENT_EDGES, labels=AGREEMENT_LABELS)
+                agr_table[name] = band.value_counts(normalize=True).reindex(AGREEMENT_LABELS) * 100
+            print(pd.DataFrame(agr_table).round(1).to_string())
+
+            print(f"\n{'=' * 78}")
+            print("Full distribution, live reference (finer bands)")
+            print("=" * 78)
+            if "live" in pct_cols:
+                vals = known[pct_cols["live"]].dropna().astype(float)
+                band = pd.cut(vals, bins=BUCKET_EDGES, labels=BUCKET_LABELS)
+                counts = band.value_counts().reindex(BUCKET_LABELS)
+                print(pd.DataFrame({"n": counts, "pct": (counts / len(vals) * 100).round(1)}).to_string())
 
     detail_cols = ["msisdn", "agent_category", "category_limit"]
     for name, col in present.items():
