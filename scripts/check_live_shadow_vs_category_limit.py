@@ -21,8 +21,21 @@ below their category ceiling; that's normal, not a violation. The only
 invariant worth checking is that neither the live nor the shadow limit
 ever EXCEEDS the ceiling for the agent's commission-based category.
 
+Optionally enriches the per-agent detail with monthly_disbursement_summary.csv
+(built by build_monthly_disbursement_summary.py from the raw fin_log
+disbursements export) -- i.e. what the agent ACTUALLY received, per
+month, for agent/months where the disbursed amount was constant across
+all of that agent's transactions. Joined on normalized msisdn; an agent
+with disbursement records in more than one month appears once per month
+(the live/shadow/category columns are a single snapshot and simply
+repeat across that agent's rows). Skipped gracefully (with a NOTE, not
+an error) if the file isn't found -- the category/live/shadow check
+above works standalone either way.
+
 Usage:
-    python scripts\\check_live_shadow_vs_category_limit.py --engine-output output\\engine_test_output.csv
+    python scripts\\check_live_shadow_vs_category_limit.py ^
+        --engine-output output\\engine_test_output.csv ^
+        --monthly-summary-file monthly_disbursement_summary.csv
 """
 
 import argparse
@@ -30,6 +43,10 @@ import sys
 from pathlib import Path
 
 import pandas as pd
+
+
+def _normalize_msisdn(s: pd.Series) -> pd.Series:
+    return s.astype(str).str.replace(r"[^0-9]", "", regex=True).replace("", pd.NA)
 
 CATEGORY_LIMITS = {
     "new bronze": 50_000,
@@ -53,6 +70,9 @@ LIMIT_COLUMNS = {
 def main(argv: list[str] | None = None) -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--engine-output", default="output/engine_test_output.csv")
+    ap.add_argument("--monthly-summary-file", default="monthly_disbursement_summary.csv",
+                     help="optional -- built by build_monthly_disbursement_summary.py; skipped with a "
+                          "NOTE if not found")
     ap.add_argument("--out", default="live_shadow_vs_category_limit.csv")
     args = ap.parse_args(argv)
 
@@ -129,9 +149,72 @@ def main(argv: list[str] | None = None) -> None:
         print(f"\n-- {name} --")
         print(tbl.round(4).to_string())
 
+    # -- Optional enrichment: what the agent ACTUALLY received -----------------
+    monthly_path = Path(args.monthly_summary_file)
+    disbursement_cols: list[str] = []
+    reference_cols = {"category_limit": "category_limit", **present}
+    if not monthly_path.exists():
+        print(f"\nNOTE: {monthly_path} not found -- skipping disbursement enrichment "
+              f"(pass --monthly-summary-file, or run build_monthly_disbursement_summary.py first).")
+    else:
+        monthly = pd.read_csv(monthly_path)
+        required_monthly = {"msisdn", "profile", "month", "disbursed_amount", "n_transactions"}
+        missing_monthly = required_monthly - set(monthly.columns)
+        if missing_monthly:
+            print(f"\nNOTE: {monthly_path} is missing {missing_monthly} -- skipping disbursement "
+                  f"enrichment. Columns present: {list(monthly.columns)}")
+        else:
+            monthly["_key"] = _normalize_msisdn(monthly["msisdn"])
+            known["_key"] = _normalize_msisdn(known["msisdn"])
+            n_before = len(known)
+            known = known.merge(
+                monthly[["_key", "profile", "month", "disbursed_amount", "n_transactions"]],
+                on="_key", how="left",
+            )
+            n_after = len(known)
+            n_with_disbursement = int(known["disbursed_amount"].notna().sum())
+            print(f"\nMerged {monthly_path.name}: {n_with_disbursement:,} agent-month row(s) matched a "
+                  f"disbursement record ({n_after - n_before:+,} rows vs. before this merge -- an agent "
+                  f"with records in more than one month now appears once per month, with the snapshot's "
+                  f"live/shadow/category columns repeated across their rows).")
+            disbursement_cols = ["profile", "month", "disbursed_amount", "n_transactions"]
+
+            # Did the agent's ACTUAL disbursement fit under each reference ceiling/limit?
+            for name, ref_col in reference_cols.items():
+                exceeds_col = f"exceeds_{name}_disbursed"
+                excess_col = f"excess_over_{name}_disbursed"
+                valid = known["disbursed_amount"].notna() & known[ref_col].notna()
+                if name != "category_limit" and name != "live" and "shadow_status" in known.columns:
+                    valid &= known["shadow_status"] == "ok"
+                known[exceeds_col] = pd.NA
+                known[excess_col] = pd.NA
+                known.loc[valid, exceeds_col] = known.loc[valid, "disbursed_amount"] > known.loc[valid, ref_col]
+                known.loc[valid, excess_col] = (
+                    known.loc[valid, "disbursed_amount"] - known.loc[valid, ref_col]
+                ).clip(lower=0)
+                disbursement_cols += [exceeds_col, excess_col]
+
+            disb_summary_rows = []
+            for name in reference_cols:
+                exceeds_col = f"exceeds_{name}_disbursed"
+                checked = known.dropna(subset=[exceeds_col])
+                n_checked = len(checked)
+                n_exceed = int(checked[exceeds_col].astype(bool).sum()) if n_checked else 0
+                disb_summary_rows.append({
+                    "reference": name,
+                    "n_checked": n_checked,
+                    "n_exceeds": n_exceed,
+                    "pct_exceeds": round(n_exceed / n_checked * 100, 4) if n_checked else float("nan"),
+                })
+            print(f"\n{'=' * 78}")
+            print("Actual disbursed_amount vs. category ceiling / live limit / shadow limits")
+            print("=" * 78)
+            print(pd.DataFrame(disb_summary_rows).to_string(index=False))
+
     detail_cols = ["msisdn", "agent_category", "category_limit"]
     for name, col in present.items():
         detail_cols += [col, f"exceeds_category_limit_{name}", f"excess_over_category_limit_{name}"]
+    detail_cols += disbursement_cols
     detail_cols += [c for c in ["risk_tier", "cal_pd", "shadow_status"] if c in known.columns]
     detail_cols = [c for c in dict.fromkeys(detail_cols) if c in known.columns]
 
