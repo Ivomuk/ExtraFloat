@@ -91,6 +91,10 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--monthly-summary-file", default="monthly_disbursement_summary.csv",
                      help="optional -- built by build_monthly_disbursement_summary.py; skipped with a "
                           "NOTE if not found")
+    ap.add_argument("--persona-assignments-file",
+                     default="segmentation_outputs/persona_k8_profile/k8_cluster_assignments.csv",
+                     help="optional -- K=8 persona assignments (phonenumber, persona_name); used only to "
+                          "break down the over-limit disbursement population; skipped with a NOTE if not found")
     ap.add_argument("--out", default="live_shadow_vs_category_limit.csv")
     args = ap.parse_args(argv)
 
@@ -260,11 +264,72 @@ def main(argv: list[str] | None = None) -> None:
                 counts = band.value_counts().reindex(BUCKET_LABELS)
                 print(pd.DataFrame({"n": counts, "pct": (counts / len(vals) * 100).round(1)}).to_string())
 
+            # -- Who does the "over limit" (actual disbursement > 110% of the --
+            # -- reference) population concentrate in? Concentrated vs. spread --
+            # -- evenly is the question this answers, not just the overall rate. --
+            persona_col = None
+            persona_path = Path(args.persona_assignments_file)
+            if not persona_path.exists():
+                print(f"\nNOTE: {persona_path} not found -- skipping persona breakdown "
+                      f"(pass --persona-assignments-file to point at it).")
+            else:
+                persona = pd.read_csv(persona_path)
+                if {"phonenumber", "persona_name"} <= set(persona.columns):
+                    persona["_key"] = _normalize_msisdn(persona["phonenumber"])
+                    persona_small = persona[["_key", "persona_name"]].drop_duplicates(subset="_key")
+                    known = known.merge(persona_small, on="_key", how="left")
+                    n_persona_matched = int(known["persona_name"].notna().sum())
+                    print(f"\nMerged {persona_path.name}: {n_persona_matched:,} / {len(known):,} rows "
+                          f"matched a K=8 persona.")
+                    persona_col = "persona_name"
+                else:
+                    print(f"\nNOTE: {persona_path} is missing phonenumber/persona_name -- skipping "
+                          f"persona breakdown. Columns present: {list(persona.columns)}")
+
+            def _group_concentration(group_col: str) -> pd.DataFrame | None:
+                parts = []
+                for name, pct_col in pct_cols.items():
+                    vals = known[[group_col, pct_col]].dropna(subset=[pct_col]).copy()
+                    if vals.empty:
+                        continue
+                    vals["_over"] = vals[pct_col].astype(float) > 1.10
+                    g = vals.groupby(group_col, observed=True)["_over"]
+                    tbl = g.agg(["size", "mean"]).rename(
+                        columns={"size": f"n_{name}", "mean": f"pct_over_{name}"}
+                    )
+                    tbl[f"pct_over_{name}"] = (tbl[f"pct_over_{name}"] * 100).round(1)
+                    parts.append(tbl)
+                if not parts:
+                    return None
+                combined = parts[0]
+                for extra in parts[1:]:
+                    combined = combined.join(extra, how="outer")
+                # Share of ALL live-reference over-limit cases contributed by each group --
+                # distinguishes "this group has a high rate" from "this group is most of the volume".
+                if "live" in pct_cols:
+                    vals = known[[group_col, pct_cols["live"]]].dropna(subset=[pct_cols["live"]]).copy()
+                    over = vals[vals[pct_cols["live"]].astype(float) > 1.10]
+                    if len(over):
+                        share = (over.groupby(group_col, observed=True).size() / len(over) * 100).round(1)
+                        combined["share_of_all_over_live"] = share.reindex(combined.index).fillna(0.0)
+                return combined
+
+            for label, group_col in [("risk_tier", "risk_tier"), ("K=8 persona", persona_col)]:
+                if group_col is None or group_col not in known.columns:
+                    continue
+                tbl = _group_concentration(group_col)
+                if tbl is None:
+                    continue
+                print(f"\n{'=' * 78}")
+                print(f"Over-limit (>110% of reference) concentration by {label}")
+                print("=" * 78)
+                print(tbl.to_string())
+
     detail_cols = ["msisdn", "agent_category", "category_limit"]
     for name, col in present.items():
         detail_cols += [col, f"exceeds_category_limit_{name}", f"excess_over_category_limit_{name}"]
     detail_cols += disbursement_cols
-    detail_cols += [c for c in ["risk_tier", "cal_pd", "shadow_status"] if c in known.columns]
+    detail_cols += [c for c in ["risk_tier", "persona_name", "cal_pd", "shadow_status"] if c in known.columns]
     detail_cols = [c for c in dict.fromkeys(detail_cols) if c in known.columns]
 
     sort_col = next(
