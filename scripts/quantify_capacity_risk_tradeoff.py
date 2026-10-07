@@ -215,6 +215,13 @@ def _excess_exposure_allocation(
             "incremental_shortfall_pct_of_forward": (
                 band_incremental / forward_disbursed * 100
             ) if forward_disbursed else float("nan"),
+            # Same quantity as the pct column above, in basis points -- the preferred
+            # presentation when total_incremental_shortfall is negative, since dividing a
+            # positive band value by a negative total produces a percentage that reads
+            # backwards (looks "favorable" when the band actually underperformed).
+            "incremental_shortfall_bps_of_forward": (
+                band_incremental / forward_disbursed * 10_000
+            ) if forward_disbursed else float("nan"),
         })
     return pd.DataFrame(rows)
 
@@ -371,15 +378,29 @@ def main(argv: list[str] | None = None) -> None:
         )
         print(f"\n-- {risk_label}: excess exposure vs. incremental shortfall, by cal_pd band --")
         print("(does where the excess exposure is GOING line up with where the incremental shortfall")
-        print(" is APPEARING? incremental_shortfall_pct_of_forward is the preferred per-band ratio --")
+        print(" is APPEARING? incremental_shortfall_bps_of_forward is the preferred per-band metric --")
         print(" not incremental/excess, for the same mismatched-denominator reason noted below.)")
-        with pd.option_context("display.float_format", "{:,.2f}".format, "display.max_columns", None, "display.width", 240):
-            print(allocation.to_string(index=False))
+
         allocation.insert(0, "driver", risk_label)
         allocation.to_csv(
             str(Path(args.out).with_name(Path(args.out).stem + f"_allocation_{over_q.replace(' ', '_')}.csv")),
             index=False,
         )
+
+        console_view = allocation.drop(columns=["driver"])
+        if standardized_incremental < 0:
+            # Dividing a positive band value by a negative total (or vice versa) produces a
+            # percentage that reads backwards -- a band that performed WORSE than expected
+            # can show a NEGATIVE "% of driver incremental shortfall," easily misread as
+            # favorable. Dropped from the console view when the total is negative; still in
+            # the CSV for anyone who wants the raw number with this caveat in hand.
+            console_view = console_view.drop(columns=["pct_of_driver_incremental_shortfall"])
+            print("  NOTE: 'pct_of_driver_incremental_shortfall' is omitted below because the driver total\n"
+                  "  is negative -- that ratio can read backwards (a worse-than-expected band can show a\n"
+                  "  negative %). Use band_incremental_shortfall (UGX) and incremental_shortfall_bps_of_forward\n"
+                  "  instead; the raw ratio is still in the CSV if needed.")
+        with pd.option_context("display.float_format", "{:,.2f}".format, "display.max_columns", None, "display.width", 240):
+            print(console_view.to_string(index=False))
 
         incr_over_forward_pct = (standardized_incremental / forward_disbursed * 100) if forward_disbursed else float("nan")
         incr_over_excess_pct = (standardized_incremental / excess_exposure * 100) if excess_exposure else float("nan")
