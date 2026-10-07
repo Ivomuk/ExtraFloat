@@ -178,10 +178,14 @@ def main(argv: list[str] | None = None) -> None:
             row[f"n_months_checked_{name}"] = len(vals)
             row[f"n_months_over_{name}"] = int((vals > OVER_LIMIT_THRESHOLD).sum())
             row[f"ever_over_{name}"] = bool((vals > OVER_LIMIT_THRESHOLD).any()) if len(vals) else pd.NA
-            row[f"worst_pct_{name}"] = float(vals.max()) if len(vals) else pd.NA
+            # float("nan"), not pd.NA -- pd.cut() chokes on pd.NA in older pandas/numpy
+            # combinations ("boolean value of NA is ambiguous"); a plain float NaN sorts
+            # correctly and pd.cut() treats it as "no band" exactly as intended.
+            row[f"worst_pct_{name}"] = float(vals.max()) if len(vals) else float("nan")
         per_agent_rows.append(row)
     ls_per_agent = pd.DataFrame(per_agent_rows)
     for name in present_pct_cols:
+        ls_per_agent[f"worst_pct_{name}"] = pd.to_numeric(ls_per_agent[f"worst_pct_{name}"], errors="coerce")
         ls_per_agent[f"over_band_{name}"] = pd.cut(
             ls_per_agent[f"worst_pct_{name}"], bins=OVER_BAND_EDGES, labels=OVER_BAND_LABELS
         )
