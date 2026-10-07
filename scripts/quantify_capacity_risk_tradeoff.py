@@ -177,6 +177,48 @@ def _pd_band_standardized_expected_shortfall(
     return total_expected, detail, missing
 
 
+def _excess_exposure_allocation(
+    df: pd.DataFrame, over_mask: pd.Series, band_col: str, band_labels: list[str],
+    band_detail: pd.DataFrame, total_excess_exposure: float, total_incremental_shortfall: float,
+) -> pd.DataFrame:
+    """Where is the excess exposure actually going, and does it line up with where the
+    incremental shortfall is appearing? Two populations can have the same total excess
+    exposure for very different reasons -- many agents each getting a modest increase, or
+    a few agents getting a very large one -- which matters for whether the right policy
+    response is a systematic capacity adjustment or an override/concentration control.
+    """
+    rows = []
+    for band in band_labels:
+        band_mask = over_mask & (df[band_col] == band)
+        n_agents = int(band_mask.sum())
+        if n_agents == 0:
+            continue
+        excess = df.loc[band_mask, "incremental_exposure"].sum()
+        match = band_detail[band_detail["cal_pd_band"] == band]
+        if len(match):
+            forward_disbursed = match["over_forward_disbursed"].iloc[0]
+            band_incremental = match["band_incremental_shortfall"].iloc[0]
+        else:
+            forward_disbursed = df.loc[band_mask, "fwd_new_loans_disbursed_ugx"].sum()
+            band_incremental = float("nan")
+        rows.append({
+            "cal_pd_band": band,
+            "n_over_agents": n_agents,
+            "excess_exposure": excess,
+            "pct_of_driver_excess_exposure": (excess / total_excess_exposure * 100) if total_excess_exposure else float("nan"),
+            "excess_exposure_per_agent": (excess / n_agents) if n_agents else float("nan"),
+            "forward_disbursed": forward_disbursed,
+            "band_incremental_shortfall": band_incremental,
+            "pct_of_driver_incremental_shortfall": (
+                band_incremental / total_incremental_shortfall * 100
+            ) if total_incremental_shortfall else float("nan"),
+            "incremental_shortfall_pct_of_forward": (
+                band_incremental / forward_disbursed * 100
+            ) if forward_disbursed else float("nan"),
+        })
+    return pd.DataFrame(rows)
+
+
 def _quadrant_label(is_high_risk: bool, is_over_limit: bool) -> str:
     if not is_high_risk and not is_over_limit:
         return "Reference"
@@ -322,6 +364,22 @@ def main(argv: list[str] | None = None) -> None:
             print(f"  NOTE: band(s) {missing_bands} have over-limit forward lending but NO within-limit "
                   f"comparator in that band -- excluded from the standardized total (their shortfall is "
                   f"still in the coarse total above).")
+
+        allocation = _excess_exposure_allocation(
+            merged, over_mask, "_cal_pd_band", band_labels, band_detail,
+            excess_exposure, standardized_incremental,
+        )
+        print(f"\n-- {risk_label}: excess exposure vs. incremental shortfall, by cal_pd band --")
+        print("(does where the excess exposure is GOING line up with where the incremental shortfall")
+        print(" is APPEARING? incremental_shortfall_pct_of_forward is the preferred per-band ratio --")
+        print(" not incremental/excess, for the same mismatched-denominator reason noted below.)")
+        with pd.option_context("display.float_format", "{:,.2f}".format, "display.max_columns", None, "display.width", 240):
+            print(allocation.to_string(index=False))
+        allocation.insert(0, "driver", risk_label)
+        allocation.to_csv(
+            str(Path(args.out).with_name(Path(args.out).stem + f"_allocation_{over_q.replace(' ', '_')}.csv")),
+            index=False,
+        )
 
         incr_over_forward_pct = (standardized_incremental / forward_disbursed * 100) if forward_disbursed else float("nan")
         incr_over_excess_pct = (standardized_incremental / excess_exposure * 100) if excess_exposure else float("nan")
