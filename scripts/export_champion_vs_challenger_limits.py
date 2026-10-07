@@ -48,7 +48,7 @@ def main(argv: list[str] | None = None) -> None:
     if not log_path.exists():
         sys.exit(f"ERROR: {log_path} not found -- run log_shadow_multiplier_cycle.py first.")
 
-    log = pd.read_csv(log_path, dtype={"run_id": str, "msisdn": str})
+    log = pd.read_csv(log_path, dtype={"run_id": str, "msisdn": str}, low_memory=False)
     required = ["msisdn", "live_tier_multiplier", "assigned_limit",
                 "shadow_multiplier_base", "shadow_limit_post_transition_base", "shadow_status"]
     missing_required = [c for c in required if c not in log.columns]

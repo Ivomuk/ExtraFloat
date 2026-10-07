@@ -182,7 +182,7 @@ def main(argv: list[str] | None = None) -> None:
         sys.exit(f"ERROR: {fwd_path} not found.")
 
     cohort_col = f"cohort_{args.scenario}"
-    log = pd.read_csv(log_path, dtype={"run_id": str, "msisdn": str})
+    log = pd.read_csv(log_path, dtype={"run_id": str, "msisdn": str}, low_memory=False)
     if cohort_col not in log.columns:
         sys.exit(f"ERROR: {cohort_col} not found in {log_path}. Columns present: {list(log.columns)}")
 

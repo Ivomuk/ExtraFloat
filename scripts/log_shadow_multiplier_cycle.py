@@ -318,7 +318,7 @@ def _load_existing_log(log_path: Path, expected_columns: list[str]) -> pd.DataFr
     # dtype=str on the key columns: round-tripping a purely-numeric msisdn through CSV
     # otherwise gets auto-cast to int64 on reload, which would silently break key
     # equality against the in-memory (string) msisdn built by build_log_rows().
-    existing = pd.read_csv(log_path, dtype={"run_id": str, "msisdn": str})
+    existing = pd.read_csv(log_path, dtype={"run_id": str, "msisdn": str}, low_memory=False)
     dup_mask = existing.duplicated(subset=["run_id", "msisdn"], keep=False)
     if dup_mask.any():
         n_dup = existing.loc[dup_mask, ["run_id", "msisdn"]].drop_duplicates().shape[0]
