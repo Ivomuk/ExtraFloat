@@ -71,6 +71,51 @@ ZERO_FILL_COLS = [
 ]
 QUADRANT_ORDER = ["Reference", "Capacity test", "Risk reference", "Critical risk test"]
 
+# fwd_any_bad_3dpd is a MAX across EVERY loan (new + carried-over) touching the window
+# (confirmed by reading data/persona_k8_forward_outcomes_query.sql directly, step 7) --
+# a borrower taking more new loans has strictly more chances to satisfy that MAX, with
+# no per-loan DPD count exposed in this extract to build a true per-loan rate instead.
+# This is the best available substitute: stratify by how many new loans a borrower took,
+# so the gap can be read within matched loan-count bins rather than across all of them
+# pooled together.
+LOAN_COUNT_EDGES = [0, 1, 2, 3, 5, 10, 1_000_000]
+LOAN_COUNT_LABELS = ["1", "2", "3", "4-5", "6-10", "11+"]
+
+# fwd_worst_days_aging > 3, among STILL-ACTIVE borrowers specifically, is the right
+# available proxy for "this open loan is currently running overdue, not just open and
+# current" -- confirmed correctly computed as a MAX across every state row in the
+# window (the SQL file's own fix-history note documents this was bug-fixed), unlike
+# fwd_any_anomaly_open, which that same SQL file's header explicitly documents as
+# "ever flagged during the window" and NOT a debt-transfer or still-unresolved signal --
+# wrong tool for a censoring check, so it is reported separately as a secondary
+# diagnostic only, never used to define "unresolved" here.
+UNRESOLVED_AGING_THRESHOLD = 3
+
+
+def _standardized_rate(
+    df: pd.DataFrame, subset_mask: pd.Series, baseline_mask: pd.Series, value_col: str, bin_col: str,
+) -> tuple[float, float, list[str], list[str]]:
+    """Direct standardization: reweights baseline's per-bin rate using the SUBSET's own
+    bin sizes as weights, so "does the baseline look as bad as the subset once matched
+    on loan-count mix" can be answered directly. Returns
+    (subset_rate, standardized_baseline_rate, bins_used, bins_missing_from_baseline).
+    """
+    subset_bin_n = df.loc[subset_mask, bin_col].value_counts()
+    baseline_bin_n = df.loc[baseline_mask, bin_col].value_counts()
+    usable = [b for b in subset_bin_n.index if baseline_bin_n.get(b, 0) > 0]
+    missing = [b for b in subset_bin_n.index if baseline_bin_n.get(b, 0) == 0]
+    weights = subset_bin_n.loc[usable]
+    n_used = int(weights.sum())
+    if n_used == 0:
+        return float("nan"), float("nan"), usable, missing
+
+    subset_rate = df.loc[subset_mask & df[bin_col].isin(usable), value_col].mean() * 100
+    bin_rates = pd.Series(
+        [df.loc[baseline_mask & (df[bin_col] == b), value_col].mean() for b in usable], index=usable,
+    )
+    standardized_baseline_rate = (bin_rates * weights).sum() / n_used * 100
+    return subset_rate, standardized_baseline_rate, usable, missing
+
 
 def _quadrant_label(is_high_risk: bool, is_over_limit: bool) -> str:
     if not is_high_risk and not is_over_limit:
@@ -161,6 +206,12 @@ def main(argv: list[str] | None = None) -> None:
         if col in merged.columns:
             merged[col] = merged[col].fillna(0)
 
+    merged["_loan_count_bin"] = pd.cut(merged["fwd_new_loan_count"], bins=LOAN_COUNT_EDGES, labels=LOAN_COUNT_LABELS)
+    merged["_is_unresolved_aging"] = (
+        (merged["fwd_still_active_at_window_end"] == 1) & (merged["fwd_worst_days_aging"] > UNRESOLVED_AGING_THRESHOLD)
+    )
+    merged["_is_bad_or_unresolved"] = (merged["fwd_new_loans_closed_bad_count"] > 0) | merged["_is_unresolved_aging"]
+
     rows = []
     for quadrant in QUADRANT_ORDER:
         sub = merged[merged["quadrant"] == quadrant]
@@ -193,6 +244,14 @@ def main(argv: list[str] | None = None) -> None:
             )
         if "fwd_worst_days_aging" in sub.columns:
             row["fwd_worst_days_aging_median"] = sub["fwd_worst_days_aging"].median()
+        # Supplementary, censoring-robust borrower-level rate -- bad_closure_rate_pct
+        # above only ever looks at CLOSED new loans; this adds back borrowers whose
+        # loan hasn't closed yet but is already running overdue (see
+        # UNRESOLVED_AGING_THRESHOLD), over the WHOLE quadrant as the denominator
+        # (not just those with a closed loan) -- a check against the gap between
+        # pct_with_fwd_activity and n_closed_new_loans silently favoring whichever
+        # quadrant has more loans still open.
+        row["bad_or_unresolved_rate_pct"] = round(sub["_is_bad_or_unresolved"].mean() * 100, 2)
         rows.append(row)
 
     result = pd.DataFrame(rows).set_index("quadrant").reindex(QUADRANT_ORDER)
@@ -219,6 +278,59 @@ def main(argv: list[str] | None = None) -> None:
         print(f"  Lower risk:  Capacity test     {ct:.2f}%  vs.  Reference       {ref:.2f}%  "
               f"(delta {ct - ref:+.2f} pp)")
 
+    # -- Is the 3+DPD gap just a loan-volume artifact? Stratify by how many new loans --
+    # -- a borrower took, then standardize the within-limit comparator to the --
+    # -- over-limit group's OWN loan-count mix -- if the gap survives, volume alone --
+    # -- doesn't explain it. --
+    print(f"\n{'=' * 100}")
+    print("Is the 3+DPD gap explained by loan volume? Rate by loan-count bin")
+    print("=" * 100)
+    bin_pivot = merged.groupby(["quadrant", "_loan_count_bin"], observed=True)["fwd_any_bad_3dpd"].mean() * 100
+    bin_pivot = bin_pivot.unstack("_loan_count_bin").reindex(QUADRANT_ORDER).reindex(columns=LOAN_COUNT_LABELS)
+    with pd.option_context("display.float_format", "{:.1f}".format):
+        print(bin_pivot.to_string())
+
+    print("\n-- Standardized comparison: within-limit rate, reweighted to the over-limit "
+          "group's own loan-count mix --")
+    for risk_label, over_q, within_q in [("Lower risk", "Capacity test", "Reference"),
+                                           ("High risk", "Critical risk test", "Risk reference")]:
+        over_rate, standardized_within_rate, bins_used, missing = _standardized_rate(
+            merged, merged["quadrant"] == over_q, merged["quadrant"] == within_q,
+            "fwd_any_bad_3dpd", "_loan_count_bin",
+        )
+        raw_within_rate = result.loc[within_q, "fwd_any_bad_3dpd_rate_pct"]
+        print(f"  {risk_label}: {over_q} {over_rate:.2f}%  vs.  {within_q} standardized to same "
+              f"loan-count mix {standardized_within_rate:.2f}%  (raw {within_q} was {raw_within_rate:.2f}%)")
+        if missing:
+            print(f"    NOTE: loan-count bin(s) {missing} present in {over_q} have no {within_q} "
+                  f"agents to standardize against -- those agents excluded from this comparison only.")
+
+    # -- Censoring check: among STILL-ACTIVE borrowers only, are the over-limit --
+    # -- groups' open loans actually running MORE overdue, or just as current as --
+    # -- the within-limit groups' open loans? fwd_worst_days_aging, not --
+    # -- fwd_any_anomaly_open -- see module docstring / constant comments for why. --
+    print(f"\n{'=' * 100}")
+    print("Still-active (unresolved-exposure) check -- among borrowers with an open loan at window end")
+    print("=" * 100)
+    active_rows = []
+    for quadrant in QUADRANT_ORDER:
+        sub = merged[(merged["quadrant"] == quadrant) & (merged["fwd_still_active_at_window_end"] == 1)]
+        n = len(sub)
+        if n == 0:
+            active_rows.append({"quadrant": quadrant, "n_still_active": 0})
+            continue
+        active_rows.append({
+            "quadrant": quadrant,
+            "n_still_active": n,
+            "pct_worst_aging_gt3": round((sub["fwd_worst_days_aging"] > UNRESOLVED_AGING_THRESHOLD).mean() * 100, 1),
+            "worst_aging_median": sub["fwd_worst_days_aging"].median(),
+            "fwd_any_anomaly_open_rate_pct (secondary -- 'ever flagged', not 'unresolved')":
+                round(sub["fwd_any_anomaly_open"].mean() * 100, 1),
+        })
+    active_result = pd.DataFrame(active_rows).set_index("quadrant")
+    with pd.option_context("display.max_columns", None, "display.width", 220):
+        print(active_result.to_string())
+
     print(f"\nNOTE: exposure-weighted loss (requires LGD/EAD) and cure time are not computed here -- "
           f"not available in {fwd_path.name}.")
 
@@ -226,9 +338,11 @@ def main(argv: list[str] | None = None) -> None:
     print(f"\nQuadrant summary written: {args.out}")
 
     detail_cols = ["_id", "quadrant", "cal_pd", "agent_category", "ever_over"] + \
-        [c for c in ["fwd_any_bad_3dpd", "fwd_any_anomaly_open", "fwd_still_active_at_window_end",
-                      "fwd_new_loans_closed_good_count", "fwd_new_loans_closed_bad_count",
-                      "fwd_new_loans_repayment_ratio", "fwd_worst_days_aging"] if c in merged.columns]
+        [c for c in ["fwd_new_loan_count", "_loan_count_bin", "fwd_any_bad_3dpd", "fwd_any_anomaly_open",
+                      "fwd_still_active_at_window_end", "fwd_new_loans_closed_good_count",
+                      "fwd_new_loans_closed_bad_count", "fwd_new_loans_repayment_ratio",
+                      "fwd_worst_days_aging", "_is_unresolved_aging", "_is_bad_or_unresolved"]
+         if c in merged.columns]
     merged[detail_cols].rename(columns={"_id": "msisdn"}).to_csv(args.detail_out, index=False)
     print(f"Per-agent detail written: {args.detail_out}")
 
