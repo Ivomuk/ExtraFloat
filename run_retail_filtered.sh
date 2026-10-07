@@ -96,6 +96,7 @@ python3 run_credit_risk_pipeline.py \
     --artifacts-dir pd_model/artifacts/ \
     --scorecard-path scorecards/capacity_scorecard_v1.json \
     --allow-provisional-scorecard \
+    --keep-intermediate \
     --output output/engine_test_output.csv > engine_log.txt 2>&1
 
 status=$?
