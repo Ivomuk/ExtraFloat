@@ -145,6 +145,8 @@ def _pd_band_standardized_expected_shortfall(
         over_band_mask = over_mask & (df[band_col] == band)
         within_band_mask = within_mask & (df[band_col] == band)
         over_disbursed = df.loc[over_band_mask, "fwd_new_loans_disbursed_ugx"].sum()
+        over_repaid = df.loc[over_band_mask, "fwd_new_loans_repaid_ugx"].sum()
+        over_actual_shortfall = over_disbursed - over_repaid
         within_disbursed = df.loc[within_band_mask, "fwd_new_loans_disbursed_ugx"].sum()
         within_shortfall = (
             within_disbursed - df.loc[within_band_mask, "fwd_new_loans_repaid_ugx"].sum()
@@ -154,18 +156,23 @@ def _pd_band_standardized_expected_shortfall(
         if within_disbursed == 0:
             missing.append(band)
             rows.append({"cal_pd_band": band, "n_over_agents": int(over_band_mask.sum()),
-                         "over_forward_disbursed": over_disbursed, "n_within_agents": 0,
-                         "within_shortfall_rate_pct": float("nan"), "expected_shortfall": float("nan")})
+                         "over_forward_disbursed": over_disbursed, "over_actual_shortfall": over_actual_shortfall,
+                         "n_within_agents": 0, "within_shortfall_rate_pct": float("nan"),
+                         "expected_shortfall": float("nan"), "band_incremental_shortfall": float("nan")})
             continue
         within_rate = within_shortfall / within_disbursed
         expected = within_rate * over_disbursed
         rows.append({
             "cal_pd_band": band, "n_over_agents": int(over_band_mask.sum()),
-            "over_forward_disbursed": over_disbursed, "n_within_agents": int(within_band_mask.sum()),
+            "over_forward_disbursed": over_disbursed, "over_actual_shortfall": over_actual_shortfall,
+            "n_within_agents": int(within_band_mask.sum()),
             "within_shortfall_rate_pct": round(within_rate * 100, 3), "expected_shortfall": expected,
+            "band_incremental_shortfall": over_actual_shortfall - expected,
         })
     detail = pd.DataFrame(rows, columns=["cal_pd_band", "n_over_agents", "over_forward_disbursed",
-                                          "n_within_agents", "within_shortfall_rate_pct", "expected_shortfall"])
+                                          "over_actual_shortfall", "n_within_agents",
+                                          "within_shortfall_rate_pct", "expected_shortfall",
+                                          "band_incremental_shortfall"])
     total_expected = detail["expected_shortfall"].sum(skipna=True) if len(detail) else 0.0
     return total_expected, detail, missing
 
