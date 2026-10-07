@@ -59,12 +59,24 @@ def _group_breakdown(df: pd.DataFrame, group_col: str, over_col: str) -> pd.Data
     return tbl.sort_values("n_over", ascending=False)
 
 
+def _two_way_breakdown(df: pd.DataFrame, col1: str, col2: str, over_col: str) -> pd.DataFrame:
+    g = df.groupby([col1, col2], observed=True)[over_col]
+    tbl = g.agg(["size", "sum"]).rename(columns={"size": "n_checked", "sum": "n_over"}).reset_index()
+    tbl["pct_over"] = (tbl["n_over"] / tbl["n_checked"] * 100).round(1)
+    n_over_total = int(df[over_col].sum())
+    tbl["share_of_all_over"] = (tbl["n_over"] / n_over_total * 100).round(1) if n_over_total else 0.0
+    return tbl.sort_values("n_over", ascending=False)
+
+
 def main(argv: list[str] | None = None) -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--live-shadow-file", default="live_shadow_vs_category_limit.csv",
                      help="per-agent detail CSV written by check_live_shadow_vs_category_limit.py")
     ap.add_argument("--reference", default="live", choices=["live", "shadow_base", "shadow_conservative"])
     ap.add_argument("--out", default="over_limit_agent_profile.csv")
+    ap.add_argument("--crosstab-out", default="over_limit_category_x_cal_pd_band.csv",
+                     help="two-way agent_category x cal_pd_band breakdown, written separately so it "
+                          "stays pivot-ready (one row per combination) rather than folded into --out")
     args = ap.parse_args(argv)
 
     ls_path = Path(args.live_shadow_file)
@@ -127,6 +139,26 @@ def main(argv: list[str] | None = None) -> None:
         print(_group_breakdown(checked, "agent_category", "_over").to_string())
         print()
 
+    # -- Two-way view: is "high-volume agent_category" and "high cal_pd risk" the SAME --
+    # -- over-limit agents, or two distinct, overlapping sub-populations? The two single- --
+    # -- dimension breakdowns above can't tell you that on their own. --
+    crosstab = None
+    if "agent_category" in checked.columns and "_cal_pd_band" in checked.columns:
+        crosstab = _two_way_breakdown(checked, "agent_category", "_cal_pd_band", "_over")
+        print(f"{'=' * 78}")
+        print("Two-way breakdown: agent_category x cal_pd_band")
+        print("=" * 78)
+        print("-- n_checked (volume) --")
+        print(crosstab.pivot(index="agent_category", columns="_cal_pd_band", values="n_checked")
+              .reindex(columns=CAL_PD_LABELS).to_string())
+        print("\n-- pct_over (rate within this category x band cell) --")
+        print(crosstab.pivot(index="agent_category", columns="_cal_pd_band", values="pct_over")
+              .reindex(columns=CAL_PD_LABELS).to_string())
+        print("\n-- share_of_all_over (this cell's % of ALL over-limit cases, system-wide) --")
+        print(crosstab.pivot(index="agent_category", columns="_cal_pd_band", values="share_of_all_over")
+              .reindex(columns=CAL_PD_LABELS).to_string())
+        print()
+
     if "n_transactions" in checked.columns:
         checked["n_transactions"] = pd.to_numeric(checked["n_transactions"], errors="coerce")
         checked["_n_txn_band"] = pd.cut(checked["n_transactions"], bins=N_TXN_EDGES, labels=N_TXN_LABELS)
@@ -164,6 +196,10 @@ def main(argv: list[str] | None = None) -> None:
     if out_rows:
         pd.concat(out_rows, ignore_index=True).to_csv(args.out, index=False)
         print(f"Breakdown tables written: {args.out}")
+
+    if crosstab is not None:
+        crosstab.to_csv(args.crosstab_out, index=False)
+        print(f"Two-way breakdown (agent_category x cal_pd_band) written: {args.crosstab_out}")
 
 
 if __name__ == "__main__":
