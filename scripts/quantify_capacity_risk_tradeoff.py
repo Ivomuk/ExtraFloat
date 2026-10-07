@@ -39,15 +39,25 @@ expected-loss analysis:
     necessarily money that will never come back. See the maturity
     caveat below.
   - incremental shortfall, per risk population SEPARATELY (never one
-    portfolio-wide baseline): that population's own within-limit
-    reference group's shortfall RATE, applied to the over-limit
-    group's own forward-disbursed volume, gives the shortfall that
-    volume would be EXPECTED to produce at the baseline rate.
-    Incremental shortfall = actual - expected -- answers "how much
-    more shortfall did the over-limit population generate than
-    expected if the same forward-lending volume had performed at its
-    OWN population's within-limit baseline rate," not "how much
-    shortfall is there in total."
+    portfolio-wide baseline), computed TWO ways:
+      coarse: that population's own within-limit reference group's
+        single pooled shortfall RATE, applied to the over-limit
+        group's own forward-disbursed volume.
+      PD-band standardized (preferred): the within-limit reference's
+        shortfall rate computed SEPARATELY within each finer cal_pd
+        band (LOWER_RISK_CAL_PD_LABELS / HIGH_RISK_CAL_PD_LABELS),
+        each applied to the over-limit group's OWN forward-disbursed
+        volume in that SAME band, then summed -- a single "cal_pd>=30%"
+        baseline treats a 0.31 and a 0.65 borrower as interchangeable,
+        which the isotonic calibration work already showed they are
+        not, so the coarse version alone risks comparing the over-limit
+        group against a baseline that doesn't match its own risk
+        composition.
+    Either way, incremental shortfall = actual - expected -- answers
+    "how much more shortfall did the over-limit population generate
+    than expected if the same forward-lending volume had performed at
+    the SAME-cal_pd-band within-limit rate," not "how much shortfall
+    is there in total."
   - two denominators, each answering a different question:
       incremental shortfall / forward-disbursed volume -- the
           incremental performance penalty relative to subsequent
@@ -104,6 +114,60 @@ from segmentation.borrower_persona_clustering import digits  # noqa: E402
 OVER_LIMIT_THRESHOLD = 1.10
 ZERO_FILL_COLS = ["fwd_new_loans_disbursed_ugx", "fwd_new_loans_repaid_ugx"]
 QUADRANT_ORDER = ["Reference", "Capacity test", "Risk reference", "Critical risk test"]
+
+# A single baseline shortfall rate for the whole "cal_pd>=30%" (or "<30%") population treats
+# a 0.31 and a 0.65 borrower as interchangeable, which the isotonic calibration work already
+# showed they are not. These finer bands -- same convention as the lower-risk bands used
+# elsewhere in this analysis, extended for the high-risk side per the >=30% sub-bands used in
+# the matched-baseline feature profile -- let the standardization below compare each
+# over-limit borrower's shortfall against reference borrowers in the SAME cal_pd band, not one
+# pooled rate for the whole risk side.
+LOWER_RISK_CAL_PD_EDGES = [0.0, 0.02, 0.05, 0.10, 0.20, 0.30]
+LOWER_RISK_CAL_PD_LABELS = ["<2%", "2-5%", "5-10%", "10-20%", "20-30%"]
+HIGH_RISK_CAL_PD_EDGES = [0.30, 0.35, 0.40, 0.45, 0.50, 0.60, 1.0]
+HIGH_RISK_CAL_PD_LABELS = ["30-35%", "35-40%", "40-45%", "45-50%", "50-60%", "60%+"]
+
+
+def _pd_band_standardized_expected_shortfall(
+    df: pd.DataFrame, over_mask: pd.Series, within_mask: pd.Series, band_col: str, band_labels: list[str],
+) -> tuple[float, pd.DataFrame, list[str]]:
+    """Dollar-weighted standardization: E[Shortfall_over] = sum_j (ForwardDisbursed_over,j x
+    ShortfallRate_within,j) -- the over-limit group's OWN forward-disbursed dollar volume in
+    each cal_pd band, multiplied by the within-limit reference's shortfall RATE in that SAME
+    band, summed across bands. Weights by dollar volume (not agent count), since the quantity
+    being reconstructed is a dollar total, not a mean rate -- unlike the agent-count-weighted
+    standardization used for the DPD rate elsewhere in this analysis.
+    Returns (expected_shortfall_total, per_band_detail, bands_missing_a_within-limit_comparator).
+    """
+    rows = []
+    missing = []
+    for band in band_labels:
+        over_band_mask = over_mask & (df[band_col] == band)
+        within_band_mask = within_mask & (df[band_col] == band)
+        over_disbursed = df.loc[over_band_mask, "fwd_new_loans_disbursed_ugx"].sum()
+        within_disbursed = df.loc[within_band_mask, "fwd_new_loans_disbursed_ugx"].sum()
+        within_shortfall = (
+            within_disbursed - df.loc[within_band_mask, "fwd_new_loans_repaid_ugx"].sum()
+        )
+        if over_disbursed == 0:
+            continue
+        if within_disbursed == 0:
+            missing.append(band)
+            rows.append({"cal_pd_band": band, "n_over_agents": int(over_band_mask.sum()),
+                         "over_forward_disbursed": over_disbursed, "n_within_agents": 0,
+                         "within_shortfall_rate_pct": float("nan"), "expected_shortfall": float("nan")})
+            continue
+        within_rate = within_shortfall / within_disbursed
+        expected = within_rate * over_disbursed
+        rows.append({
+            "cal_pd_band": band, "n_over_agents": int(over_band_mask.sum()),
+            "over_forward_disbursed": over_disbursed, "n_within_agents": int(within_band_mask.sum()),
+            "within_shortfall_rate_pct": round(within_rate * 100, 3), "expected_shortfall": expected,
+        })
+    detail = pd.DataFrame(rows, columns=["cal_pd_band", "n_over_agents", "over_forward_disbursed",
+                                          "n_within_agents", "within_shortfall_rate_pct", "expected_shortfall"])
+    total_expected = detail["expected_shortfall"].sum(skipna=True) if len(detail) else 0.0
+    return total_expected, detail, missing
 
 
 def _quadrant_label(is_high_risk: bool, is_over_limit: bool) -> str:
@@ -174,6 +238,14 @@ def main(argv: list[str] | None = None) -> None:
         if col in merged.columns:
             merged[col] = merged[col].fillna(0)
 
+    # Finer cal_pd band per agent -- different edge sets on each side of the high-risk
+    # threshold, since "30-35%" is meaningless for a lower-risk agent and vice versa.
+    merged["_cal_pd_band"] = np.where(
+        merged["is_high_risk"],
+        pd.cut(merged["cal_pd"], bins=HIGH_RISK_CAL_PD_EDGES, labels=HIGH_RISK_CAL_PD_LABELS).astype(str),
+        pd.cut(merged["cal_pd"], bins=LOWER_RISK_CAL_PD_EDGES, labels=LOWER_RISK_CAL_PD_LABELS).astype(str),
+    )
+
     agg = {}
     for quadrant in QUADRANT_ORDER:
         sub = merged[merged["quadrant"] == quadrant]
@@ -209,23 +281,46 @@ def main(argv: list[str] | None = None) -> None:
 
     compact_rows = {}
     reciprocal_notes = {}
-    for risk_label, over_q, within_q in [("Lower risk: Capacity test", "Capacity test", "Reference"),
-                                           ("High risk: Critical risk test", "Critical risk test", "Risk reference")]:
+    for risk_label, over_q, within_q, band_labels in [
+        ("Lower risk: Capacity test", "Capacity test", "Reference", LOWER_RISK_CAL_PD_LABELS),
+        ("High risk: Critical risk test", "Critical risk test", "Risk reference", HIGH_RISK_CAL_PD_LABELS),
+    ]:
         over = result.loc[over_q]
         within = result.loc[within_q]
         excess_exposure = over["total_incremental_exposure"]
         forward_disbursed = over["total_fwd_new_loans_disbursed_ugx"]
         forward_repaid = over["total_fwd_new_loans_repaid_ugx"]
         actual_shortfall = over["shortfall"]
-        baseline_rate_pct = within["shortfall_rate_pct"]
-        expected_shortfall = (baseline_rate_pct / 100) * forward_disbursed
-        incremental_shortfall = actual_shortfall - expected_shortfall
 
-        incr_over_forward_pct = (incremental_shortfall / forward_disbursed * 100) if forward_disbursed else float("nan")
-        incr_over_excess_pct = (incremental_shortfall / excess_exposure * 100) if excess_exposure else float("nan")
+        # Coarse: one pooled baseline rate for the whole risk side.
+        coarse_rate_pct = within["shortfall_rate_pct"]
+        coarse_expected = (coarse_rate_pct / 100) * forward_disbursed
+        coarse_incremental = actual_shortfall - coarse_expected
 
-        if incremental_shortfall > 0 and excess_exposure:
-            reciprocal = excess_exposure / incremental_shortfall
+        # PD-band standardized: compare each over-limit borrower's shortfall against
+        # reference borrowers in the SAME cal_pd band, not one pooled rate -- a 0.31 and a
+        # 0.65 borrower are not comparable, and the isotonic calibration work already
+        # showed realized risk changes materially across this range.
+        over_mask = merged["quadrant"] == over_q
+        within_mask = merged["quadrant"] == within_q
+        standardized_expected, band_detail, missing_bands = _pd_band_standardized_expected_shortfall(
+            merged, over_mask, within_mask, "_cal_pd_band", band_labels,
+        )
+        standardized_incremental = actual_shortfall - standardized_expected
+
+        print(f"\n-- {risk_label}: per-cal_pd-band detail --")
+        with pd.option_context("display.float_format", "{:,.2f}".format, "display.max_columns", None, "display.width", 220):
+            print(band_detail.to_string(index=False))
+        if missing_bands:
+            print(f"  NOTE: band(s) {missing_bands} have over-limit forward lending but NO within-limit "
+                  f"comparator in that band -- excluded from the standardized total (their shortfall is "
+                  f"still in the coarse total above).")
+
+        incr_over_forward_pct = (standardized_incremental / forward_disbursed * 100) if forward_disbursed else float("nan")
+        incr_over_excess_pct = (standardized_incremental / excess_exposure * 100) if excess_exposure else float("nan")
+
+        if standardized_incremental > 0 and excess_exposure:
+            reciprocal = excess_exposure / standardized_incremental
             reciprocal_notes[risk_label] = f"UGX {reciprocal:,.1f} of excess lending per UGX 1 of incremental shortfall"
         else:
             reciprocal_notes[risk_label] = "no positive incremental shortfall observed"
@@ -235,19 +330,27 @@ def main(argv: list[str] | None = None) -> None:
             "Forward new-loan disbursement (UGX)": forward_disbursed,
             "Forward repayment (UGX)": forward_repaid,
             "Actual shortfall (UGX)": actual_shortfall,
-            "Reference shortfall rate (%)": baseline_rate_pct,
-            "Expected shortfall at reference rate (UGX)": expected_shortfall,
-            "Incremental shortfall (UGX)": incremental_shortfall,
-            "Incremental shortfall / forward exposure (%)": incr_over_forward_pct,
-            "Incremental shortfall / excess exposure (%)": incr_over_excess_pct,
+            "-- Coarse (one pooled baseline rate) --": np.nan,
+            "Coarse reference shortfall rate (%)": coarse_rate_pct,
+            "Coarse expected shortfall (UGX)": coarse_expected,
+            "Coarse incremental shortfall (UGX)": coarse_incremental,
+            "-- PD-band standardized (preferred) --": np.nan,
+            "Standardized expected shortfall (UGX)": standardized_expected,
+            "Standardized incremental shortfall (UGX)": standardized_incremental,
+            "Std. incremental shortfall / forward exposure (%)": incr_over_forward_pct,
+            "Std. incremental shortfall / excess exposure (%)": incr_over_excess_pct,
         }
 
     compact = pd.DataFrame(compact_rows)
+    print(f"\n{'=' * 100}")
+    print("Compact comparison: coarse vs. PD-band-standardized")
+    print("=" * 100)
     with pd.option_context("display.float_format", "{:,.2f}".format, "display.max_columns", None, "display.width", 220):
         print(compact.to_string())
 
-    print("\nReciprocal (only when incremental shortfall > 0 -- 'UGX X of excess lending was associated")
-    print("with each UGX 1 of additional forward shortfall'):")
+    print("\nReciprocal, using the PD-band-standardized incremental shortfall (only when positive --")
+    print("'UGX X of excess lending was associated with each UGX 1 of additional forward shortfall').")
+    print("Treat as a secondary, order-of-magnitude figure, not a headline number -- see caveats below:")
     for risk_label, note in reciprocal_notes.items():
         print(f"  {risk_label}: {note}")
 
@@ -255,16 +358,24 @@ def main(argv: list[str] | None = None) -> None:
     print("What this does and does not establish")
     print("=" * 100)
     print("This measures whether additional exposure is ASSOCIATED WITH repayment shortfall above the\n"
-          "level expected from comparable within-limit borrowers. It is an economic-risk PROXY, not a\n"
-          "profitability or lifetime-credit-loss estimate. In particular, this analysis cannot say\n"
-          "incremental profit = revenue - incremental shortfall, because shortfall is not LGD, and\n"
-          "interest/fees, funding cost, operating cost, and capital cost are not included here.\n"
-          "The 'incremental shortfall / excess exposure' ratio above is an association-based economic\n"
-          "intensity measure, not a loss-causation estimate -- its numerator is forward-period\n"
-          "repayment performance across a population; its denominator is excess exposure measured at\n"
-          "the original observation point. Related through the same borrowers, not necessarily the\n"
-          "same loans. See the module docstring's MATURITY / CENSORING CAVEAT for why 'shortfall' is\n"
-          "not yet 'loss' at only 42 days.")
+          "level expected from comparable within-limit borrowers in the SAME cal_pd band. It is an\n"
+          "economic-risk PROXY, not a profitability or lifetime-credit-loss estimate. In particular,\n"
+          "this analysis cannot say incremental profit = revenue - incremental shortfall, because\n"
+          "shortfall is not LGD, and interest/fees, funding cost, operating cost, and capital cost are\n"
+          "not included here.\n\n"
+          "DENOMINATOR-MISMATCH WARNING on 'incremental shortfall / excess exposure': the numerator is\n"
+          "generated from the group's TOTAL forward-lending volume (tens of billions of UGX), not from\n"
+          "the excess-exposure amount itself (a much smaller number). A small percentage-point\n"
+          "performance difference across a very large lending base, divided by a much smaller excess-\n"
+          "exposure base, can produce a ratio that LOOKS like a large share of the excess money was\n"
+          "lost -- it is not that. Do not present this ratio to management as 'X% of the excess\n"
+          "exposure was lost'; it is an association-based economic-intensity measure relating two\n"
+          "different quantities, not a loss-causation estimate. Treat both this ratio and its\n"
+          "reciprocal as secondary, order-of-magnitude figures.\n\n"
+          "Still outstanding before this becomes a management-level result: maturity normalization.\n"
+          "See the module docstring's MATURITY / CENSORING CAVEAT -- 'shortfall' is not yet 'loss' at\n"
+          "only 42 days, and the over-limit groups' higher still-active rates mean this matters more\n"
+          "for them than for the within-limit baseline.")
 
     result.reset_index().rename(columns={"index": "quadrant"}).to_csv(args.out, index=False)
     print(f"\nQuadrant totals written: {args.out}")
