@@ -568,12 +568,20 @@ def run_credit_risk_pipeline(
         )
 
     # -- Stage 7b: Re-attach agent_category (commission-based tier label) ----
-    # Computed in prepare_transaction_capacity_features() before Stage 6, but
-    # the engine's FINAL_OUTPUT_COLUMNS whitelist doesn't include it, so it
-    # would otherwise be silently dropped -- needed downstream to check real
-    # disbursements against the fixed agent-tier ceiling table (New Bronze
-    # through Diamond) in extrafloat_limit_engine_caps.py's agent_tier config.
+    # Computed in prepare_transaction_capacity_features() before Stage 6. With
+    # keep_intermediate=False, the engine's FINAL_OUTPUT_COLUMNS whitelist drops
+    # it, so it would otherwise be silently missing -- needed downstream to
+    # check real disbursements against the fixed agent-tier ceiling table (New
+    # Bronze through Diamond) in extrafloat_limit_engine_caps.py's agent_tier
+    # config. With keep_intermediate=True, _trim_output_columns() returns every
+    # column untouched, so result_df ALREADY has its own agent_category --
+    # merging features_df's copy in on top of that, unguarded, collided into
+    # agent_category_x/agent_category_y instead of one clean column. Drop
+    # result_df's copy first (same drop-before-merge pattern as the
+    # segmentation join above) so this is correct either way.
     if "agent_category" in features_df.columns:
+        if "agent_category" in result_df.columns:
+            result_df = result_df.drop(columns=["agent_category"])
         cat_reattach = features_df[["msisdn", "agent_category"]].copy()
         cat_reattach["msisdn"] = _norm_msisdn(cat_reattach["msisdn"].astype(str).str.strip())
         result_df = result_df.merge(cat_reattach, on="msisdn", how="left")

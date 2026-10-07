@@ -1005,6 +1005,50 @@ def test_is_thin_file_preserved_for_agents_absent_from_pd_output(tmp_path):
     )
 
 
+def test_agent_category_single_column_with_keep_intermediate(tmp_path):
+    """Regression test: with keep_intermediate=True, _trim_output_columns() returns
+    every engine column untouched, so result_df already carries its own
+    agent_category by the time Stage 7b runs. Re-merging features_df's copy on
+    top of that, unguarded, previously collided into agent_category_x/
+    agent_category_y instead of one clean column -- silently breaking every
+    downstream script that reads agent_category (only ever exercised with
+    keep_intermediate=False before, where result_df never has it going in)."""
+    from run_credit_risk_pipeline import run_credit_risk_pipeline
+
+    n = 5
+    msisdn_list = [f"256700{i:06d}" for i in range(n)]
+    df_features = _minimal_features_df(n=n)
+    df_features["msisdn"] = msisdn_list
+    df_features["agent_category"] = ["diamond", "gold", "bronze", "silver", "Below Threshold"]
+    pd_scored = _make_pd_scored(msisdn_list)
+
+    with (
+        patch("run_credit_risk_pipeline._check_artifacts"),
+        patch(
+            "run_credit_risk_pipeline.pd.read_csv", return_value=pd.DataFrame({"agent_msisdn": msisdn_list})
+        ),
+        patch("run_credit_risk_pipeline.load_transaction_capacity_features", return_value=MagicMock()),
+        patch("run_credit_risk_pipeline.load_loan_summary_recent_features", return_value=MagicMock()),
+        patch("run_credit_risk_pipeline.load_borrower_limit_features", return_value=MagicMock()),
+        patch("run_credit_risk_pipeline.run_inference_pipeline", return_value=pd_scored),
+        patch("run_credit_risk_pipeline.build_extrafloat_limit_engine_features", return_value=df_features),
+    ):
+        result = run_credit_risk_pipeline(
+            transaction_file="dummy.csv",
+            loan_file="dummy.csv",
+            borrower_file="dummy.csv",
+            artifacts_dir=str(tmp_path),
+            keep_intermediate=True,
+        )
+
+    assert "agent_category" in result.columns, "agent_category must survive as a single clean column"
+    assert "agent_category_x" not in result.columns
+    assert "agent_category_y" not in result.columns
+    result_indexed = result.set_index("msisdn")
+    for msisdn, expected in zip(msisdn_list, df_features["agent_category"]):
+        assert result_indexed.loc[msisdn, "agent_category"] == expected
+
+
 # -----------------------------------------------------------------------------
 # Checksum integrity tests (NF2)
 # -----------------------------------------------------------------------------
