@@ -42,13 +42,27 @@ of live-tier over/under-limit quadrants):
     distinction for censoring, same maturity/censoring cavein as both
     source scripts: this reads forward RESULTS, not lifetime losses.
 
-IMPORTANT ALIGNMENT CAVEAT this script cannot verify automatically: the
-logged cycle (keyed by run_id = scored_at) and the forward-outcomes
+IMPORTANT ALIGNMENT CAVEAT this script cannot fully verify automatically:
+the logged cycle (keyed by run_id = scored_at) and the forward-outcomes
 file (keyed to whatever snapshot date data/persona_k8_forward_outcomes_query.sql
-was run against) are two independently-dated artifacts. This script
-prints both dates so a human can confirm they correspond to the SAME
-underlying population snapshot -- it does not and cannot enforce that
-match itself.
+was run against) are two independently-dated artifacts, and this script
+has no record of the engine's actual --snapshot-date to compare against.
+What it CAN and does check automatically: whether the forward-outcomes
+window has already fully ENDED before this cycle was even scored. If so,
+this run is HISTORICAL OUTCOME PROFILING of the current cohort assignment
+against pre-existing outcomes -- never label that "prospective shadow
+validation." A genuinely prospective check of a cycle needs outcomes
+measured starting at or after that cycle's own scoring date.
+
+TAKE-UP VS. CREDIT PERFORMANCE: fwd_any_bad_3dpd is only a meaningful
+credit-performance signal for agents who actually took a new loan this
+window -- an agent with zero new loans didn't have the opportunity to go
+3+DPD on one. Cohorts differ materially in take-up (pct_took_new_loan),
+so this script reports take-up and credit performance separately, and
+the loan-count-bin standardization for 3+DPD restricts to borrowers
+(>=1 new loan) only -- a zero-loan agent is a real, distinct population
+(bin "0"), not folded into the "1" bin, but also never used to make a
+non-borrower look like a successful repayment observation.
 
 Usage:
     python scripts\\evaluate_champion_vs_challenger_decision.py ^
@@ -83,8 +97,12 @@ LOWER_RISK_CAL_PD_LABELS = ["<2%", "2-5%", "5-10%", "10-20%", "20-30%"]
 HIGH_RISK_CAL_PD_EDGES = [0.30, 0.35, 0.40, 0.45, 0.50, 0.60, 1.0]
 HIGH_RISK_CAL_PD_LABELS = ["30-35%", "35-40%", "40-45%", "45-50%", "50-60%", "60%+"]
 
-LOAN_COUNT_EDGES = [0, 1, 2, 3, 5, 10, 1_000_000]
-LOAN_COUNT_LABELS = ["1", "2", "3", "4-5", "6-10", "11+"]
+# Explicit "0" bin (not folded into "1"): zero new loans this window is a
+# qualitatively different, real population -- used for take-up/population
+# decomposition, but excluded from the borrower-only 3+DPD standardization
+# below (a non-borrower had no opportunity to go 3+DPD on a new loan).
+LOAN_COUNT_EDGES = [-1, 0, 1, 2, 3, 5, 10, 1_000_000]
+LOAN_COUNT_LABELS = ["0", "1", "2", "3", "4-5", "6-10", "11+"]
 UNRESOLVED_AGING_THRESHOLD = 3
 
 
@@ -209,8 +227,42 @@ def main(argv: list[str] | None = None) -> None:
     window_start = fwd["fwd_window_start_exclusive"].iloc[0] if "fwd_window_start_exclusive" in fwd.columns and len(fwd) else None
     window_end = fwd["fwd_window_end"].iloc[0] if "fwd_window_end" in fwd.columns and len(fwd) else None
     print(f"Forward-outcomes window: ({window_start}, {window_end}] -- {window_days} days")
-    print(f"ALIGNMENT CHECK (manual): confirm this window corresponds to the same population snapshot "
-          f"as cycle_date={cycle_date} above -- this script cannot verify that automatically.\n")
+
+    # Automatic, correct-by-construction check: has the forward-outcomes window already
+    # ENDED before this cycle was even scored? If so, this is historical profiling of the
+    # current cohort assignment against pre-existing outcomes -- not a prospective test of
+    # this cycle's decisions, however it gets described downstream.
+    try:
+        cycle_dt = pd.to_datetime(cycle_date)
+        window_end_dt = pd.to_datetime(window_end) if window_end is not None else None
+        window_start_dt = pd.to_datetime(window_start) if window_start is not None else None
+    except (ValueError, TypeError):
+        cycle_dt = window_end_dt = window_start_dt = None
+
+    if cycle_dt is not None and window_end_dt is not None and window_start_dt is not None:
+        if window_end_dt < cycle_dt:
+            print(f"\n*** HISTORICAL OUTCOME PROFILING, NOT prospective validation ***")
+            print(f"The forward-outcomes window ended ({window_end_dt.date()}) before this cycle was "
+                  f"scored ({cycle_dt.date()}). This run measures how the CURRENT cohort assignment "
+                  f"maps onto outcomes that already existed before this cycle existed -- a retrospective "
+                  f"sanity check, not a forward/prospective test of this cycle's decisions. A genuinely "
+                  f"prospective test of run_id={run_id} would need outcomes measured starting at or after "
+                  f"{cycle_dt.date()}, maturing around {(cycle_dt + pd.Timedelta(days=window_days or 42)).date()}.")
+        elif window_start_dt >= cycle_dt:
+            print(f"\nThis IS a prospective window: forward-outcomes begin at/after this cycle's scoring "
+                  f"date ({cycle_dt.date()}).")
+        else:
+            print(f"\nNOTE: this cycle's scoring date ({cycle_dt.date()}) falls INSIDE the forward-outcomes "
+                  f"window ({window_start_dt.date()}, {window_end_dt.date()}] -- neither cleanly historical "
+                  f"nor cleanly prospective; interpret with care.")
+    else:
+        print(f"\nALIGNMENT CHECK (manual): could not parse cycle_date/window dates to classify this "
+              f"automatically -- confirm by hand that this window corresponds to the same population "
+              f"snapshot as cycle_date={cycle_date} above.")
+    print("Separately, this script has no record of the engine's actual --snapshot-date, so even a "
+          "'prospective' classification above does not guarantee the two artifacts share the same "
+          "underlying population snapshot -- that part still needs a manual check.\n")
+
     if window_days is not None and window_days < 30:
         print(f"WARNING: only {window_days} days of forward data -- treat as an early, directional "
               f"read, not a final verdict.\n")
@@ -252,8 +304,19 @@ def main(argv: list[str] | None = None) -> None:
         row["prospective_exposure_change_ugx"] = (sub[post_col] - sub["assigned_limit"]).sum()
         row["pct_with_fwd_activity"] = round(sub["_had_fwd_activity"].mean() * 100, 1)
         took_new_loan = sub["fwd_new_loan_count"] > 0
+        # Take-up: P(took >=1 new loan this window) -- cohorts differ materially here
+        # (this is exactly why the population-level and borrower-conditional 3+DPD rates
+        # below are reported separately, not blended into one number).
         row["pct_took_new_loan"] = round(took_new_loan.mean() * 100, 1)
-        row["fwd_any_bad_3dpd_rate_pct"] = round(sub["fwd_any_bad_3dpd"].mean() * 100, 2)
+        # Population-level: includes agents with zero new-loan activity (who had no
+        # opportunity to go 3+DPD on a new loan, but can still carry an old delinquent one).
+        row["fwd_any_bad_3dpd_rate_pct_all_agents"] = round(sub["fwd_any_bad_3dpd"].mean() * 100, 2)
+        # Borrower-conditional (main credit-performance measure): restricted to agents who
+        # actually took a new loan -- the standardized version of this is in the compact
+        # comparison section below.
+        row["fwd_any_bad_3dpd_rate_pct_among_borrowers"] = (
+            round(sub.loc[took_new_loan, "fwd_any_bad_3dpd"].mean() * 100, 2) if took_new_loan.any() else float("nan")
+        )
         row["fwd_still_active_rate_pct"] = round(sub["fwd_still_active_at_window_end"].mean() * 100, 2)
         n_good = int(sub["fwd_new_loans_closed_good_count"].sum())
         n_bad = int(sub["fwd_new_loans_closed_bad_count"].sum())
@@ -265,14 +328,15 @@ def main(argv: list[str] | None = None) -> None:
 
     headline = pd.DataFrame(rows).set_index("cohort").reindex(COHORT_ORDER)
     print("=" * 100)
-    print(f"Headline: {cohort_col} comparison (live limit received by all agents; C3 base is shadow-only)")
+    print(f"1-2. Cohort formation and take-up: {cohort_col} comparison "
+          f"(live limit received by all agents; C3 base is shadow-only)")
     print("=" * 100)
     with pd.option_context("display.max_columns", None, "display.width", 220, "display.float_format", "{:,.2f}".format):
         print(headline.to_string())
 
     print(f"\n{'=' * 100}")
-    print("PD-band-standardized dollar shortfall and loan-count-bin-standardized 3+DPD rate")
-    print("(each challenger-divergent cohort compared ONLY against 'neutral' -- never one pooled rate)")
+    print("3-5. Credit performance among borrowers, closed-loan performance, and PD-band-standardized")
+    print("     monetary recovery (each challenger-divergent cohort vs. 'neutral' only -- never one pooled rate)")
     print("=" * 100)
 
     compact_rows = {}
@@ -301,28 +365,41 @@ def main(argv: list[str] | None = None) -> None:
             print(f"  NOTE: band(s) {missing_bands} have {subset_cohort} forward lending but NO "
                   f"'neutral' comparator in that band -- excluded from the standardized total.")
 
+        # Main credit-performance measure: restricted to agents who actually took >=1 new
+        # loan this window (took_new_loan), standardized over the borrower-only loan-count
+        # bins (1, 2, 3, 4-5, 6-10, 11+) -- the "0" bin is never part of this comparison, so
+        # a non-borrower can never be folded in as an implicit "no delinquency" observation.
+        subset_borrowers_mask = subset_mask & (merged["fwd_new_loan_count"] > 0)
+        baseline_borrowers_mask = baseline_mask & (merged["fwd_new_loan_count"] > 0)
         rate_subset, rate_baseline_std, bins_used, bins_missing = _standardized_rate(
-            merged, subset_mask, baseline_mask, "fwd_any_bad_3dpd", "_loan_count_bin",
+            merged, subset_borrowers_mask, baseline_borrowers_mask, "fwd_any_bad_3dpd", "_loan_count_bin",
         )
-        print(f"\n-- {label}: 3+DPD rate, standardized to {subset_cohort}'s own loan-count mix --")
+        print(f"\n-- {label}: 3+DPD rate AMONG BORROWERS (>=1 new loan this window), standardized to "
+              f"{subset_cohort}'s own loan-count mix (main credit-performance measure) --")
         print(f"  {subset_cohort}: {rate_subset:.2f}%   vs.   neutral (standardized): {rate_baseline_std:.2f}%  "
               f"(delta {rate_subset - rate_baseline_std:+.2f} pp)")
+        print(f"  (population-level, all {subset_cohort} agents incl. non-borrowers: "
+              f"{headline.loc[subset_cohort, 'fwd_any_bad_3dpd_rate_pct_all_agents']:.2f}%  --  "
+              f"take-up (pct_took_new_loan): {headline.loc[subset_cohort, 'pct_took_new_loan']:.1f}%, "
+              f"vs. neutral {headline.loc['neutral', 'pct_took_new_loan']:.1f}%)")
         if bins_missing:
-            print(f"  NOTE: loan-count bin(s) {bins_missing} present in {subset_cohort} have no 'neutral' "
-                  f"agents to standardize against -- excluded from this comparison only.")
+            print(f"  NOTE: loan-count bin(s) {bins_missing} present in {subset_cohort} borrowers have no "
+                  f"'neutral' borrowers to standardize against -- excluded from this comparison only.")
 
         incr_pct_of_forward = (standardized_incremental / subset_disbursed * 100) if subset_disbursed else float("nan")
         compact_rows[label] = {
             "n_agents": int(subset_mask.sum()),
+            "Take-up: pct_took_new_loan (%)": headline.loc[subset_cohort, "pct_took_new_loan"],
             "Forward new-loan disbursement (UGX)": subset_disbursed,
             "Forward repayment (UGX)": subset_repaid,
             "Actual shortfall (UGX)": actual_shortfall,
             "Standardized expected shortfall vs. neutral (UGX)": standardized_expected,
             "Standardized incremental shortfall (UGX)": standardized_incremental,
             "Incremental shortfall / forward exposure (%)": incr_pct_of_forward,
-            "3+DPD rate, this cohort (%)": rate_subset,
-            "3+DPD rate, neutral standardized to this cohort's loan-count mix (%)": rate_baseline_std,
-            "3+DPD rate delta (pp)": rate_subset - rate_baseline_std,
+            "3+DPD rate, all agents incl. non-borrowers (%)": headline.loc[subset_cohort, "fwd_any_bad_3dpd_rate_pct_all_agents"],
+            "3+DPD rate, AMONG BORROWERS -- main measure (%)": rate_subset,
+            "3+DPD rate, neutral among borrowers standardized to this cohort's loan-count mix (%)": rate_baseline_std,
+            "3+DPD rate delta among borrowers (pp)": rate_subset - rate_baseline_std,
         }
 
     compact = pd.DataFrame(compact_rows)
@@ -334,15 +411,20 @@ def main(argv: list[str] | None = None) -> None:
             print(compact.to_string())
 
     print(f"\n{'=' * 100}")
-    print("What this does and does not establish")
+    print("6. What this does and does not establish (maturity/alignment status)")
     print("=" * 100)
-    print("A standardized incremental shortfall at or below zero, and a 3+DPD rate no worse than the\n"
-          "PD-matched 'neutral' cohort, means the agents the challenger would flag do not show a WORSE\n"
-          "forward performance than their risk-matched peers under the exposure they ALREADY received.\n"
-          "That supports the challenger's judgment as consistent with observed behavior -- it is not\n"
-          "proof that lending them MORE (uplift) or LESS (tighten) under C3 would itself produce that\n"
-          "same relative performance, since every agent here was scored and lent under the LIVE policy,\n"
-          "not the challenger's. The only way to test that causally is a controlled pilot.\n\n"
+    print("A standardized incremental shortfall at or below zero, and a 3+DPD rate (AMONG BORROWERS,\n"
+          "never blended with non-borrowers) no worse than the PD-matched 'neutral' cohort, means the\n"
+          "agents the challenger would flag do not show a WORSE forward performance than their risk-\n"
+          "matched peers under the exposure they ALREADY received. That supports the challenger's\n"
+          "judgment as consistent with observed behavior -- it is not proof that lending them MORE\n"
+          "(uplift) or LESS (tighten) under C3 would itself produce that same relative performance,\n"
+          "since every agent here was scored and lent under the LIVE policy, not the challenger's. The\n"
+          "only way to test that causally is a controlled pilot.\n\n"
+          "See the HISTORICAL OUTCOME PROFILING / prospective classification printed near the top of\n"
+          "this run's output -- if that says historical, this entire report describes how the CURRENT\n"
+          "cohort assignment maps onto outcomes that occurred BEFORE this cycle was scored, not a\n"
+          "forward test of this cycle's decisions.\n\n"
           "Same maturity/censoring caveat as quantify_capacity_risk_tradeoff.py: 'shortfall' is forward-\n"
           "window-to-date, not a final loss figure, and still-active loans may simply not have had time\n"
           "to repay yet. See the still-active rate and bad_or_unresolved_rate_pct columns above as a\n"
