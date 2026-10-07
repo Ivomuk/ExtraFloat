@@ -24,23 +24,65 @@ WHAT THIS DOES NOT COMPUTE, AND WHY:
     this is an early, directional read, same caveat as the window-days
     warning below.
 
-WHAT IT DOES COMPUTE:
-  - incremental_exposure: sum(excess_over_<reference>_disbursed) --
-    the actual extra shillings disbursed beyond the recommended limit,
-    for the over-limit quadrant. (Within-limit quadrants should sum to
-    ~0 by construction; reported as a sanity check, not a headline.)
-  - shortfall: sum(fwd_new_loans_disbursed_ugx) - sum(fwd_new_loans_repaid_ugx)
-    on NEW loans originated in the forward window -- unrepaid amount,
-    not yet a final loss.
-  - incremental_shortfall: actual shortfall MINUS the shortfall that
-    quadrant's own within-limit comparator's shortfall RATE would
-    predict on the SAME forward-lending volume -- isolates the portion
-    of shortfall associated with being over-limit, net of this
-    population's own baseline risk level.
-  - the headline ratio: incremental_shortfall / incremental_exposure --
-    "shillings of extra shortfall per shilling of extra exposure
-    extended beyond recommendation," separately for the lower-risk and
-    high-risk populations.
+WHAT IT DOES COMPUTE -- an ECONOMIC PROXY, not a profitability or
+expected-loss analysis:
+  - excess exposure: sum(excess_over_<reference>_disbursed) -- the
+    actual extra shillings disbursed beyond the recommended limit, for
+    the over-limit group. (Within-limit groups should sum to ~0 by
+    construction; reported as a sanity check, not a headline.)
+  - forward shortfall: sum(fwd_new_loans_disbursed_ugx) -
+    sum(fwd_new_loans_repaid_ugx) on NEW loans originated in the
+    forward window -- unrepaid amount SO FAR, not a final loss figure.
+    Deliberately called "shortfall," never "loss"/"credit loss"/"NPL":
+    with only a 42-day window, some of Disbursed-Repaid is principal
+    not yet contractually due or a loan still legitimately open, not
+    necessarily money that will never come back. See the maturity
+    caveat below.
+  - incremental shortfall, per risk population SEPARATELY (never one
+    portfolio-wide baseline): that population's own within-limit
+    reference group's shortfall RATE, applied to the over-limit
+    group's own forward-disbursed volume, gives the shortfall that
+    volume would be EXPECTED to produce at the baseline rate.
+    Incremental shortfall = actual - expected -- answers "how much
+    more shortfall did the over-limit population generate than
+    expected if the same forward-lending volume had performed at its
+    OWN population's within-limit baseline rate," not "how much
+    shortfall is there in total."
+  - two denominators, each answering a different question:
+      incremental shortfall / forward-disbursed volume -- the
+          incremental performance penalty relative to subsequent
+          lending overall.
+      incremental shortfall / excess exposure -- "for every 100
+          shillings of identified excess exposure, how many shillings
+          of above-baseline forward shortfall did the subsequent
+          period contain." NOT "loss caused by each extra shilling" --
+          the numerator is forward-period repayment performance across
+          a population, the denominator is excess exposure measured at
+          the original observation point; related through the same
+          borrowers, but not necessarily the same loans. An
+          association-based economic-intensity measure, stated as one.
+  - the reciprocal, excess exposure / incremental shortfall, ONLY when
+    incremental shortfall is positive -- "UGX X of excess lending was
+    associated with each UGX 1 of additional forward shortfall."
+    Reported as "no positive incremental shortfall observed" otherwise
+    -- never force a reciprocal out of a zero or negative numerator.
+
+MATURITY / CENSORING CAVEAT -- the biggest technical concern with this
+measure: the over-limit groups have higher still-active rates (see
+validate_capacity_risk_quadrant_outcomes.py's censoring check), so
+Disbursed-Repaid may partly reflect loans that simply haven't had time
+to repay yet, not degraded performance. The clean fix -- restricting to
+loans with current_loan_start_date <= window_end - tenor - a
+performance buffer, so every included loan had ~equal opportunity to
+repay -- needs per-loan origination dates that are NOT present in this
+borrower-level-aggregated extract (data/persona_k8_forward_outcomes.csv
+sums fwd_new_loans_disbursed_ugx/repaid_ugx per borrower, with no
+per-loan date). Building that version requires a SQL change to
+data/persona_k8_forward_outcomes_query.sql to add a maturity-restricted
+aggregate -- not done here. If this product's tenor is short enough
+that essentially every loan in the window has already matured, this
+caveat matters less in practice; this script does not assume that
+either way.
 
 Usage:
     python scripts\\quantify_capacity_risk_tradeoff.py ^
@@ -160,35 +202,74 @@ def main(argv: list[str] | None = None) -> None:
           f"Risk reference: {result.loc['Risk reference', 'total_incremental_exposure']:,.0f}")
 
     print(f"\n{'=' * 100}")
-    print("Incremental shortfall per unit of incremental exposure")
+    print("Economic proxy: incremental shortfall, computed separately per risk population")
     print("=" * 100)
-    print("(incremental_shortfall = actual shortfall in the over-limit quadrant MINUS what its own\n"
-          " within-limit comparator's shortfall RATE would predict on the SAME forward-lending volume\n"
-          " -- isolates shortfall associated with being over-limit, net of this population's baseline risk.)\n")
-    for risk_label, over_q, within_q in [("Lower risk", "Capacity test", "Reference"),
-                                           ("High risk", "Critical risk test", "Risk reference")]:
+    print("(Each risk population is compared ONLY against its own within-limit baseline rate --")
+    print(" lower risk vs. Reference, high risk vs. Risk reference -- never one portfolio-wide rate.)\n")
+
+    compact_rows = {}
+    reciprocal_notes = {}
+    for risk_label, over_q, within_q in [("Lower risk: Capacity test", "Capacity test", "Reference"),
+                                           ("High risk: Critical risk test", "Critical risk test", "Risk reference")]:
         over = result.loc[over_q]
         within = result.loc[within_q]
-        baseline_rate = within["shortfall_rate_pct"] / 100
-        expected_shortfall = baseline_rate * over["total_fwd_new_loans_disbursed_ugx"]
-        incremental_shortfall = over["shortfall"] - expected_shortfall
-        incremental_exposure = over["total_incremental_exposure"]
-        ratio_pct = (incremental_shortfall / incremental_exposure * 100) if incremental_exposure else float("nan")
-        print(f"-- {risk_label}: {over_q} vs. {within_q} baseline rate ({within['shortfall_rate_pct']:.2f}%) --")
-        print(f"   Incremental exposure (extra shillings lent beyond recommendation): {incremental_exposure:,.0f}")
-        print(f"   Actual shortfall:                                                  {over['shortfall']:,.0f}")
-        print(f"   Expected shortfall at baseline rate on same forward volume:        {expected_shortfall:,.0f}")
-        print(f"   Incremental shortfall (actual - expected):                         {incremental_shortfall:,.0f}")
-        print(f"   --> {ratio_pct:.2f} shillings of incremental shortfall per 100 shillings of "
-              f"incremental exposure\n")
+        excess_exposure = over["total_incremental_exposure"]
+        forward_disbursed = over["total_fwd_new_loans_disbursed_ugx"]
+        forward_repaid = over["total_fwd_new_loans_repaid_ugx"]
+        actual_shortfall = over["shortfall"]
+        baseline_rate_pct = within["shortfall_rate_pct"]
+        expected_shortfall = (baseline_rate_pct / 100) * forward_disbursed
+        incremental_shortfall = actual_shortfall - expected_shortfall
 
-    print("NOTE: this is repayment shortfall on NEW loans within a 42-day forward window, not a "
-          "lifetime loss figure, and does not include fee/commission revenue -- a unit-economics-of-"
-          "risk read, not a full revenue-vs-loss P&L. See module docstring for what would be needed "
-          "to extend this to a true ROI calculation.")
+        incr_over_forward_pct = (incremental_shortfall / forward_disbursed * 100) if forward_disbursed else float("nan")
+        incr_over_excess_pct = (incremental_shortfall / excess_exposure * 100) if excess_exposure else float("nan")
+
+        if incremental_shortfall > 0 and excess_exposure:
+            reciprocal = excess_exposure / incremental_shortfall
+            reciprocal_notes[risk_label] = f"UGX {reciprocal:,.1f} of excess lending per UGX 1 of incremental shortfall"
+        else:
+            reciprocal_notes[risk_label] = "no positive incremental shortfall observed"
+
+        compact_rows[risk_label] = {
+            "Excess exposure (UGX)": excess_exposure,
+            "Forward new-loan disbursement (UGX)": forward_disbursed,
+            "Forward repayment (UGX)": forward_repaid,
+            "Actual shortfall (UGX)": actual_shortfall,
+            "Reference shortfall rate (%)": baseline_rate_pct,
+            "Expected shortfall at reference rate (UGX)": expected_shortfall,
+            "Incremental shortfall (UGX)": incremental_shortfall,
+            "Incremental shortfall / forward exposure (%)": incr_over_forward_pct,
+            "Incremental shortfall / excess exposure (%)": incr_over_excess_pct,
+        }
+
+    compact = pd.DataFrame(compact_rows)
+    with pd.option_context("display.float_format", "{:,.2f}".format, "display.max_columns", None, "display.width", 220):
+        print(compact.to_string())
+
+    print("\nReciprocal (only when incremental shortfall > 0 -- 'UGX X of excess lending was associated")
+    print("with each UGX 1 of additional forward shortfall'):")
+    for risk_label, note in reciprocal_notes.items():
+        print(f"  {risk_label}: {note}")
+
+    print(f"\n{'=' * 100}")
+    print("What this does and does not establish")
+    print("=" * 100)
+    print("This measures whether additional exposure is ASSOCIATED WITH repayment shortfall above the\n"
+          "level expected from comparable within-limit borrowers. It is an economic-risk PROXY, not a\n"
+          "profitability or lifetime-credit-loss estimate. In particular, this analysis cannot say\n"
+          "incremental profit = revenue - incremental shortfall, because shortfall is not LGD, and\n"
+          "interest/fees, funding cost, operating cost, and capital cost are not included here.\n"
+          "The 'incremental shortfall / excess exposure' ratio above is an association-based economic\n"
+          "intensity measure, not a loss-causation estimate -- its numerator is forward-period\n"
+          "repayment performance across a population; its denominator is excess exposure measured at\n"
+          "the original observation point. Related through the same borrowers, not necessarily the\n"
+          "same loans. See the module docstring's MATURITY / CENSORING CAVEAT for why 'shortfall' is\n"
+          "not yet 'loss' at only 42 days.")
 
     result.reset_index().rename(columns={"index": "quadrant"}).to_csv(args.out, index=False)
     print(f"\nQuadrant totals written: {args.out}")
+    compact.to_csv(str(Path(args.out).with_name(Path(args.out).stem + "_compact.csv")))
+    print(f"Compact comparison table written: {Path(args.out).with_name(Path(args.out).stem + '_compact.csv')}")
 
 
 if __name__ == "__main__":
