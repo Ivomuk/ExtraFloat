@@ -222,6 +222,19 @@ def main(argv: list[str] | None = None) -> None:
                 disbursement_cols += [exceeds_col, excess_col, pct_col]
                 pct_cols[name] = pct_col
 
+            # A plain text label, persisted per row, so "Over limit (110%+)" etc. can be
+            # filtered directly (Excel AutoFilter -> tick the box) without any formula --
+            # same AGREEMENT_LABELS convention as the printed agreement-band breakdown below.
+            for name, pct_col in pct_cols.items():
+                band_col = f"agreement_band_{name}"
+                # pd.to_numeric (not .astype(float)) -- the column holds pd.NA for rows that
+                # weren't valid above, and pd.cut() can raise "boolean value of NA is
+                # ambiguous" on some pandas/numpy combinations if it sees pd.NA directly.
+                known[band_col] = pd.cut(
+                    pd.to_numeric(known[pct_col], errors="coerce"), bins=AGREEMENT_EDGES, labels=AGREEMENT_LABELS
+                )
+                disbursement_cols.append(band_col)
+
             disb_summary_rows = []
             for name in reference_cols:
                 exceeds_col = f"exceeds_{name}_disbursed"
