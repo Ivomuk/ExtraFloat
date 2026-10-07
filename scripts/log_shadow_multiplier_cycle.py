@@ -134,68 +134,53 @@ def _error(msg: str) -> None:
     sys.exit(1)
 
 
-def _is_missing(val) -> bool:
-    if val is None:
-        return True
-    if isinstance(val, str):
-        return val.strip() == ""
-    try:
-        return bool(pd.isna(val))
-    except (TypeError, ValueError):
-        return False
+_BOOL_TRUE_STRINGS = {"true", "1", "yes"}
+_BOOL_FALSE_STRINGS = {"false", "0", "no"}
+# Sentinel for the string-column fillna trick below -- cannot realistically collide
+# with real engine-output text (reason strings, model versions, tiers, etc).
+_MISSING_STRING_SENTINEL = "\x00__MISSING__\x00"
 
 
-def _normalize_value(col: str, val):
-    """Collapse CSV round-trip / in-memory representations to a comparable value.
-
-    Returns None for any flavor of missing (NaN / blank / None) so "missing
-    equals missing" regardless of which side it came from.
-    """
-    if _is_missing(val):
-        return None
-    if col in BOOL_COLUMNS:
-        if isinstance(val, (bool, np.bool_)):
-            return bool(val)
-        s = str(val).strip().lower()
-        if s in {"true", "1", "yes"}:
-            return True
-        if s in {"false", "0", "no"}:
-            return False
-        return None
-    if col in STRING_COLUMNS:
-        return str(val).strip()
-    try:
-        f = float(val)
-    except (TypeError, ValueError):
-        return None
-    return None if np.isnan(f) else f
-
-
-def _values_equal(col: str, a, b) -> bool:
-    na, nb = _normalize_value(col, a), _normalize_value(col, b)
-    if na is None and nb is None:
-        return True
-    if na is None or nb is None:
-        return False
-    if col in BOOL_COLUMNS or col in STRING_COLUMNS:
-        return na == nb
-    return bool(np.isclose(na, nb, atol=VALUE_COMPARISON_ATOL, rtol=VALUE_COMPARISON_RTOL))
-
-
-def _compute_cohort(pct_change: float, shadow_status: str, assigned_limit: float, post_limit: float) -> str:
-    """Frozen-at-scoring-time cohort label. Never recomputed later with hindsight."""
-    eligible = (
-        shadow_status == "ok"
-        and pd.notna(assigned_limit) and assigned_limit > 0
-        and pd.notna(post_limit)
+def _normalize_bool_series(s: pd.Series) -> pd.Series:
+    """Vectorized version of 'collapse to a comparable bool, NA stays NA'."""
+    if pd.api.types.is_bool_dtype(s):
+        return s.astype("boolean")
+    out = pd.Series(pd.NA, index=s.index, dtype="boolean")
+    notna = s.notna()
+    strs = s[notna].astype(str).str.strip().str.lower()
+    out.loc[notna] = strs.map(
+        lambda v: True if v in _BOOL_TRUE_STRINGS else (False if v in _BOOL_FALSE_STRINGS else pd.NA)
     )
-    if not eligible or pd.isna(pct_change):
-        return "unclassified"
-    if pct_change > COHORT_UPLIFT_THRESHOLD:
-        return "uplift"
-    if pct_change < COHORT_TIGHTEN_THRESHOLD:
-        return "tighten"
-    return "neutral"
+    return out
+
+
+def _normalize_string_series(s: pd.Series) -> pd.Series:
+    out = s.astype(object).where(s.notna(), None)
+    notna_mask = out.notna()
+    out.loc[notna_mask] = out.loc[notna_mask].astype(str).str.strip()
+    return out
+
+
+def _vectorized_equal(col: str, a: pd.Series, b: pd.Series) -> pd.Series:
+    """Column-type-aware, fully vectorized version of the "values match" rule:
+    missing equals missing, numeric compares with tolerance, string/bool compare
+    exactly after normalization. See VALUE_COMPARISON_ATOL/RTOL above for why that
+    tolerance is appropriate.
+    """
+    if col in BOOL_COLUMNS:
+        na, nb = _normalize_bool_series(a), _normalize_bool_series(b)
+        both_na = na.isna() & nb.isna()
+        neither_na = na.notna() & nb.notna()
+        return (both_na | (neither_na & (na.fillna(False) == nb.fillna(False)))).astype(bool)
+    if col in STRING_COLUMNS:
+        na, nb = _normalize_string_series(a), _normalize_string_series(b)
+        return (na.fillna(_MISSING_STRING_SENTINEL) == nb.fillna(_MISSING_STRING_SENTINEL)).astype(bool)
+    na = pd.to_numeric(a, errors="coerce").to_numpy(dtype=float)
+    nb = pd.to_numeric(b, errors="coerce").to_numpy(dtype=float)
+    return pd.Series(
+        np.isclose(na, nb, atol=VALUE_COMPARISON_ATOL, rtol=VALUE_COMPARISON_RTOL, equal_nan=True),
+        index=a.index,
+    )
 
 
 def build_log_rows(engine_df: pd.DataFrame, persona_path: Path) -> pd.DataFrame:
@@ -309,12 +294,20 @@ def build_log_rows(engine_df: pd.DataFrame, persona_path: Path) -> pd.DataFrame:
             pre_post_known & assigned_known, pd.NA
         )
 
-        pct_change = np.where(assigned > 0, (post - assigned) / assigned, np.nan)
+        pct_change = pd.Series(
+            np.where(assigned > 0, (post - assigned) / assigned, np.nan), index=log_df.index
+        )
         log_df[f"pct_change_{scenario}"] = pct_change
-        log_df[f"cohort_{scenario}"] = [
-            _compute_cohort(pc, status, lim, p)
-            for pc, status, lim, p in zip(pct_change, log_df["shadow_status"], assigned, post)
-        ]
+
+        # Frozen-at-scoring-time cohort label, fully vectorized. Eligible only when
+        # the shadow result is real (status ok, live limit positive, post-transition
+        # value known); otherwise "unclassified", never defaulted into "neutral".
+        eligible = (log_df["shadow_status"] == "ok") & (assigned > 0) & post.notna() & pct_change.notna()
+        log_df[f"cohort_{scenario}"] = np.select(
+            [eligible & (pct_change > COHORT_UPLIFT_THRESHOLD), eligible & (pct_change < COHORT_TIGHTEN_THRESHOLD), eligible],
+            ["uplift", "tighten", "neutral"],
+            default="unclassified",
+        )
 
     return log_df
 
@@ -353,37 +346,40 @@ def append_to_log(new_rows: pd.DataFrame, log_path: Path) -> int:
         combined = new_rows
         n_new, n_skipped_exact, n_conflict = len(new_rows), 0, 0
     else:
-        existing_indexed = existing.set_index(["run_id", "msisdn"], drop=False)
+        # Fully vectorized (no per-row Python loop -- this runs at full-pipeline
+        # scale, ~140k+ rows per cycle): a single left merge finds which incoming
+        # keys already exist in the log, then each compare_col's equality is a
+        # whole-column vectorized comparison via _vectorized_equal.
         compare_cols = [c for c in new_rows.columns if c not in ("run_id", "msisdn")
                         and c in existing.columns]
+        right = existing[["run_id", "msisdn"] + compare_cols]
+        merged = new_rows.merge(right, on=["run_id", "msisdn"], how="left",
+                                 suffixes=("_new", "_exist"), indicator=True)
 
-        to_append_rows = []
-        n_skipped_exact = 0
-        conflicting_keys = []
-        for _, row in new_rows.iterrows():
-            key = (row["run_id"], row["msisdn"])
-            if key not in existing_indexed.index:
-                to_append_rows.append(row)
-                continue
-            existing_row = existing_indexed.loc[key]
-            if isinstance(existing_row, pd.DataFrame):
-                # Shouldn't happen (existing log already validated unique), but guard anyway.
-                existing_row = existing_row.iloc[0]
-            is_exact = all(_values_equal(c, existing_row[c], row[c]) for c in compare_cols)
-            if is_exact:
-                n_skipped_exact += 1
-            else:
-                conflicting_keys.append(key)
+        is_both = (merged["_merge"] == "both").to_numpy()
+        is_new_key = (merged["_merge"] == "left_only").to_numpy()
 
-        n_conflict = len(conflicting_keys)
-        if conflicting_keys:
+        match = np.ones(len(merged), dtype=bool)
+        for col in compare_cols:
+            match &= _vectorized_equal(col, merged[f"{col}_new"], merged[f"{col}_exist"]).to_numpy()
+
+        is_exact = is_both & match
+        is_conflict = is_both & ~match
+
+        n_new = int(is_new_key.sum())
+        n_skipped_exact = int(is_exact.sum())
+        n_conflict = int(is_conflict.sum())
+
+        if n_conflict:
+            conflicting_keys = list(zip(
+                merged.loc[is_conflict, "run_id"].head(10), merged.loc[is_conflict, "msisdn"].head(10)
+            ))
             print(f"CONFLICT: {n_conflict} existing decision key(s) have different incoming "
                   f"values; existing immutable records retained, conflicting incoming rows NOT "
-                  f"logged. Affected keys (first 10): {conflicting_keys[:10]}")
+                  f"logged. Affected keys (first 10): {conflicting_keys}")
 
-        new_df = pd.DataFrame(to_append_rows) if to_append_rows else pd.DataFrame(columns=new_rows.columns)
-        combined = pd.concat([existing, new_df], ignore_index=True)
-        n_new = len(to_append_rows)
+        to_append_df = new_rows.loc[is_new_key]
+        combined = pd.concat([existing, to_append_df], ignore_index=True)
 
     log_path.parent.mkdir(parents=True, exist_ok=True)
     combined.to_csv(log_path, index=False)
