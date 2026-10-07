@@ -56,6 +56,13 @@ from segmentation.extrafloat_segmentation_features import prepare_features  # no
 OVER_LIMIT_THRESHOLD = 1.10
 TOP_N = 25
 
+# Same five sub-bands below the high-risk threshold used in profile_over_limit_agents.py's
+# CAL_PD_EDGES/CAL_PD_LABELS, restated here for the risk-band-matched (standardized)
+# comparison below -- not imported, same independent-restatement convention as every
+# other check_*.py / profile_*.py script in this repo.
+CAL_PD_EDGES = [0.0, 0.02, 0.05, 0.10, 0.20, 0.30, 1.0]
+CAL_PD_LABELS = ["<2%", "2-5%", "5-10%", "10-20%", "20-30%", "30%+"]
+
 
 def _normalize_msisdn(s: pd.Series) -> pd.Series:
     return s.astype(str).str.replace(r"[^0-9]", "", regex=True).replace("", pd.NA)
@@ -70,7 +77,7 @@ def _profile_subset(
 ) -> pd.DataFrame | None:
     n = int(subset_mask.sum())
     n_baseline = int(baseline_mask.sum())
-    print(f"\n=== {label}: {n:,} agents (baseline: {n_baseline:,} not-over-limit agents) ===")
+    print(f"\n=== {label}: {n:,} agents (baseline: {n_baseline:,} agents) ===")
     if n == 0 or n_baseline == 0:
         print("  (empty group -- nothing to profile)")
         return None
@@ -88,6 +95,72 @@ def _profile_subset(
         rows.append({
             "group": label, "column": col,
             "subset_mean": subset_mean, "baseline_mean": baseline_mean,
+            "ratio": ratio, "zscore": zscore,
+        })
+    profile = pd.DataFrame(rows).sort_values("zscore", key=lambda s: s.abs(), ascending=False)
+    with pd.option_context("display.float_format", "{:.3f}".format):
+        print(profile.drop(columns="group").head(TOP_N).to_string(index=False))
+    return profile
+
+
+def _profile_subset_standardized(
+    label: str,
+    subset_mask: pd.Series,
+    baseline_pool_mask: pd.Series,
+    df: pd.DataFrame,
+    cols: list[str],
+    band_col: str,
+) -> pd.DataFrame | None:
+    """Direct standardization: reweights baseline_pool's per-band means using the
+    SUBSET's own cal_pd-band sizes as weights, so the comparison controls for cal_pd
+    band (not just tier) -- answers "if the baseline had the subset's own risk-band
+    mix, what would it look like", which is what a tier-only or risk-only control
+    can't do on its own. A band present in the subset but with zero baseline_pool
+    agents is dropped from both the weighted mean and the subset's own mean, with a
+    note, rather than silently propagating NaN into every feature.
+    """
+    n = int(subset_mask.sum())
+    n_pool = int(baseline_pool_mask.sum())
+    print(f"\n=== {label}: {n:,} agents (risk-band-matched baseline pool: {n_pool:,} agents) ===")
+    if n == 0 or n_pool == 0:
+        print("  (empty group -- nothing to profile)")
+        return None
+
+    subset_band_n = df.loc[subset_mask, band_col].value_counts()
+    pool_band_n = df.loc[baseline_pool_mask, band_col].value_counts()
+    usable_bands = [b for b in subset_band_n.index if pool_band_n.get(b, 0) > 0]
+    missing_bands = [b for b in subset_band_n.index if pool_band_n.get(b, 0) == 0]
+    if missing_bands:
+        n_missing_agents = int(subset_band_n.loc[missing_bands].sum())
+        print(f"  NOTE: {n_missing_agents:,} subset agent(s) in band(s) {missing_bands} have NO "
+              f"risk-band-matched baseline agents available -- excluded from this standardized "
+              f"comparison only (still counted everywhere else).")
+    weights = subset_band_n.loc[usable_bands]
+    n_used = int(weights.sum())
+
+    rows = []
+    for col in cols:
+        vals = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
+        subset_vals = vals[subset_mask & df[band_col].isin(usable_bands)]
+        subset_mean = subset_vals.mean()
+
+        band_means, band_vars = [], []
+        for b in usable_bands:
+            pool_vals = vals[baseline_pool_mask & (df[band_col] == b)]
+            band_means.append(pool_vals.mean())
+            band_vars.append(pool_vals.var())
+        band_means = pd.Series(band_means, index=usable_bands)
+        band_vars = pd.Series(band_vars, index=usable_bands).fillna(0.0)
+
+        standardized_mean = (band_means * weights).sum() / n_used
+        standardized_var = (band_vars * weights).sum() / n_used
+        standardized_std = np.sqrt(standardized_var)
+
+        ratio = (subset_mean / standardized_mean) if standardized_mean != 0 else np.nan
+        zscore = ((subset_mean - standardized_mean) / standardized_std) if standardized_std > 0 else np.nan
+        rows.append({
+            "group": label, "column": col,
+            "subset_mean": subset_mean, "baseline_mean": standardized_mean,
             "ratio": ratio, "zscore": zscore,
         })
     profile = pd.DataFrame(rows).sort_values("zscore", key=lambda s: s.abs(), ascending=False)
@@ -169,6 +242,10 @@ def main(argv: list[str] | None = None) -> None:
     cols = [c for c in selected_cols if c in merged.columns]
     print(f"Profiling {len(cols)} engineered feature(s) from prepare_features.\n")
 
+    merged["cal_pd"] = pd.to_numeric(merged["cal_pd"], errors="coerce")
+    merged["_cal_pd_band"] = pd.cut(merged["cal_pd"], bins=CAL_PD_EDGES, labels=CAL_PD_LABELS)
+    is_diamond_merged = merged["agent_category"].astype(str).str.strip().str.lower() == "diamond"
+
     baseline_mask = merged["not_over"]
     profiles = []
     for label, group_col in [
@@ -182,6 +259,35 @@ def main(argv: list[str] | None = None) -> None:
         profile = _profile_subset(label, merged[group_col], baseline_mask, merged, cols)
         if profile is not None:
             profiles.append(profile)
+
+    # -- Matched-baseline comparisons (requested check before calling the Driver A gap a --
+    # -- capacity story): control for the confounders Driver A/B are partly DEFINED by, --
+    # -- rather than comparing against the whole not-over population. --
+    print("=" * 78)
+    print("MATCHED-BASELINE COMPARISONS")
+    print("=" * 78)
+
+    diamond_not_over_mask = is_diamond_merged & merged["not_over"]
+    label = "driver_a vs. Diamond, not over limit (tier-matched only)"
+    print(f"\n{'-' * 78}\n{label}\n{'-' * 78}")
+    profile = _profile_subset(label, merged["driver_a"], diamond_not_over_mask, merged, cols)
+    if profile is not None:
+        profiles.append(profile)
+
+    label = "driver_a vs. Diamond, not over limit, SAME cal_pd bands (tier+risk matched)"
+    print(f"\n{'-' * 78}\n{label}\n{'-' * 78}")
+    profile = _profile_subset_standardized(
+        label, merged["driver_a"], diamond_not_over_mask, merged, cols, "_cal_pd_band",
+    )
+    if profile is not None:
+        profiles.append(profile)
+
+    cal_pd_high_not_over_mask = (merged["cal_pd"] >= threshold) & merged["not_over"]
+    label = f"driver_b vs. cal_pd>={threshold:.0%}, not over limit, any tier (risk-matched)"
+    print(f"\n{'-' * 78}\n{label}\n{'-' * 78}")
+    profile = _profile_subset(label, merged["driver_b"], cal_pd_high_not_over_mask, merged, cols)
+    if profile is not None:
+        profiles.append(profile)
 
     if profiles:
         pd.concat(profiles, ignore_index=True).to_csv(args.out, index=False)
