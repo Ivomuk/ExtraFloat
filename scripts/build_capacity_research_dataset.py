@@ -124,6 +124,16 @@ ENGINE_COLS = [
     "capacity_balance_component", "capacity_revenue_component", "capacity_txn_component",
     "capacity_payments_component", "capacity_customers_component", "capacity_volume_component",
     "capacity_top_driver",
+    # C3 shadow continuous risk multiplier -- always present in engine output
+    # (part of FINAL_OUTPUT_COLUMNS / SHADOW_OUTPUT_COLUMNS, no --keep-intermediate
+    # needed). Added for the capacity-vs-risk joint-surface comparison: lets a
+    # later script ask whether L_capacity_candidate x M_C3 (here, the CURRENT
+    # combined_cap x shadow_multiplier_base, i.e. shadow_limit_post_transition_base
+    # -- no new capacity formula invented) already sits inside or outside the
+    # empirically supported-exposure region for an agent's PD/capacity cell.
+    "shadow_status", "shadow_multiplier_base", "shadow_multiplier_conservative",
+    "shadow_limit_pre_transition_base", "shadow_limit_post_transition_base",
+    "shadow_limit_pre_transition_conservative", "shadow_limit_post_transition_conservative",
 ]
 ENGINE_REQUIRED = ["msisdn", "cal_pd", "assigned_limit", "combined_cap"]
 
