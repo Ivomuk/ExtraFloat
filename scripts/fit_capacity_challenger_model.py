@@ -48,19 +48,53 @@ this script reports the crossing frequency as a model-health
 diagnostic and does NOT silently sort/clip predictions to force
 agreement, per this session's explicit instruction.
 
-TWO VALIDATION LAYERS, run AFTER fitting (this script does not treat
-the model as validated just because it fits):
+monotonic_cst IS AN EXACT GUARANTEE for HistGradientBoostingRegressor
+with loss="squared_error", but confirmed directly (not assumed) to NOT
+be exact for loss="quantile" -- small violations can occur. Per this
+session's re-framing: these are directional constraints with
+empirically verified near-monotonic behavior for this estimator, not a
+hard mathematical guarantee for the quantile fits. monotonicity_diagnostic()
+sweeps each feature at THREE representative profiles of the other three
+(their marginal p10/p50/p90, not only the median) and reports, in UGX:
+pct of steps that go backward, the single worst downward step, that
+step as a % of the sweep's UGX range, and the total negative variation
+-- so a rare but economically large reversal cannot hide behind a low
+average violation rate. min_samples_leaf trades off this smoothness
+against model flexibility, so it is chosen via the hyperparameter
+comparison (pinball loss + capacity-distribution stability +
+monotonicity across candidates), not by minimizing violations alone.
+
+VALIDATION SPLIT: out-of-time if --oot-research-dataset (an earlier
+snapshot, built the same way via build_capacity_research_dataset.py) is
+given; otherwise a plain random split within --research-dataset, which
+this script explicitly labels as NOT out-of-time rather than silently
+treating it as equivalent -- a random split can look excellent while
+masking temporal instability in a relationship that needs to survive
+changes in transaction activity and borrowing behavior over time.
+
+VALIDATION LAYERS, run AFTER fitting (this script does not treat the
+model as validated just because it fits):
+  0. Out-of-sample pinball loss (log-space) and quantile calibration
+     (what fraction of held-out actual exposures fall at/below their
+     predicted quantile -- should be near 85/90/95%, with deviation
+     itself informative given censoring and generalization).
   1. CapacityUtilization = actual_exposure_ugx / demonstrated_capacity_p90,
      banded, with borrower-only 3+DPD / bad-closure / shortfall / N / PD
      mix reported per band -- the falsification test: if performance
      does not deteriorate above ~1.0x utilization, P90 historical
      exposure is not identifying an economically meaningful boundary.
-  2. Diamond A capacity-gap check: CapacityGap = demonstrated_capacity_p90
-     - combined_cap, CapacityUpliftRatio = demonstrated_capacity_p90 /
-     combined_cap, banded, reporting whether agents with LARGE predicted
-     gaps actually show the fundamentals and historical performance
-     consistent with having supported exposure above their current
-     combined_cap -- not just a large number from the model.
+  2. Capacity-gap check (run for BOTH "All agents" and "Diamond A"):
+     CapacityGap = demonstrated_capacity_p90 - combined_cap,
+     CapacityUpliftRatio = demonstrated_capacity_p90 / combined_cap,
+     banded, reporting whether agents with LARGE predicted gaps
+     (particularly >1.5x/>2.0x, where the challenger makes its
+     strongest claim) actually show the fundamentals and historical
+     performance consistent with the gap -- not just a large number.
+
+A printed "V1 ACCEPTANCE CRITERIA" section lists what to check across
+all of the above -- deliberately NOT a single hard-coded cutoff (e.g.
+not "reject if >2% violations"); the diagnostics are meant to show the
+empirical scale before any cutoff is encoded.
 
 Usage:
     python scripts\\fit_capacity_challenger_model.py ^
@@ -79,6 +113,7 @@ import pandas as pd
 import joblib
 import sklearn
 from sklearn.ensemble import HistGradientBoostingRegressor
+from sklearn.metrics import mean_pinball_loss
 
 SCHEMA_VERSION = 1
 
@@ -92,13 +127,16 @@ DEFAULT_PRIMARY_QUANTILE = 0.90
 DEFAULT_LOW_RISK_CAL_PD = 0.15
 DEFAULT_DIAMOND_HIGH_RISK_CAL_PD = 0.30
 DEFAULT_RANDOM_STATE = 42
-DEFAULT_MIN_SAMPLES_LEAF = 100  # tuned to reduce (not eliminate -- see monotonicity_diagnostic) the
-                                 # near-monotonicity noise that sklearn's HistGradientBoostingRegressor
-                                 # exhibits with loss="quantile" + monotonic_cst (confirmed directly:
-                                 # monotonic_cst is an exact guarantee for loss="squared_error", but
-                                 # NOT for loss="quantile" -- small violations of a few percent of the
-                                 # output range can occur even with the constraint set. This is a known
-                                 # property of this estimator, not a bug in this script.
+DEFAULT_MIN_SAMPLES_LEAF = 100  # the FINAL/chosen value -- see the printed hyperparameter comparison
+                                 # table (pinball loss + capacity-distribution stability + monotonicity
+                                 # across candidates) for why. monotonic_cst is an exact guarantee for
+                                 # HistGradientBoostingRegressor with loss="squared_error", but NOT for
+                                 # loss="quantile" (confirmed directly) -- min_samples_leaf trades off
+                                 # monotonicity smoothness against model flexibility, so it must not be
+                                 # picked on monotonicity alone.
+DEFAULT_MIN_SAMPLES_LEAF_CANDIDATES = [50, 100, 200]
+DEFAULT_VALIDATION_FRACTION = 0.2
+MONOTONICITY_PROFILE_PERCENTILES = {"p10": 0.10, "p50": 0.50, "p90": 0.90}
 
 UTILIZATION_EDGES = [0.0, 0.50, 0.75, 1.00, 1.25, np.inf]
 UTILIZATION_LABELS = ["<=0.50", "0.50-0.75", "0.75-1.00", "1.00-1.25", ">1.25"]
@@ -169,31 +207,100 @@ def fit_quantile_models(X: pd.DataFrame, y: pd.Series, quantiles: list,
     return models
 
 
-def monotonicity_diagnostic(models: dict, feature_medians: dict, feature_ranges: dict, n_grid: int = 60) -> pd.DataFrame:
+def feature_percentiles(df: pd.DataFrame, mask: pd.Series) -> dict:
+    """Per-feature {p10, p50, p90} marginal values over the given population
+    -- the 'several representative profiles' used by monotonicity_diagnostic
+    to hold the other three features at, instead of only their median."""
+    out = {}
+    for c in FEATURE_COLUMNS:
+        s = df.loc[mask, c]
+        out[c] = {name: float(s.quantile(p)) for name, p in MONOTONICITY_PROFILE_PERCENTILES.items()}
+    return out
+
+
+def make_random_split(train_mask: pd.Series, validation_fraction: float, random_state: int) -> tuple:
+    """Random split WITHIN the training population. NOT an out-of-time
+    split -- see --oot-research-dataset for that. Returns (fit_mask, val_mask)."""
+    idx = train_mask[train_mask].index.to_numpy()
+    rng = np.random.RandomState(random_state)
+    shuffled = rng.permutation(idx)
+    n_val = max(1, int(len(shuffled) * validation_fraction))
+    val_idx = shuffled[:n_val]
+    val_mask = pd.Series(False, index=train_mask.index)
+    val_mask.loc[val_idx] = True
+    fit_mask = train_mask & ~val_mask
+    return fit_mask, val_mask
+
+
+def pinball_loss_by_quantile(models: dict, X_val: pd.DataFrame, y_val_log: pd.Series) -> dict:
+    """Pinball (quantile) loss in LOG space -- the same units/scale the
+    models were actually fit to minimize, so hyperparameter choices are
+    compared on an apples-to-apples basis."""
+    X_arr = X_val.to_numpy()
+    y_arr = y_val_log.to_numpy()
+    out = {}
+    for q, m in models.items():
+        pred = m.predict(X_arr)
+        out[q] = round(float(mean_pinball_loss(y_arr, pred, alpha=q)), 5)
+    return out
+
+
+def quantile_calibration(models: dict, X_val: pd.DataFrame, y_val_log: pd.Series) -> pd.DataFrame:
+    """Out-of-sample calibration: what fraction of actual (held-out, log)
+    exposures fall at or below their predicted quantile? Should be roughly
+    85/90/95% -- not necessarily exact, because of censoring (current
+    policy bounds observed exposure) and ordinary generalization error,
+    but the deviation itself is informative, per this session's
+    instruction. Reported, not forced to match."""
+    X_arr = X_val.to_numpy()
+    y_arr = y_val_log.to_numpy()
+    rows = []
+    for q, m in models.items():
+        pred = m.predict(X_arr)
+        empirical_coverage = float((y_arr <= pred).mean()) * 100
+        rows.append({"quantile": q, "nominal_coverage_pct": q * 100,
+                     "empirical_coverage_pct": round(empirical_coverage, 2),
+                     "deviation_pp": round(empirical_coverage - q * 100, 2),
+                     "n_validation": len(y_arr)})
+    return pd.DataFrame(rows)
+
+
+def monotonicity_diagnostic(models: dict, feat_pctiles: dict, feature_ranges: dict, n_grid: int = 60) -> pd.DataFrame:
     """For each feature, sweep it across its observed training range while
-    holding the other three at their training median, and report the worst
-    (most negative) step-to-step change in predicted log-capacity for each
-    quantile model. monotonic_cst guarantees this is exactly >= 0 for
-    loss="squared_error" but NOT for loss="quantile" (confirmed directly --
-    see module-level comment) -- this is reported as a model-health
-    diagnostic, never silently hidden or corrected by re-sorting."""
+    holding the OTHER THREE jointly at each of several representative
+    profiles (their marginal p10/p50/p90), and report, IN UGX (not log)
+    space, the step-to-step behavior of predicted demonstrated capacity:
+    pct of adjacent steps that go backward, the single worst downward
+    step in UGX, that worst step as a % of the sweep's total UGX range,
+    and the total negative variation (sum of every backward step's size)
+    -- so a rare but economically large reversal cannot hide behind a
+    small average violation rate. monotonic_cst guarantees this is
+    exactly >= 0 for loss="squared_error" but NOT for loss="quantile"
+    (confirmed directly) -- reported as a model-health diagnostic, never
+    silently hidden or corrected by re-sorting."""
     rows = []
     for feat in FEATURE_COLUMNS:
         lo, hi = feature_ranges[feat]
-        grid = pd.DataFrame({c: np.full(n_grid, feature_medians[c]) for c in FEATURE_COLUMNS})
-        grid[feat] = np.linspace(lo, hi, n_grid)
-        X_grid, valid_grid = build_feature_matrix(grid)
-        X_arr = X_grid.to_numpy()
-        for q, m in models.items():
-            preds = m.predict(X_arr)
-            diffs = np.diff(preds)
-            total_range = preds.max() - preds.min()
-            rows.append({
-                "feature": feat, "quantile": q,
-                "n_steps": len(diffs), "n_violations": int((diffs < 0).sum()),
-                "worst_violation": round(float(diffs.min()), 5) if len(diffs) else 0.0,
-                "worst_violation_pct_of_range": round(float(-diffs.min()) / total_range * 100, 2) if total_range > 0 and diffs.min() < 0 else 0.0,
-            })
+        other_feats = [c for c in FEATURE_COLUMNS if c != feat]
+        for profile_name in MONOTONICITY_PROFILE_PERCENTILES:
+            grid = pd.DataFrame({c: np.full(n_grid, feat_pctiles[c][profile_name]) for c in other_feats})
+            grid[feat] = np.linspace(lo, hi, n_grid)
+            X_grid, valid_grid = build_feature_matrix(grid)
+            X_arr = X_grid.to_numpy()
+            for q, m in models.items():
+                preds_ugx = np.exp(m.predict(X_arr))
+                diffs = np.diff(preds_ugx)
+                total_range = preds_ugx.max() - preds_ugx.min()
+                neg = diffs[diffs < 0]
+                n_steps = len(diffs)
+                rows.append({
+                    "feature": feat, "profile": profile_name, "quantile": q,
+                    "n_steps": n_steps, "n_violations": int(len(neg)),
+                    "pct_violations": round(len(neg) / n_steps * 100, 2) if n_steps else 0.0,
+                    "max_downward_violation_ugx": round(float(neg.min()), 2) if len(neg) else 0.0,
+                    "max_violation_pct_of_range": round(float(-neg.min()) / total_range * 100, 2) if total_range > 0 and len(neg) else 0.0,
+                    "total_negative_variation_ugx": round(float(-neg.sum()), 2) if len(neg) else 0.0,
+                })
     return pd.DataFrame(rows)
 
 
@@ -258,6 +365,14 @@ def _performance_block(cell: pd.DataFrame) -> dict:
     return row
 
 
+def diamond_a_mask(df: pd.DataFrame, diamond_high_risk_cal_pd: float) -> pd.Series:
+    diamond = (
+        df["agent_category"].astype(str).str.strip().str.lower() == "diamond"
+        if "agent_category" in df.columns else pd.Series(False, index=df.index)
+    )
+    return diamond & (df["cal_pd"] < diamond_high_risk_cal_pd)
+
+
 def utilization_validation(df: pd.DataFrame, scored: pd.DataFrame, primary_col: str) -> pd.DataFrame:
     """Validation layer 1: does performance deteriorate above ~1.0x
     utilization? Run across the WHOLE scored population (not just the
@@ -284,17 +399,17 @@ def utilization_validation(df: pd.DataFrame, scored: pd.DataFrame, primary_col: 
     return pd.DataFrame(rows)
 
 
-def diamond_capacity_gap_check(df: pd.DataFrame, scored: pd.DataFrame, primary_col: str,
-                                diamond_high_risk_cal_pd: float) -> pd.DataFrame:
-    """Validation layer 2: for Diamond A, do agents with LARGE predicted
-    capacity gaps actually show the fundamentals and performance consistent
-    with having supported exposure above their current combined_cap?"""
-    diamond_mask = (
-        df["agent_category"].astype(str).str.strip().str.lower() == "diamond"
-        if "agent_category" in df.columns else pd.Series(False, index=df.index)
-    )
-    low_risk_mask = df["cal_pd"] < diamond_high_risk_cal_pd
-    working = df[diamond_mask & low_risk_mask].join(
+def capacity_gap_check(df: pd.DataFrame, scored: pd.DataFrame, primary_col: str,
+                        population_mask: pd.Series) -> pd.DataFrame:
+    """Validation layer 2 (population-agnostic): do agents with LARGE
+    predicted capacity gaps actually show the fundamentals and performance
+    consistent with having supported exposure above their current
+    combined_cap -- not just a large number from the model? Called once
+    for 'All agents' and once for 'Diamond A' specifically: per this
+    session's point #6, the agents where the challenger makes its
+    strongest claim (largest uplift ratio) deserve direct interrogation
+    regardless of which population they fall in."""
+    working = df[population_mask].join(
         scored[[primary_col, "capacity_gap", "capacity_uplift_ratio"]], how="left"
     )
     working = working[working["capacity_uplift_ratio"].notna()].copy()
@@ -321,18 +436,29 @@ def diamond_capacity_gap_check(df: pd.DataFrame, scored: pd.DataFrame, primary_c
 def main(argv: list[str] | None = None) -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--research-dataset", default="capacity_research_dataset.csv")
+    ap.add_argument("--oot-research-dataset", default=None,
+                     help="optional: a capacity_research_dataset.csv built from an EARLIER snapshot, used "
+                          "ONLY for out-of-time validation (pinball loss + calibration), never for fitting "
+                          "the final model. Without this, the script falls back to a random split within "
+                          "--research-dataset and says so explicitly -- a random split is NOT out-of-time.")
+    ap.add_argument("--validation-fraction", type=float, default=DEFAULT_VALIDATION_FRACTION)
     ap.add_argument("--low-risk-cal-pd", type=float, default=DEFAULT_LOW_RISK_CAL_PD)
     ap.add_argument("--diamond-high-risk-cal-pd", type=float, default=DEFAULT_DIAMOND_HIGH_RISK_CAL_PD)
     ap.add_argument("--quantiles", default=",".join(str(q) for q in DEFAULT_QUANTILES))
     ap.add_argument("--primary-quantile", type=float, default=DEFAULT_PRIMARY_QUANTILE)
     ap.add_argument("--random-state", type=int, default=DEFAULT_RANDOM_STATE)
-    ap.add_argument("--min-samples-leaf", type=int, default=DEFAULT_MIN_SAMPLES_LEAF)
+    ap.add_argument("--min-samples-leaf", type=int, default=DEFAULT_MIN_SAMPLES_LEAF,
+                     help="the FINAL/chosen value used for the production model.")
+    ap.add_argument("--min-samples-leaf-candidates", default=",".join(str(v) for v in DEFAULT_MIN_SAMPLES_LEAF_CANDIDATES),
+                     help="comma-separated values compared via pinball loss, capacity-distribution "
+                          "stability, and monotonicity BEFORE committing to --min-samples-leaf.")
     ap.add_argument("--model-out-dir", default="capacity_challenger_artifacts")
     ap.add_argument("--out-prefix", default="capacity_challenger")
     ap.add_argument("--no-save-model", action="store_true")
     args = ap.parse_args(argv)
     quantiles = [float(q) for q in args.quantiles.split(",")]
     primary_col = _capacity_col(args.primary_quantile)
+    leaf_candidates = sorted(set(int(v) for v in args.min_samples_leaf_candidates.split(",")) | {args.min_samples_leaf})
 
     path = Path(args.research_dataset)
     if not path.exists():
@@ -358,13 +484,85 @@ def main(argv: list[str] | None = None) -> None:
     if n_train < 50:
         sys.exit(f"ERROR: only {n_train} training rows -- too few to fit. Check --research-dataset / --low-risk-cal-pd.")
 
-    y_train = np.log(df.loc[train_mask, "actual_exposure_ugx"])
-    X_train = X.loc[train_mask]
+    # -- Validation split: out-of-time if an earlier snapshot is provided, otherwise a DISCLOSED random split. --
+    if args.oot_research_dataset:
+        oot_path = Path(args.oot_research_dataset)
+        if not oot_path.exists():
+            sys.exit(f"ERROR: --oot-research-dataset {oot_path} not found.")
+        oot_df = pd.read_csv(oot_path, low_memory=False)
+        oot_missing = [c for c in required_other if c not in oot_df.columns]
+        if oot_missing:
+            sys.exit(f"ERROR: {oot_path} is missing required column(s): {oot_missing}")
+        oot_X, oot_feature_valid = build_feature_matrix(oot_df)
+        oot_train_pop = training_mask(oot_df, args.low_risk_cal_pd)
+        val_mask = oot_train_pop & oot_feature_valid
+        val_df, val_X = oot_df, oot_X
+        fit_mask = train_mask
+        split_description = f"out-of-time (--oot-research-dataset {oot_path}, {int(val_mask.sum()):,} validation agents)"
+    else:
+        fit_mask, val_mask = make_random_split(train_mask, args.validation_fraction, args.random_state)
+        val_df, val_X = df, X
+        split_description = (f"RANDOM split within --research-dataset (validation_fraction="
+                              f"{args.validation_fraction}) -- this is NOT out-of-time. Pass "
+                              f"--oot-research-dataset (built from an earlier snapshot via "
+                              f"build_capacity_research_dataset.py) for a genuine temporal holdout.")
+    print(f"Validation split method: {split_description}")
+    print(f"  Fit rows: {int(fit_mask.sum()):,}  |  Validation rows: {int(val_mask.sum()):,}")
 
-    print(f"Fitting quantile models {quantiles} (primary={args.primary_quantile}), "
-          f"monotonic_cst={MONOTONIC_CST} on features {FEATURE_COLUMNS} "
+    y_fit = np.log(df.loc[fit_mask, "actual_exposure_ugx"])
+    X_fit = X.loc[fit_mask]
+    y_val = np.log(val_df.loc[val_mask, "actual_exposure_ugx"])
+    X_val = val_X.loc[val_mask]
+
+    # -- Hyperparameter comparison: pinball loss + capacity-distribution stability + monotonicity, --
+    # -- across candidates. min_samples_leaf is NOT auto-selected from this -- a human reviews it. --
+    print(f"\n{'=' * 100}\nHyperparameter comparison: min_samples_leaf in {leaf_candidates}\n{'=' * 100}")
+    feat_pctiles = feature_percentiles(df, fit_mask)
+    feature_ranges = {c: (float(df.loc[fit_mask, c].min()), float(df.loc[fit_mask, c].max())) for c in FEATURE_COLUMNS}
+    comparison_rows = []
+    diagnostic_models_by_leaf = {}
+    for leaf in leaf_candidates:
+        diag_models = fit_quantile_models(X_fit, y_fit, quantiles, MONOTONIC_CST, args.random_state, leaf)
+        diagnostic_models_by_leaf[leaf] = diag_models
+        pinball = pinball_loss_by_quantile(diag_models, X_val, y_val)
+        scored_full_tmp = score(X, feature_valid, diag_models)
+        mono_tmp = monotonicity_diagnostic(diag_models, feat_pctiles, feature_ranges, n_grid=40)
+        cross_tmp = crossing_diagnostic(scored_full_tmp, quantiles)
+        row = {"min_samples_leaf": leaf}
+        for q in quantiles:
+            row[f"pinball_loss_p{int(round(q*100))}"] = pinball[q]
+            row[f"median_demonstrated_capacity_p{int(round(q*100))}"] = round(float(np.nanmedian(scored_full_tmp[_capacity_col(q)])), 0)
+            iqr = np.nanpercentile(scored_full_tmp[_capacity_col(q)].dropna(), 75) - np.nanpercentile(scored_full_tmp[_capacity_col(q)].dropna(), 25)
+            row[f"iqr_demonstrated_capacity_p{int(round(q*100))}"] = round(float(iqr), 0)
+        row["pct_quantile_crossing"] = cross_tmp["pct_crossing"]
+        row["worst_monotonicity_violation_pct_of_range"] = mono_tmp["max_violation_pct_of_range"].max()
+        comparison_rows.append(row)
+    comparison_df = pd.DataFrame(comparison_rows)
+    with pd.option_context("display.float_format", "{:,.4f}".format, "display.max_columns", None, "display.width", 240):
+        print(comparison_df.to_string(index=False))
+    comparison_df.to_csv(f"{args.out_prefix}_hyperparameter_comparison.csv", index=False)
+    print(f"-> hyperparameter comparison written: {args.out_prefix}_hyperparameter_comparison.csv")
+    print(f"Proceeding with --min-samples-leaf={args.min_samples_leaf} (chosen by the operator, "
+          f"not auto-selected from the table above).")
+
+    # -- Out-of-sample pinball loss + calibration for the CHOSEN min_samples_leaf specifically. --
+    chosen_diag_models = diagnostic_models_by_leaf[args.min_samples_leaf]
+    chosen_pinball = pinball_loss_by_quantile(chosen_diag_models, X_val, y_val)
+    calibration = quantile_calibration(chosen_diag_models, X_val, y_val)
+    print(f"\n{'=' * 100}\nOut-of-sample pinball loss and quantile calibration (min_samples_leaf={args.min_samples_leaf})\n{'=' * 100}")
+    print(f"Pinball loss (log-space) by quantile: {chosen_pinball}")
+    with pd.option_context("display.float_format", "{:,.2f}".format):
+        print(calibration.to_string(index=False))
+    calibration.to_csv(f"{args.out_prefix}_quantile_calibration.csv", index=False)
+
+    # -- Production fit: full training population, chosen hyperparameter. This is the model that --
+    # -- gets scored, validated, and (optionally) persisted. --
+    print(f"\nFitting PRODUCTION quantile models {quantiles} (primary={args.primary_quantile}), "
+          f"monotonic_cst={MONOTONIC_CST} on features {FEATURE_COLUMNS} on the FULL training population "
           f"(sklearn {sklearn.__version__}, random_state={args.random_state}, "
           f"min_samples_leaf={args.min_samples_leaf})...")
+    y_train = np.log(df.loc[train_mask, "actual_exposure_ugx"])
+    X_train = X.loc[train_mask]
     models = fit_quantile_models(X_train, y_train, quantiles, MONOTONIC_CST, args.random_state, args.min_samples_leaf)
 
     scored = score(X, feature_valid, models)
@@ -375,14 +573,15 @@ def main(argv: list[str] | None = None) -> None:
           f"{diag['n_crossing']:,} of {diag['n_valid']:,} valid rows ({diag['pct_crossing']}%) have "
           f"P85/P90/P95 out of order. Not corrected -- reported as a model-health signal.")
 
-    feature_medians = {c: float(df.loc[train_mask, c].median()) for c in FEATURE_COLUMNS}
-    feature_ranges = {c: (float(df.loc[train_mask, c].min()), float(df.loc[train_mask, c].max())) for c in FEATURE_COLUMNS}
-    mono_diag = monotonicity_diagnostic(models, feature_medians, feature_ranges)
-    worst = mono_diag["worst_violation_pct_of_range"].max()
-    print(f"\nMonotonicity diagnostic (monotonic_cst is an EXACT guarantee for loss='squared_error' but "
-          f"NOT for loss='quantile' -- confirmed directly, not assumed): worst observed violation is "
-          f"{worst:.2f}% of that sweep's output range. Reported, not corrected -- see "
-          f"{args.out_prefix}_monotonicity_diagnostic.csv for the full per-feature/per-quantile breakdown.")
+    mono_diag = monotonicity_diagnostic(models, feat_pctiles, feature_ranges)
+    worst = mono_diag["max_violation_pct_of_range"].max()
+    worst_row = mono_diag.loc[mono_diag["max_violation_pct_of_range"].idxmax()]
+    print(f"\nMonotonicity diagnostic (sweeping each feature at p10/p50/p90 profiles of the other three; "
+          f"monotonic_cst is an EXACT guarantee for loss='squared_error' but NOT for loss='quantile' -- "
+          f"confirmed directly, not assumed): worst observed violation is {worst:.2f}% of that sweep's "
+          f"UGX output range (feature={worst_row['feature']}, profile={worst_row['profile']}, "
+          f"quantile={worst_row['quantile']}, max_downward_violation_ugx={worst_row['max_downward_violation_ugx']:,.0f}). "
+          f"Reported, not corrected -- see {args.out_prefix}_monotonicity_diagnostic.csv for the full breakdown.")
     mono_diag.to_csv(f"{args.out_prefix}_monotonicity_diagnostic.csv", index=False)
 
     medians = {q: float(np.nanmedian(scored[_capacity_col(q)])) for q in quantiles}
@@ -399,12 +598,16 @@ def main(argv: list[str] | None = None) -> None:
         print(util.to_string(index=False))
     util.to_csv(f"{args.out_prefix}_utilization_validation.csv", index=False)
 
-    print(f"\n{'=' * 100}\nValidation 2: Diamond A ({'cal_pd < %.0f%%' % (args.diamond_high_risk_cal_pd * 100)}) "
-          f"capacity-gap check\n{'=' * 100}")
-    diamond_check = diamond_capacity_gap_check(df, scored, primary_col, args.diamond_high_risk_cal_pd)
-    with pd.option_context("display.float_format", "{:,.2f}".format, "display.max_columns", None, "display.width", 240):
-        print(diamond_check.to_string(index=False))
-    diamond_check.to_csv(f"{args.out_prefix}_diamond_a_gap_check.csv", index=False)
+    diamond_mask = diamond_a_mask(df, args.diamond_high_risk_cal_pd)
+    for pop_label, pop_mask, out_suffix in [
+        ("All agents", pd.Series(True, index=df.index), "all"),
+        (f"Diamond A (cal_pd < {args.diamond_high_risk_cal_pd * 100:.0f}%)", diamond_mask, "diamond_a"),
+    ]:
+        print(f"\n{'=' * 100}\nValidation 2: capacity-gap check -- {pop_label}\n{'=' * 100}")
+        gap_check = capacity_gap_check(df, scored, primary_col, pop_mask)
+        with pd.option_context("display.float_format", "{:,.2f}".format, "display.max_columns", None, "display.width", 240):
+            print(gap_check.to_string(index=False))
+        gap_check.to_csv(f"{args.out_prefix}_gap_check_{out_suffix}.csv", index=False)
 
     if not args.no_save_model:
         out_dir = Path(args.model_out_dir)
@@ -426,11 +629,16 @@ def main(argv: list[str] | None = None) -> None:
             "primary_quantile": args.primary_quantile,
             "random_state": args.random_state,
             "min_samples_leaf": args.min_samples_leaf,
-            "monotonicity_note": "monotonic_cst is an exact guarantee for HistGradientBoostingRegressor "
-                                  "with loss='squared_error', but NOT for loss='quantile' (confirmed by "
-                                  "direct testing, not assumed) -- small violations can occur; see "
+            "min_samples_leaf_candidates_compared": leaf_candidates,
+            "validation_split_method": split_description,
+            "out_of_sample_pinball_loss_log_space": chosen_pinball,
+            "out_of_sample_calibration_pct": calibration.set_index("quantile")["empirical_coverage_pct"].to_dict(),
+            "monotonicity_note": "monotonic_cst settings are DIRECTIONAL CONSTRAINTS with empirically "
+                                  "verified near-monotonic behavior for this estimator/loss combination, "
+                                  "NOT an exact mathematical guarantee for the quantile fits (confirmed by "
+                                  "direct testing against loss='squared_error', where it IS exact) -- see "
                                   f"{args.out_prefix}_monotonicity_diagnostic.csv from this fit for the "
-                                  "observed magnitude.",
+                                  "observed magnitude at multiple feature profiles.",
             "output_naming": "demonstrated_capacity_pXX -- the upper end of historically demonstrated "
                               "exposure under the EXISTING (censoring) engine, not a latent maximum capacity.",
             "excluded_features_note": "business persistence excluded from v1 pending the recency-column bug fix "
@@ -440,15 +648,37 @@ def main(argv: list[str] | None = None) -> None:
         print(f"\nWrote model artifact(s) + metadata to {out_dir}/")
 
     print(f"\n{'#' * 100}")
+    print("V1 ACCEPTANCE CRITERIA (for manual review -- NOT auto-enforced, no hard cutoff coded)")
+    print(f"{'#' * 100}")
+    print("Accept this quantile model for shadow analysis only if, taken together:\n"
+          "  1. Monotonic violations are infrequent AND economically immaterial -- see the monotonicity\n"
+          "     diagnostic above (pct_violations, max_downward_violation_ugx, max_violation_pct_of_range,\n"
+          "     total_negative_variation_ugx, across p10/p50/p90 profiles -- a rare but large reversal\n"
+          "     should not hide behind a low average rate).\n"
+          "  2. Quantile crossing (P85/P90/P95 out of order) is limited -- see the crossing diagnostic.\n"
+          "  3. Out-of-sample pinball loss is stable across the min_samples_leaf candidates compared above\n"
+          "     (a candidate that wins on monotonicity alone but loses materially on pinball loss is not\n"
+          "     a free improvement).\n"
+          "  4. Predicted capacity distributions (median/IQR per quantile) are stable across those same\n"
+          "     candidates -- the chosen hyperparameter should not be perched on a knife-edge.\n"
+          "  5. Out-of-sample quantile calibration (above) is in the right neighborhood of its nominal\n"
+          "     85/90/95% -- deviation is expected (censoring, generalization) but should be inspected,\n"
+          "     not ignored.\n"
+          "No single number here is a pass/fail gate by itself -- that is a deliberate choice: let the\n"
+          "diagnostics show the empirical scale before encoding a cutoff.")
+
+    print(f"\n{'#' * 100}")
     print("What this does and does not establish")
     print(f"{'#' * 100}")
     print("demonstrated_capacity_pXX estimates the upper end of exposure HISTORICALLY SERVICED by low-risk\n"
           "agents with similar business fundamentals under the existing (censoring) engine -- not a latent\n"
           "maximum capacity, and not yet a formula to deploy. combined_cap was never read by the feature\n"
           "matrix. Validation 1 tests whether performance actually deteriorates above ~1.0x utilization\n"
-          "(the falsification test); Validation 2 tests whether Diamond A agents with large predicted gaps\n"
-          "show fundamentals/performance consistent with the gap, not just a large model output. Only after\n"
-          "both pass would this be combined with C3 (L_recommended = L_capacity_challenger x M_C3).")
+          "(the falsification test); Validation 2 (run for both All agents and Diamond A) tests whether\n"
+          "agents with large predicted gaps show fundamentals/performance consistent with the gap, not just\n"
+          "a large model output -- pay particular attention to the >1.5x and >2.0x uplift bands, where the\n"
+          "challenger makes its strongest claim that the existing engine understates business scale. Only\n"
+          "after both pass would this be combined with C3 (L_recommended = L_capacity_challenger x M_C3).")
 
 
 if __name__ == "__main__":
