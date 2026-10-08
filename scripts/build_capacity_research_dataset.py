@@ -72,10 +72,20 @@ signal that is ALSO re-counted inside capacity_volume_component) --
 NOT a claim this is a bug (may be intentional policy weighting), just a
 quantified diagnostic, as agreed before changing anything live.
 
+RECENCY REFERENCE DATE: days_since_payment_last/cash_in_last/cash_out_last need a
+point-in-time reference date. If --transaction-file has a snapshot_dt column,
+its max is used automatically. If not (confirmed to happen on the real
+retail_agents_filtered.csv -- it has no snapshot_dt), pass --reference-date
+explicitly (e.g. the pipeline's own --snapshot-date). Without either, these
+recency columns are SKIPPED entirely -- never silently computed against
+today's wall-clock date, which would quietly inflate every value by however
+long has passed since the real data snapshot.
+
 Usage:
     python scripts\\build_capacity_research_dataset.py ^
         --engine-output output\\engine_test_output.csv ^
         --transaction-file retail_agents_filtered.csv ^
+        --reference-date 2026-08-17 ^
         --monthly-summary-file monthly_disbursement_summary.csv ^
         --forward-outcomes-file data\\persona_k8_forward_outcomes.csv
 """
@@ -146,6 +156,12 @@ def main(argv: list[str] | None = None) -> None:
                           "skipped with a NOTE if not found")
     ap.add_argument("--forward-outcomes-file", default="data/persona_k8_forward_outcomes.csv",
                      help="optional -- skipped with a NOTE if not found")
+    ap.add_argument("--reference-date", default=None,
+                     help="point-in-time reference date (YYYY-MM-DD), e.g. the pipeline's "
+                          "--snapshot-date, used for recency features (days_since_payment_last "
+                          "etc.) ONLY when --transaction-file has no snapshot_dt column to infer "
+                          "it from. If neither is available, recency features are skipped "
+                          "entirely rather than silently computed against today's date.")
     ap.add_argument("--out", default="capacity_research_dataset.csv")
     args = ap.parse_args(argv)
 
@@ -194,16 +210,24 @@ def main(argv: list[str] | None = None) -> None:
         if c in txn.columns:
             txn[c] = pd.to_numeric(txn[c], errors="coerce")
 
-    # Point-in-time: one row per agent, the MOST RECENT snapshot_dt available
-    # in this extract (the raw mart can carry multiple dated rows per agent).
-    if "snapshot_dt" in txn.columns:
-        txn["snapshot_dt"] = pd.to_datetime(txn["snapshot_dt"], errors="coerce")
-        txn = txn.sort_values("snapshot_dt").drop_duplicates(subset="_id", keep="last")
+    # Point-in-time: one row per agent, the MOST RECENT date available in this
+    # extract (the raw mart can carry multiple dated rows per agent). Prefer
+    # snapshot_dt (the limit engine's own expected name); fall back to tbl_dt
+    # (the raw mart's actual column name on retail_agents_filtered.csv --
+    # apply_retail_agent_filter.py preserves the original mart column name
+    # as-is, and nothing upstream of it renames tbl_dt to snapshot_dt).
+    date_col = "snapshot_dt" if "snapshot_dt" in txn.columns else (
+        "tbl_dt" if "tbl_dt" in txn.columns else None
+    )
+    if date_col:
+        txn[date_col] = pd.to_datetime(txn[date_col], errors="coerce")
+        txn = txn.sort_values(date_col).drop_duplicates(subset="_id", keep="last")
     else:
-        print(f"NOTE: {txn_path.name} has no snapshot_dt -- cannot confirm point-in-time "
-              f"de-duplication; keeping the first row per agent as-is.")
+        print(f"NOTE: {txn_path.name} has neither snapshot_dt nor tbl_dt -- cannot confirm "
+              f"point-in-time de-duplication; keeping the first row per agent as-is.")
         txn = txn.drop_duplicates(subset="_id", keep="first")
-    print(f"Raw transaction file: {len(txn):,} unique agent(s) after point-in-time de-duplication.")
+    print(f"Raw transaction file: {len(txn):,} unique agent(s) after point-in-time de-duplication"
+          f"{f' (on {date_col})' if date_col else ''}.")
 
     # -- Dimension 1: Float activity (cash-in + payment; NOT a 3rd signal) ---
     if {"cash_in_value_1m", "payment_value_1m"} <= set(txn.columns):
@@ -240,8 +264,20 @@ def main(argv: list[str] | None = None) -> None:
             (txn["vol_1m"] > txn["vol_3m"] / 3.0) & (txn["vol_3m"] > txn["vol_6m"] / 2.0)
         ).astype(int)
 
-    if not missing_dates:
-        ref_date = txn["snapshot_dt"].max() if "snapshot_dt" in txn.columns else pd.Timestamp.now()
+    ref_date = None
+    if date_col:
+        ref_date = txn[date_col].max()
+    elif args.reference_date:
+        ref_date = pd.to_datetime(args.reference_date, errors="coerce")
+        if pd.isna(ref_date):
+            sys.exit(f"ERROR: could not parse --reference-date {args.reference_date!r} as a date.")
+    if ref_date is None:
+        print(f"NOTE: no snapshot_dt or tbl_dt in {txn_path.name} and no --reference-date given -- "
+              f"recency features (days_since_payment_last/cash_in_last/cash_out_last) SKIPPED "
+              f"entirely. Computing them against today's wall-clock date would silently inflate "
+              f"every value by however long has passed since the real data snapshot -- pass "
+              f"--reference-date (e.g. the pipeline's --snapshot-date) to populate these.")
+    elif not missing_dates:
         for c in RAW_DATE_COLS:
             txn[c] = pd.to_datetime(txn[c], errors="coerce")
             txn[f"days_since_{c}"] = (ref_date - txn[c]).dt.days
