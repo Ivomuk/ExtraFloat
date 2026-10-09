@@ -279,6 +279,15 @@ def build_unit_pair_rows(df_with_ei: pd.DataFrame) -> pd.DataFrame:
               "n_bad_low", "n_bad_high", "br_low", "br_high",
               "median_ei_float_low", "median_ei_float_high",
               "median_ei_commission_low", "median_ei_commission_high"]].copy()
+    # disbursement_amount_ugx may load as float64 (e.g. a real CSV with any NaN/decimal in
+    # that column forces the whole column to float). tier_low/tier_high are always exact
+    # members of EXPOSURE_TIERS_UGX (all ints) at this point -- this cast is lossless, and
+    # fixes real downstream breakage: pair_label strings built from a float tier ("50,000.0
+    # vs 100,000.0") silently fail to match the int-formatted labels aggregate_unit_pairs'
+    # and build_table_c2's callers construct from ADJACENT_TIER_PAIRS, collapsing Table C2's
+    # pivot/reindex to all-NaN (confirmed on a real run).
+    out["tier_low"] = out["tier_low"].astype(int)
+    out["tier_high"] = out["tier_high"].astype(int)
     out["delta_br"] = np.where(out["br_low"].notna() & out["br_high"].notna(), out["br_high"] - out["br_low"], np.nan)
     return out.reset_index(drop=True)
 
