@@ -95,10 +95,15 @@ REQUIRED_COLS = [
 ]
 
 
-def _qcut_safe(s: pd.Series, q: int) -> tuple:
+def _qcut_safe(s: pd.Series, q: int, prefix: str = "D") -> tuple:
     """qcut with duplicate bin edges dropped; falls back to as many bins as
     the data supports (minimum 1) rather than silently dropping every row
     the way a bare pd.qcut would on too-few-rows/too-little-variation.
+    `prefix` lets callers label the bins for whatever axis they represent
+    (e.g. 'EI' for Exposure Intensity deciles in table_b() -- a real bug,
+    confirmed on a real run, had table_b() look for 'EI1'..'EI10' labels
+    while this function always returned 'D1'..'D10', so every lookup
+    silently matched nothing and every Table B cell read 0/0/NaN).
     Restated independently from analyze_business_state_exposure_
     performance.py's identically-behaving helper (one-way scripts/
     layering convention). Returns (labeled band series, n_bins)."""
@@ -108,8 +113,8 @@ def _qcut_safe(s: pd.Series, q: int) -> tuple:
         codes, bins = None, None
     n_bins = (len(bins) - 1) if bins is not None else 0
     if n_bins <= 0:
-        return pd.Series("D1", index=s.index), 1
-    labels = [f"D{i + 1}" for i in range(n_bins)]
+        return pd.Series(f"{prefix}1", index=s.index), 1
+    labels = [f"{prefix}{i + 1}" for i in range(n_bins)]
     return codes.map(dict(enumerate(labels))), n_bins
 
 
@@ -198,7 +203,7 @@ def table_b(df_with_ei: pd.DataFrame, band_col: str, ei_col: str, band_labels: l
         sub = df_with_ei[(df_with_ei[band_col] == band) & df_with_ei[ei_col].notna()]
         if sub.empty:
             continue
-        ei_decile, n_bins = _qcut_safe(sub[ei_col], N_DECILES)
+        ei_decile, n_bins = _qcut_safe(sub[ei_col], N_DECILES, prefix="EI")
         sub = sub.copy()
         sub["_ei_decile"] = ei_decile
         for i in range(n_bins):
