@@ -49,6 +49,20 @@ snapshot, any downstream delta-fundamentals analysis measures artificial
 zeros, not real business change. This script surfaces that loudly rather
 than letting it hide in a quiet table.
 
+BUSINESS-STATE PERIOD IDENTIFIER (cadence-gate pivot, see this session's
+plan): `fundamentals_snapshot_date` is not just a join artifact -- it IS
+the business-state-period identifier every downstream script groups by
+(`(agent_msisdn, fundamentals_snapshot_date)`). A period is anchored to
+the mart's actual snapshot dates, NEVER derived from calendar month on
+`loan_date` -- two loans a month apart that happen to straddle a snapshot
+boundary are in DIFFERENT periods, and two loans weeks apart that don't
+straddle one are in the SAME period. The join logic above already
+produces this correctly for any number of distinct snapshot dates in the
+mart (strict `<`, latest-eligible-prior-snapshot) -- no change needed here
+when a multi-date mart becomes available, only the diagnostic below that
+makes a single-date mart (which breaks every downstream period-based
+analysis) impossible to miss.
+
 NOT in scope here (frozen, see this session's plan): no PD column, no
 loan-history/repayment-behavior features, no modeling of any kind. Pure
 data construction.
@@ -260,6 +274,17 @@ def main(argv: list[str] | None = None) -> None:
     mart, date_col = load_mart(txn_path)
     print(f"Transaction mart: {len(mart):,} dated snapshot row(s) (on {date_col}), "
           f"{mart['_id'].nunique():,} unique agent(s).")
+    distinct_dates = sorted(mart["fundamentals_snapshot_date"].dropna().unique())
+    n_distinct_dates = len(distinct_dates)
+    dates_str = ", ".join(pd.Timestamp(d).strftime("%Y-%m-%d") for d in distinct_dates)
+    print(f"Transaction mart covers {n_distinct_dates} distinct business-state-period date(s): "
+          f"[{dates_str}].")
+    if n_distinct_dates <= 1:
+        print("  WARNING: a single-date mart cannot support any multi-period business-state analysis "
+              "(Deliverables 4-5, and Deliverable 3's multi-period comparisons) -- every loan will "
+              "match the SAME snapshot regardless of loan_date. Re-export the mart across multiple "
+              "historical dates before relying on anything beyond a restricted single-state "
+              "cross-sectional view.")
 
     joined = attach_pretrade_fundamentals(episodes, mart)
     report_snapshot_sharing(joined)
