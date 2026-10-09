@@ -1,4 +1,16 @@
 """
+DEPRECATED after cadence diagnostics (scripts/analyze_loan_frequency_for_snapshot_cadence.py)
+showed 91.3% of consecutive loan pairs occur within the same calendar month. The loan-to-loan
+Δfundamentals estimand this script implements was superseded by business-state-period analysis
+(scripts/analyze_business_state_exposure_variation.py, scripts/analyze_business_state_evolution.py).
+Retained for audit/reproducibility -- not part of the active Analysis 3 pipeline. Its pair-
+aggregation mechanic (build_agent_pair_rows/aggregate_pair_table, pooled + paired bad-rate
+comparison) is reused, restated independently, in analyze_business_state_exposure_variation.py's
+Table C, re-keyed from "agent" to "agent-period" (same agent, same measured business-state
+anchor) instead of "agent's whole uncontrolled episode history."
+
+----------------------------------------------------------------------------------------------
+
 analyze_episode_exposure_escalation_matrix.py
 =================================================
 Deliverable 5 of the episode-grain rebuild of Analysis 3 ("Level 3:
