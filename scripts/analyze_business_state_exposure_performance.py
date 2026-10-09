@@ -1,23 +1,38 @@
 """
-analyze_episode_exposure_scale_overlap.py
-=============================================
-Deliverable 3 of the episode-grain rebuild of Analysis 3. Answers the
-identification question that must be settled before any exposure-response
-model (classifier or otherwise) could ever disentangle exposure from
-business scale: were historically similar businesses (by float activity /
-commission decile) actually observed across MULTIPLE exposure tiers, or is
-exposure tier almost deterministically assigned by scale? If high-scale
-agents almost exclusively received 750K/1M and small agents almost
-exclusively received 50K/100K, then P(Y|X,L) cannot reliably separate the
-two effects in much of the feature space -- no amount of correct temporal
+analyze_business_state_exposure_performance.py
+==================================================
+Level 1 (primary) evidence of the business-state-period evidence hierarchy
+(cadence-gate pivot; formerly Deliverable 3, "analyze_episode_exposure_
+scale_overlap.py" -- renamed and reframed, logic unchanged, after real-data
+cadence diagnostics showed loan-to-loan deltas were the wrong estimand for
+Level 2/3; this analysis never depended on that estimand and remains
+correct as-is). Answers the identification question that must be settled
+before any exposure-response claim can be trusted: were comparable measured
+business states (by float activity / commission decile) actually observed
+across MULTIPLE exposure tiers, or is exposure tier almost deterministically
+assigned by scale? If high-scale agents almost exclusively received 750K/1M
+and small agents almost exclusively received 50K/100K, then
+BusinessState x Exposure -> Performance cannot reliably separate the two
+effects in much of the feature space -- no amount of correct temporal
 alignment or sample size fixes that. This is treated as a genuine go/no-go
 input to the rest of this workstream, not mere descriptive color.
+
+Level hierarchy this script anchors (see the plan's "Cadence-gate pivot"
+section for the full three-level design): Level 1 compares comparable
+measured business states at different exposures (cross-sectional, this
+script); Level 2 (`analyze_business_state_exposure_variation.py`) tightens
+to the same agent + same measured business-state anchor; Level 3
+(`analyze_business_state_evolution.py`) adds genuine temporal movement in
+the agent's measured business state. None of the three establish a causal
+effect of increasing a limit -- progressively tighter observational
+evidence, not a causal estimate.
 
 TWO SEPARATE TABLES, never blended (same assignment/performance separation
 this session has used throughout):
   - Exposure-ASSIGNMENT overlap: every episode with a valid fundamentals
-    match, regardless of label_eligible_30d. Answers "were similar
-    businesses historically observed at multiple exposure tiers at all."
+    match, regardless of label_eligible_30d. Answers "were comparable
+    measured business states historically observed at multiple exposure
+    tiers at all."
   - Exposure-PERFORMANCE overlap: the same cross-tab restricted to
     label_eligible_30d==1, with bad rate added. Answers the (narrower,
     outcome-conditioned) question.
@@ -31,7 +46,7 @@ Restated independently (one-way scripts/ layering convention): the 7-tier
 exposure set, consistent with every other script in this rebuild.
 
 Usage:
-    python scripts\\analyze_episode_exposure_scale_overlap.py ^
+    python scripts\\analyze_business_state_exposure_performance.py ^
         --episode-dataset loan_episode_capacity_dataset.csv
 """
 
