@@ -154,6 +154,13 @@ def main(argv: list[str] | None = None) -> None:
     if missing_scale:
         print(f"NOTE: scale variable(s) not found, skipped: {missing_scale}")
 
+    n_unknown_exposure = int((~df["disbursement_amount_ugx"].isin(EXPOSURE_TIERS_UGX)).sum())
+    pct_unknown_exposure = n_unknown_exposure / len(df) * 100 if len(df) else float("nan")
+    print(f"n_unknown_exposure (disbursement_amount_ugx outside the known 7-tier set): "
+          f"{n_unknown_exposure:,} ({pct_unknown_exposure:.2f}% of all episodes). These episodes are "
+          f"excluded from every tier-indexed table below (reindexed to the 7-tier set) -- reported here "
+          f"explicitly, never silently dropped. No unit conversion is assumed or applied.")
+
     for scale_col, label in SCALE_VARS.items():
         if scale_col not in df.columns:
             continue

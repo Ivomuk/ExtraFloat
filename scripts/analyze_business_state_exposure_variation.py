@@ -123,7 +123,11 @@ def build_agent_period_summary(df: pd.DataFrame) -> pd.DataFrame:
         elig = g[g["label_eligible_30d"] == 1]
         n_eligible = len(elig)
         bad_rate_period = elig["bad_state_3dpd_30d"].mean() if n_eligible else np.nan
-        tiers = sorted(g["disbursement_amount_ugx"].unique())
+        # distinct_tiers_experienced is a discrete-tier concept -- restricted to the
+        # known 7-tier set (per review correction), never counting an anomalous
+        # disbursement_amount_ugx value (e.g. 2, 7, 50, 104 -- plausible unit/
+        # data-quality issues, confirmed ~1% of real episodes) as a real tier.
+        tiers = sorted(set(g["disbursement_amount_ugx"]) & set(EXPOSURE_TIERS_UGX))
         rows.append({
             "agent_msisdn": agent, "fundamentals_snapshot_date": period,
             "n_loans_total": len(g), "n_loans_eligible": n_eligible,
@@ -212,10 +216,15 @@ def table_b(df_with_ei: pd.DataFrame, band_col: str, ei_col: str, band_labels: l
 def build_unit_pair_rows(df_with_ei: pd.DataFrame) -> pd.DataFrame:
     """One row per (agent_msisdn, fundamentals_snapshot_date, tier_low,
     tier_high) for every unordered pair of tiers that unit's loans
-    actually hit. Units with only 1 tier contribute zero rows (they
-    feed Table A/B only)."""
+    actually hit. Units with only 1 (known) tier contribute zero rows
+    (they feed Table A/B only). Restricted to the known 7-tier set (per
+    review correction) -- an anomalous disbursement_amount_ugx value (e.g.
+    2, 7, 50, 104) must never be paired against a real tier as if it were
+    one; those loans are simply excluded from this table, not corrected
+    or reinterpreted."""
     rows = []
     for (agent, period), g in df_with_ei.groupby(["agent_msisdn", "fundamentals_snapshot_date"]):
+        g = g[g["disbursement_amount_ugx"].isin(EXPOSURE_TIERS_UGX)]
         tiers = sorted(g["disbursement_amount_ugx"].unique())
         if len(tiers) < 2:
             continue
@@ -310,6 +319,13 @@ def main(argv: list[str] | None = None) -> None:
           f"({n_excluded:,} excluded -- no matched prior snapshot).")
     if df_valid.empty:
         sys.exit("ERROR: no loan has a valid measured business-state anchor -- nothing to analyze.")
+
+    n_unknown_exposure = int((~df_valid["disbursement_amount_ugx"].isin(EXPOSURE_TIERS_UGX)).sum())
+    pct_unknown_exposure = n_unknown_exposure / len(df_valid) * 100 if len(df_valid) else float("nan")
+    print(f"n_unknown_exposure (disbursement_amount_ugx outside the known 7-tier set): "
+          f"{n_unknown_exposure:,} ({pct_unknown_exposure:.2f}% of anchored loans). These loans are "
+          f"excluded from distinct_tiers_experienced, Table A/B's tier axis, and Table C's pairing -- "
+          f"reported here explicitly, never silently dropped. No unit conversion is assumed or applied.")
 
     agent_period_summary = build_agent_period_summary(df_valid)
     n_units = len(agent_period_summary)
