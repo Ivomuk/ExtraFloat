@@ -6,8 +6,12 @@ of build_loan_episode_capacity_dataset.py and reports, before anything else
 is attempted: snapshot staleness (as bands, not deleted -- the mart's real
 refresh frequency is unknown, so this is descriptive, feeding the
 sensitivity cuts used in Deliverables 3-5), missingness, duplicate-key
-checks, outcome-eligibility/censoring breakdown, and the exposure-tier
-distribution.
+checks, outcome-eligibility/censoring breakdown, the exposure-tier
+distribution, and (added for the cadence-gate pivot) two business-state
+-period coverage diagnostics that directly size the population available
+to the new Level 2/3 analyses: how many distinct business-state periods
+(`fundamentals_snapshot_date` values) each agent actually has, and how
+many loans land in each (agent, period) group.
 
 Restated independently (one-way scripts/ layering convention): the 7-tier
 exposure set and the age-band edges are frozen here, matching the
@@ -33,8 +37,13 @@ AGE_BAND_LABELS = ["0-7", "8-30", "31-60", "61-90", ">90"]
 
 REQUIRED_COLS = [
     "disbursement_fid", "agent_msisdn", "loan_date", "disbursement_amount_ugx",
-    "fundamentals_age_days", "label_eligible_30d", "label_eligibility_reason_30d",
+    "fundamentals_age_days", "fundamentals_snapshot_date", "label_eligible_30d",
+    "label_eligibility_reason_30d",
 ]
+
+PERIOD_COUNT_BAND_LABELS = ["1", "2", "3", "4+"]
+LOANS_PER_PERIOD_BAND_EDGES = [0.5, 1.5, 3.5, 7.5, 15.5, np.inf]
+LOANS_PER_PERIOD_BAND_LABELS = ["1", "2-3", "4-7", "8-15", "16+"]
 
 
 def age_band_distribution(df: pd.DataFrame) -> pd.DataFrame:
@@ -90,6 +99,48 @@ def exposure_tier_distribution(df: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def business_state_coverage(df: pd.DataFrame) -> pd.DataFrame:
+    """Distribution of distinct fundamentals_snapshot_date values (business-
+    state periods) per agent. Complements, does not duplicate,
+    build_loan_episode_capacity_dataset.py's own pct_single_snapshot
+    viability-gate headline -- this is the full distributional breakdown
+    (1 / 2 / 3 / 4+ distinct periods), needed to know how many
+    continuously-observed agents exist for the new Level 3 (business-state
+    evolution) analysis. Agents with zero valid periods (no matched
+    snapshot at all) are excluded -- they have no periods to count."""
+    valid = df[df["fundamentals_snapshot_date"].notna()]
+    per_agent = valid.groupby("agent_msisdn")["fundamentals_snapshot_date"].nunique()
+    if per_agent.empty:
+        print("  (no agent has a valid business-state period -- nothing to report)")
+        return pd.DataFrame(columns=["distinct_periods", "n_agents", "pct_agents"])
+    print(f"  Median distinct business-state periods per agent (with >=1 valid period): {per_agent.median():.1f}.")
+    banded = per_agent.clip(upper=4).astype(int).astype(str)
+    banded = banded.where(per_agent < 4, "4+")
+    counts = banded.value_counts().reindex(PERIOD_COUNT_BAND_LABELS, fill_value=0)
+    out = counts.rename("n_agents").rename_axis("distinct_periods").reset_index()
+    out["pct_agents"] = round(out["n_agents"] / len(per_agent) * 100, 2)
+    return out
+
+
+def loans_per_business_state_distribution(df: pd.DataFrame) -> pd.DataFrame:
+    """Distribution of loan-count per (agent_msisdn, fundamentals_snapshot_date)
+    group -- directly sizes the population available to the new Level 2
+    (same agent, same measured business-state anchor, different exposure)
+    analysis: a group needs >=2 loans before it can possibly show >=2
+    distinct exposure tiers within one anchor."""
+    valid = df[df["fundamentals_snapshot_date"].notna()]
+    per_group = valid.groupby(["agent_msisdn", "fundamentals_snapshot_date"]).size()
+    if per_group.empty:
+        print("  (no valid (agent, business-state-period) group -- nothing to report)")
+        return pd.DataFrame(columns=["loans_per_period_band", "n_groups", "pct_groups"])
+    bands = pd.cut(per_group, bins=LOANS_PER_PERIOD_BAND_EDGES, labels=LOANS_PER_PERIOD_BAND_LABELS)
+    counts = bands.value_counts().reindex(LOANS_PER_PERIOD_BAND_LABELS, fill_value=0)
+    out = counts.rename("n_groups").rename_axis("loans_per_period_band").reset_index()
+    out["loans_per_period_band"] = out["loans_per_period_band"].astype(str)
+    out["pct_groups"] = round(out["n_groups"] / len(per_group) * 100, 2)
+    return out
+
+
 def main(argv: list[str] | None = None) -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--episode-dataset", default="loan_episode_capacity_dataset.csv")
@@ -141,6 +192,20 @@ def main(argv: list[str] | None = None) -> None:
     tiers = exposure_tier_distribution(df)
     print(tiers.to_string(index=False))
     tiers.to_csv(f"{args.out_prefix}_exposure_tiers.csv", index=False)
+
+    print("\n" + "=" * 100)
+    print("Business-state-period coverage per agent (cadence-gate pivot)")
+    print("=" * 100)
+    coverage = business_state_coverage(df)
+    print(coverage.to_string(index=False))
+    coverage.to_csv(f"{args.out_prefix}_business_state_coverage.csv", index=False)
+
+    print("\n" + "=" * 100)
+    print("Loans per (agent, business-state-period) group (cadence-gate pivot)")
+    print("=" * 100)
+    loans_per_period = loans_per_business_state_distribution(df)
+    print(loans_per_period.to_string(index=False))
+    loans_per_period.to_csv(f"{args.out_prefix}_loans_per_business_state.csv", index=False)
 
 
 if __name__ == "__main__":
