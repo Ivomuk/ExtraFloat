@@ -329,6 +329,69 @@ def aggregate_unit_pairs(unit_pairs: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows).sort_values(["tier_low", "tier_high"]).reset_index(drop=True)
 
 
+ADJACENT_TIER_PAIRS = [
+    (50_000, 100_000), (100_000, 250_000), (250_000, 350_000),
+    (350_000, 500_000), (500_000, 750_000), (750_000, 1_000_000),
+]
+
+
+def build_table_c2(unit_pairs: pd.DataFrame, agent_period_summary: pd.DataFrame) -> pd.DataFrame:
+    """Table C2: Table C's same-agent/same-anchor tier pairs, additionally
+    stratified by the unit's own float business-state band -- tests
+    whether Table C's pooled "higher tier -> worse" pattern (uniform
+    across all 21 pairs) is actually uniform across business scale, or
+    whether it reconciles with Table B's finding that the EI->performance
+    relationship reverses sign between the smallest and largest float
+    deciles (per review correction).
+
+    Uses the float_band ALREADY ASSIGNED to the (agent, period) unit --
+    NEVER recomputed separately for the lower/higher tier's loans. Since
+    the fundamentals snapshot is identical for every loan in a Table C
+    unit, both the lower- and higher-tier loans must inherit exactly the
+    same float band; recomputing it per-tier would be both unnecessary
+    and a potential source of silent inconsistency with Table A/B's own
+    band assignment."""
+    key = ["agent_msisdn", "fundamentals_snapshot_date"]
+    banded = unit_pairs.merge(agent_period_summary[key + ["float_band"]], on=key, how="left")
+    banded = banded[banded["float_band"].notna()]
+    if banded.empty:
+        return pd.DataFrame()
+
+    rows = []
+    for (band, tl, th), g in banded.groupby(["float_band", "tier_low", "tier_high"], sort=False):
+        n_units_pair = len(g)
+        n_loans_lower, n_loans_higher = int(g["n_loans_low"].sum()), int(g["n_loans_high"].sum())
+        n_eligible_lower, n_eligible_higher = int(g["n_eligible_low"].sum()), int(g["n_eligible_high"].sum())
+        n_bad_lower, n_bad_higher = int(g["n_bad_low"].sum()), int(g["n_bad_high"].sum())
+        bad_rate_lower = n_bad_lower / n_eligible_lower if n_eligible_lower else np.nan
+        bad_rate_higher = n_bad_higher / n_eligible_higher if n_eligible_higher else np.nan
+        delta_br_loan_weighted = (bad_rate_higher - bad_rate_lower) if pd.notna(bad_rate_lower) and pd.notna(bad_rate_higher) else np.nan
+
+        both = g[g["br_low"].notna() & g["br_high"].notna()]
+        n_units_outcome_both = len(both)
+        if n_units_outcome_both:
+            deltas = both["delta_br"]
+            median_delta_bad_rate = deltas.median()
+            pct_delta_bad_positive = (deltas > 0).mean() * 100
+            pct_delta_bad_zero = (deltas == 0).mean() * 100
+            pct_delta_bad_negative = (deltas < 0).mean() * 100
+        else:
+            median_delta_bad_rate = pct_delta_bad_positive = pct_delta_bad_zero = pct_delta_bad_negative = np.nan
+
+        rows.append({
+            "float_band": band, "tier_low": tl, "tier_high": th, "pair_label": f"{tl:,} vs {th:,}",
+            "n_units_pair": n_units_pair, "n_units_outcome_both": n_units_outcome_both,
+            "n_loans_lower": n_loans_lower, "n_loans_higher": n_loans_higher,
+            "bad_rate_lower_loan_weighted": bad_rate_lower, "bad_rate_higher_loan_weighted": bad_rate_higher,
+            "delta_br_loan_weighted": delta_br_loan_weighted,
+            "median_delta_bad_rate": median_delta_bad_rate,
+            "pct_delta_bad_positive": pct_delta_bad_positive,
+            "pct_delta_bad_zero": pct_delta_bad_zero,
+            "pct_delta_bad_negative": pct_delta_bad_negative,
+        })
+    return pd.DataFrame(rows).sort_values(["tier_low", "tier_high", "float_band"]).reset_index(drop=True)
+
+
 def main(argv: list[str] | None = None) -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--episode-dataset", default="loan_episode_capacity_dataset.csv")
@@ -417,6 +480,35 @@ def main(argv: list[str] | None = None) -> None:
             print(pair_table[display_cols].to_string(index=False))
         pair_table.to_csv(f"{args.out_prefix}_table_c_pairs.csv", index=False)
         unit_pairs.to_csv(f"{args.out_prefix}_table_c_unit_pairs.csv", index=False)
+
+    print(f"\n{'#' * 100}\n# Table C2: Table C's tier pairs, stratified by the unit's own float band\n{'#' * 100}")
+    print("Tests whether Table C's pooled 'higher tier -> worse' pattern is uniform across business\n"
+          "scale, or concentrated among smaller agents (per review correction) -- the float band used\n"
+          "here is the one already assigned to the (agent, period) unit, never recomputed separately\n"
+          "for the lower/higher tier's loans.")
+    table_c2 = build_table_c2(unit_pairs, agent_period_summary)
+    if table_c2.empty:
+        print("  (no unit experienced >=2 distinct exposure tiers with a valid float band -- nothing to report)")
+    else:
+        table_c2.to_csv(f"{args.out_prefix}_table_c2.csv", index=False)
+        adjacent = table_c2[table_c2[["tier_low", "tier_high"]].apply(tuple, axis=1).isin(ADJACENT_TIER_PAIRS)]
+        adjacent_pair_labels = [f"{tl:,} vs {th:,}" for tl, th in ADJACENT_TIER_PAIRS]
+        print(f"\n{'=' * 100}\nPrimary cut: the six ADJACENT tier pairs only (strongest paired comparisons) -- "
+              f"delta_br_loan_weighted (BR_higher - BR_lower) by float band\n{'=' * 100}")
+        if adjacent.empty:
+            print("  (no adjacent-pair data with a valid float band)")
+        else:
+            delta_pivot = adjacent.pivot(index="float_band", columns="pair_label", values="delta_br_loan_weighted")
+            delta_pivot = delta_pivot.reindex(index=float_labels, columns=adjacent_pair_labels)
+            n_pivot = adjacent.pivot(index="float_band", columns="pair_label", values="n_units_outcome_both")
+            n_pivot = n_pivot.reindex(index=float_labels, columns=adjacent_pair_labels)
+            print("-- delta_br_loan_weighted (positive == higher tier worse) --")
+            with pd.option_context("display.float_format", "{:,.3f}".format, "display.max_columns", None, "display.width", 240):
+                print(delta_pivot.to_string())
+            print("-- n_units_outcome_both (paired-evidence sample size per cell) --")
+            print(n_pivot.to_string())
+            delta_pivot.to_csv(f"{args.out_prefix}_table_c2_adjacent_delta_br.csv")
+            n_pivot.to_csv(f"{args.out_prefix}_table_c2_adjacent_n_units.csv")
 
     print(f"\n{'#' * 100}")
     print("Causal caveat (printed every run)")
