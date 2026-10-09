@@ -610,6 +610,10 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--robust-min-n", type=int, default=ROBUST_MIN_N)
     ap.add_argument("--baseline-min-n", type=int, default=BASELINE_MIN_N)
     ap.add_argument("--n-bands", type=int, default=N_DECILES_DEFAULT)
+    ap.add_argument("--print-detail", action="store_true",
+                     help="Print the full per-tier classification audit table to stdout. Off by "
+                          "default -- at real-data scale (many bands x candidate tiers x swept "
+                          "tolerances) this table is large; it is always written to CSV regardless.")
     args = ap.parse_args(argv)
 
     path = Path(args.episode_dataset)
@@ -664,25 +668,34 @@ def main(argv: list[str] | None = None) -> None:
             tolerances, args.baseline_min_n, args.evidence_gap_min_n, args.robust_min_n,
         )
 
+        classification_path = f"{args.out_prefix}_{fund_name}_frontier_classification.csv"
+        summary_path = f"{args.out_prefix}_{fund_name}_frontier_summary.csv"
+        stability_path = f"{args.out_prefix}_{fund_name}_frontier_stability.csv"
+        tier_marginals_path = f"{args.out_prefix}_{fund_name}_tier_marginals.csv"
+        classification_df.to_csv(classification_path, index=False)
+        summary_df.to_csv(summary_path, index=False)
+        stability_df.to_csv(stability_path, index=False)
+        tier_marginals_df.to_csv(tier_marginals_path, index=False)
+
         print("-- Classification audit (read this BEFORE the summary table below) --")
-        if not classification_df.empty:
-            with pd.option_context("display.max_rows", None, "display.width", 240, "display.float_format", "{:.3f}".format):
+        if classification_df.empty:
+            print("  (no band produced a classification -- see status column in the summary table)")
+        elif args.print_detail:
+            with pd.option_context("display.max_rows", None, "display.width", 180, "display.float_format", "{:.3f}".format):
                 print(classification_df.to_string(index=False))
         else:
-            print("  (no band produced a classification -- see status column in the summary table)")
+            print(f"  {len(classification_df):,} row(s) written to {classification_path} -- not printed here "
+                  f"(too large for a terminal at real-data scale: every band x candidate tier x swept "
+                  f"tolerance). Open the CSV, or re-run with --print-detail to print it anyway "
+                  f"(better piped to a file: ... > out.txt).")
 
         print("\n-- Frontier summary (per band x tolerance) --")
-        with pd.option_context("display.max_rows", None, "display.width", 240, "display.float_format", "{:.3f}".format):
+        with pd.option_context("display.max_rows", None, "display.width", 180, "display.float_format", "{:.3f}".format):
             print(summary_df.to_string(index=False))
 
         print("\n-- Stability across swept tolerances (per band) --")
-        with pd.option_context("display.max_rows", None, "display.width", 240):
+        with pd.option_context("display.max_rows", None, "display.width", 180):
             print(stability_df.to_string(index=False))
-
-        classification_df.to_csv(f"{args.out_prefix}_{fund_name}_frontier_classification.csv", index=False)
-        summary_df.to_csv(f"{args.out_prefix}_{fund_name}_frontier_summary.csv", index=False)
-        stability_df.to_csv(f"{args.out_prefix}_{fund_name}_frontier_stability.csv", index=False)
-        tier_marginals_df.to_csv(f"{args.out_prefix}_{fund_name}_tier_marginals.csv", index=False)
 
     print(f"\n{'#' * 100}\nCausal caveat (printed every run)\n{'#' * 100}")
     print(
