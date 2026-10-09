@@ -149,6 +149,23 @@ def load_loan_episodes(path: Path) -> pd.DataFrame:
     return df
 
 
+def _parse_mart_date(series: pd.Series) -> pd.Series:
+    """Parses a mart date column that may be either a proper date/timestamp
+    string (parsed normally) or a numeric YYYYMMDD value (e.g. tbl_dt ==
+    20260731 as int64, confirmed on a real multi-date mart export).
+    pd.to_datetime on a raw numeric Series does NOT parse it as YYYYMMDD --
+    it defaults to nanoseconds-since-epoch, silently collapsing every
+    distinct real date to the same ~1970-01-01 00:00:00 timestamp (directly
+    observed: a 7-distinct-date real export reported '1 distinct
+    business-state-period date' after normalization, with no error -- the
+    exact signature of this bug, not a data problem). Detected by dtype,
+    not by value, so a numeric column is always routed through the
+    YYYYMMDD format parser before any plain to_datetime call touches it."""
+    if pd.api.types.is_numeric_dtype(series):
+        return pd.to_datetime(series.astype("Int64").astype(str), format="%Y%m%d", errors="coerce")
+    return pd.to_datetime(series, errors="coerce")
+
+
 def load_mart(path: Path) -> tuple:
     """Loads the raw transaction mart at FULL granularity -- every dated row
     per agent, NOT deduplicated to one row per agent (build_capacity_research_dataset.py
@@ -177,7 +194,7 @@ def load_mart(path: Path) -> tuple:
         txn["float_activity_value_1m"] = np.nan
 
     txn["fundamentals_snapshot_raw"] = txn[date_col]
-    txn["fundamentals_snapshot_date"] = pd.to_datetime(txn[date_col], errors="coerce").dt.normalize()
+    txn["fundamentals_snapshot_date"] = _parse_mart_date(txn[date_col]).dt.normalize()
     n_bad = int(txn["fundamentals_snapshot_date"].isna().sum())
     if n_bad:
         print(f"NOTE: {n_bad} mart row(s) dropped for unparseable {date_col}.")
