@@ -50,8 +50,22 @@ DAY_BAND_EDGES = [-0.5, 7.5, 30.5, 90.5, np.inf]
 DAY_BAND_LABELS = ["<=7", "8-30", "31-90", ">90"]
 
 
+def _read_csv_fast(path: Path) -> pd.DataFrame:
+    """pd.read_csv, preferring the multi-threaded pyarrow engine. Restated
+    independently from build_loan_episode_capacity_dataset.py's
+    identically-named helper (one-way scripts/ layering convention) --
+    --loan-training-file is the same several-GB state_data_*.csv file that
+    raised `pandas.errors.ParserError: ... C error: out of memory` from
+    plain pd.read_csv(path, low_memory=False) there. Falls back to the
+    plain engine (default low_memory=True) if pyarrow isn't importable."""
+    try:
+        return pd.read_csv(path, sep=",", encoding="utf-8-sig", engine="pyarrow")
+    except (ImportError, ValueError):
+        return pd.read_csv(path, sep=",", encoding="utf-8-sig")
+
+
 def _load(path: Path) -> pd.DataFrame:
-    df = pd.read_csv(path, low_memory=False)
+    df = _read_csv_fast(path)
     if "agent_msisdn" not in df.columns:
         alt_col = next((c for c in ("msisdn", "phonenumber") if c in df.columns), None)
         if alt_col is not None:
