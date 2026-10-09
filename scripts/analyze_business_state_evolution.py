@@ -82,26 +82,28 @@ REQUIRED_COLS = [
 REG_VARIANTS = ["reg_median_float", "reg_median_commission", "reg_p75_float", "reg_p75_commission"]
 
 
-def _ratio(cur, prev) -> float:
-    if pd.isna(prev) or prev <= 0 or pd.isna(cur):
-        return np.nan
-    return cur / prev
+def _ratio_vec(cur: pd.Series, prev: pd.Series) -> pd.Series:
+    """Vectorized cur/prev, guarded: prev must be > 0 and defined, else
+    NaN -- never a silent inf/nan via division by <=0 or by a missing
+    value. Equivalent to the scalar rule used throughout this rebuild."""
+    prev_safe = prev.where((prev > 0) & prev.notna())
+    return cur / prev_safe
 
 
-def _reg(exposure_growth, fund_growth) -> float:
-    if pd.isna(exposure_growth) or pd.isna(fund_growth) or fund_growth <= 0:
-        return np.nan
-    return exposure_growth / fund_growth
+def _reg_vec(exposure_growth: pd.Series, fund_growth: pd.Series) -> pd.Series:
+    """Vectorized REG = exposure_growth / fund_growth, guarded: fund_growth
+    must be > 0 and defined, else NaN."""
+    fund_safe = fund_growth.where((fund_growth > 0) & fund_growth.notna())
+    return exposure_growth / fund_safe
 
 
-def _direction(ratio) -> object:
-    if pd.isna(ratio):
-        return np.nan
-    if ratio > DIRECTION_UP_THRESHOLD:
-        return "up"
-    if ratio < DIRECTION_DOWN_THRESHOLD:
-        return "down"
-    return "flat"
+def _direction_vec(ratio: pd.Series) -> pd.Series:
+    """Vectorized up/flat/down banding, NaN-preserving. NaN comparisons
+    are always False in numpy, so a NaN ratio falls through to the 'flat'
+    default and is masked back to NaN afterward -- net effect identical
+    to checking isna() first."""
+    out = np.select([ratio > DIRECTION_UP_THRESHOLD, ratio < DIRECTION_DOWN_THRESHOLD], ["up", "down"], default="flat")
+    return pd.Series(out, index=ratio.index).where(ratio.notna())
 
 
 def _reg_band(x) -> object:
@@ -119,24 +121,39 @@ def build_agent_period_summary(df: pd.DataFrame) -> pd.DataFrame:
     Restated independently from analyze_business_state_exposure_
     variation.py's identically-behaving function (one-way scripts/
     layering convention), with n_bad_eligible added -- needed here for
-    the loan-weighted aggregation across multiple agent-periods."""
-    rows = []
-    for (agent, period), g in df.groupby(["agent_msisdn", "fundamentals_snapshot_date"]):
-        elig = g[g["label_eligible_30d"] == 1]
-        n_eligible = len(elig)
-        n_bad = int(elig["bad_state_3dpd_30d"].sum())
-        bad_rate_period = n_bad / n_eligible if n_eligible else np.nan
-        rows.append({
-            "agent_msisdn": agent, "fundamentals_snapshot_date": period,
-            "n_loans_total": len(g), "n_loans_eligible": n_eligible, "n_bad_eligible": n_bad,
-            "median_exposure": g["disbursement_amount_ugx"].median(),
-            "p75_exposure": g["disbursement_amount_ugx"].quantile(0.75),
-            "max_exposure": g["disbursement_amount_ugx"].max(),
-            "bad_rate_period": bad_rate_period,
-            "float_activity_value_1m": g["float_activity_value_1m"].iloc[0],
-            "commission": g["commission"].iloc[0],
-        })
-    return pd.DataFrame(rows)
+    the loan-weighted aggregation across multiple agent-periods.
+
+    Vectorized (pandas groupby-aggregate + merges) rather than a Python
+    for-loop over each of the (potentially 500K+) groups -- the loop-
+    based version was the dominant cost on a real 5.66M-episode run (see
+    the identical fix and 45x benchmark in analyze_business_state_
+    exposure_variation.py). Verified byte-for-byte identical to the
+    original loop-based implementation on a large random fixture before
+    replacing it (scratchpad, not committed)."""
+    key = ["agent_msisdn", "fundamentals_snapshot_date"]
+    gb = df.groupby(key, sort=False)
+    summary = pd.concat([
+        gb.size().rename("n_loans_total"),
+        gb["disbursement_amount_ugx"].median().rename("median_exposure"),
+        gb["disbursement_amount_ugx"].quantile(0.75).rename("p75_exposure"),
+        gb["disbursement_amount_ugx"].max().rename("max_exposure"),
+        gb["float_activity_value_1m"].first().rename("float_activity_value_1m"),
+        gb["commission"].first().rename("commission"),
+    ], axis=1).reset_index()
+
+    elig_gb = df.loc[df["label_eligible_30d"] == 1].groupby(key, sort=False)["bad_state_3dpd_30d"]
+    elig_summary = pd.concat([
+        elig_gb.size().rename("n_loans_eligible"),
+        elig_gb.sum().rename("n_bad_eligible"),
+        elig_gb.mean().rename("bad_rate_period"),
+    ], axis=1).reset_index()
+    summary = summary.merge(elig_summary, on=key, how="left")
+    summary["n_loans_eligible"] = summary["n_loans_eligible"].fillna(0).astype(int)
+    summary["n_bad_eligible"] = summary["n_bad_eligible"].fillna(0).astype(int)
+
+    return summary[key + ["n_loans_total", "n_loans_eligible", "n_bad_eligible", "median_exposure",
+                           "p75_exposure", "max_exposure", "bad_rate_period",
+                           "float_activity_value_1m", "commission"]]
 
 
 def order_periods(summary: pd.DataFrame) -> pd.DataFrame:
@@ -149,47 +166,49 @@ def order_periods(summary: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-def _build_pair_row(agent: str, prev: pd.Series, cur: pd.Series, k: int) -> dict:
-    days_between = (cur["fundamentals_snapshot_date"] - prev["fundamentals_snapshot_date"]).days
-    float_growth = _ratio(cur["float_activity_value_1m"], prev["float_activity_value_1m"])
-    commission_growth = _ratio(cur["commission"], prev["commission"])
-    exposure_growth_median = _ratio(cur["median_exposure"], prev["median_exposure"])
-    exposure_growth_p75 = _ratio(cur["p75_exposure"], prev["p75_exposure"])
-    return {
-        "agent_msisdn": agent, "k": k,
-        "period_a": prev["fundamentals_snapshot_date"], "period_b": cur["fundamentals_snapshot_date"],
-        "days_between": days_between,
-        "float_growth": float_growth, "float_direction": _direction(float_growth),
-        "commission_growth": commission_growth, "commission_direction": _direction(commission_growth),
-        "exposure_growth_median": exposure_growth_median,
-        "exposure_growth_median_direction": _direction(exposure_growth_median),
-        "exposure_growth_p75": exposure_growth_p75,
-        "reg_median_float": _reg(exposure_growth_median, float_growth),
-        "reg_median_commission": _reg(exposure_growth_median, commission_growth),
-        "reg_p75_float": _reg(exposure_growth_p75, float_growth),
-        "reg_p75_commission": _reg(exposure_growth_p75, commission_growth),
-        "n_eligible_b": cur["n_loans_eligible"], "n_bad_eligible_b": cur["n_bad_eligible"],
-        "bad_rate_b": cur["bad_rate_period"],
-    }
-
-
 def build_all_chronological_pairs(summary_ordered: pd.DataFrame) -> pd.DataFrame:
     """One row per (agent, period_a, period_b) for EVERY chronological pair
     t_a < t_b (never unordered). k = index(S_b) - index(S_a), the ORDINAL
     state gap -- S_1->S_2 is k=1 (adjacent), S_1->S_3 is k=2, etc. The
     Primary analysis below reads its transitions directly from this
     table's k==1 subset, so the two are a genuine cross-check, never
-    separately re-implemented paths that could silently drift apart."""
-    rows = []
-    for agent, g in summary_ordered.groupby("agent_msisdn"):
-        g = g.sort_values("period_index").reset_index(drop=True)
-        n = len(g)
-        for ia in range(n):
-            for ib in range(ia + 1, n):
-                prev, cur = g.iloc[ia], g.iloc[ib]
-                k = int(cur["period_index"] - prev["period_index"])
-                rows.append(_build_pair_row(agent, prev, cur, k))
-    return pd.DataFrame(rows)
+    separately re-implemented paths that could silently drift apart.
+
+    Vectorized: a single self-merge on agent_msisdn forms every
+    chronological pair at once (filtered to period_index_a <
+    period_index_b), replacing a Python for-loop over every agent plus a
+    nested ia/ib loop per agent -- the dominant cost on a real run with
+    100K+ agents (see the identical fix and benchmark in
+    analyze_business_state_exposure_variation.py's build_unit_pair_rows).
+    Verified byte-for-byte identical to the original loop-based
+    implementation on a large random fixture before replacing it
+    (scratchpad, not committed)."""
+    merged = summary_ordered.merge(summary_ordered, on="agent_msisdn", suffixes=("_a", "_b"))
+    merged = merged[merged["period_index_a"] < merged["period_index_b"]].copy()
+
+    float_growth = _ratio_vec(merged["float_activity_value_1m_b"], merged["float_activity_value_1m_a"])
+    commission_growth = _ratio_vec(merged["commission_b"], merged["commission_a"])
+    exposure_growth_median = _ratio_vec(merged["median_exposure_b"], merged["median_exposure_a"])
+    exposure_growth_p75 = _ratio_vec(merged["p75_exposure_b"], merged["p75_exposure_a"])
+
+    out = pd.DataFrame({
+        "agent_msisdn": merged["agent_msisdn"],
+        "k": (merged["period_index_b"] - merged["period_index_a"]).astype(int),
+        "period_a": merged["fundamentals_snapshot_date_a"], "period_b": merged["fundamentals_snapshot_date_b"],
+        "days_between": (merged["fundamentals_snapshot_date_b"] - merged["fundamentals_snapshot_date_a"]).dt.days,
+        "float_growth": float_growth, "float_direction": _direction_vec(float_growth),
+        "commission_growth": commission_growth, "commission_direction": _direction_vec(commission_growth),
+        "exposure_growth_median": exposure_growth_median,
+        "exposure_growth_median_direction": _direction_vec(exposure_growth_median),
+        "exposure_growth_p75": exposure_growth_p75,
+        "reg_median_float": _reg_vec(exposure_growth_median, float_growth),
+        "reg_median_commission": _reg_vec(exposure_growth_median, commission_growth),
+        "reg_p75_float": _reg_vec(exposure_growth_p75, float_growth),
+        "reg_p75_commission": _reg_vec(exposure_growth_p75, commission_growth),
+        "n_eligible_b": merged["n_loans_eligible_b"], "n_bad_eligible_b": merged["n_bad_eligible_b"],
+        "bad_rate_b": merged["bad_rate_period_b"],
+    })
+    return out.reset_index(drop=True)
 
 
 def direction_grid(transitions: pd.DataFrame, fund_name: str) -> pd.DataFrame:
