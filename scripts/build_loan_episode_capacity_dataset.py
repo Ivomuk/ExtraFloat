@@ -80,8 +80,29 @@ FUNDAMENTALS_COLS = ["float_activity_value_1m", "commission", "cust_1m", "averag
 SHARING_MIN_EPISODES = 2  # an agent needs >=2 episodes to have any "sharing" to measure
 
 
+def _read_csv_fast(path: Path) -> pd.DataFrame:
+    """pd.read_csv, preferring the multi-threaded pyarrow engine. Restated
+    independently from scripts/filter_borrower_file_by_retail_agents.py's
+    identically-named helper (one-way scripts/ layering convention) --
+    --loan-training-file is exactly the "several GB, state_data_*.csv"
+    file that helper's own docstring names as its reason for existing: the
+    single-threaded default C engine with low_memory=False can exhaust
+    available memory on a file that size (observed directly: a real
+    --loan-training-file run raised `pandas.errors.ParserError: ... C
+    error: out of memory` from this exact low_memory=False call). Falls
+    back to the plain engine (default low_memory=True, i.e. chunked dtype
+    inference -- NOT low_memory=False, which is the memory-heavier choice
+    that caused the failure in the first place) if pyarrow isn't
+    importable, so this never hard-fails on a slower read instead of not
+    running at all."""
+    try:
+        return pd.read_csv(path, sep=",", encoding="utf-8-sig", engine="pyarrow")
+    except (ImportError, ValueError):
+        return pd.read_csv(path, sep=",", encoding="utf-8-sig")
+
+
 def load_loan_episodes(path: Path) -> pd.DataFrame:
-    df = pd.read_csv(path, low_memory=False)
+    df = _read_csv_fast(path)
     missing = [c for c in LOAN_REQUIRED_COLS if c not in df.columns]
     if missing:
         sys.exit(f"ERROR: {path} is missing required column(s): {missing}")
@@ -106,7 +127,7 @@ def load_mart(path: Path) -> tuple:
     per agent, NOT deduplicated to one row per agent (build_capacity_research_dataset.py
     deduplicates; this script needs the opposite, so each loan can match its
     own most-recent-prior snapshot)."""
-    txn = pd.read_csv(path, low_memory=False)
+    txn = _read_csv_fast(path)
     msisdn_col = "agent_msisdn" if "agent_msisdn" in txn.columns else "msisdn"
     if msisdn_col not in txn.columns:
         sys.exit(f"ERROR: {path} has neither 'agent_msisdn' nor 'msisdn'. Columns present: {list(txn.columns)}")
