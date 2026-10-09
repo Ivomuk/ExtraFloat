@@ -103,6 +103,19 @@ def _read_csv_fast(path: Path) -> pd.DataFrame:
 
 def load_loan_episodes(path: Path) -> pd.DataFrame:
     df = _read_csv_fast(path)
+    if "agent_msisdn" not in df.columns:
+        # data/loan_state_query_updated.txt's own final SELECT names this
+        # column `msisdn` (aliased from `customer_msisdn` -- in this
+        # domain the "customer" taking the loan IS the retail agent, not
+        # a separate end-customer). Same 3-way fallback order already
+        # used for this exact file by
+        # scripts/filter_borrower_file_by_retail_agents.py (restated
+        # independently, one-way scripts/ layering convention), and by
+        # load_mart() below for the transaction-mart file.
+        alt_col = next((c for c in ("msisdn", "phonenumber") if c in df.columns), None)
+        if alt_col is not None:
+            df = df.rename(columns={alt_col: "agent_msisdn"})
+            print(f"NOTE: loan-training-file has no 'agent_msisdn' column -- using '{alt_col}' instead.")
     missing = [c for c in LOAN_REQUIRED_COLS if c not in df.columns]
     if missing:
         sys.exit(f"ERROR: {path} is missing required column(s): {missing}")
