@@ -209,12 +209,38 @@ CLUSTER_DERIVED_FEATURE_NAMES = [
 # legitimate point-in-time lineage. See check_champion_feature_coverage().
 # ======================================================================== #
 
+# The FULL raw output schema of data/agent_profile_snapshot_query.sql's
+# final SELECT (that file's own header documents "Output columns (57
+# total)"), confirmed by direct read -- NOT the same thing as
+# PHASE_21_RAW_COLS above. PHASE_21_RAW_COLS is deliberately narrower: it
+# exists only to bound load_mart's merge_asof memory footprint to the
+# columns restate_phase_2_1_features actually consumes. This constant is
+# for a different purpose -- classifying a champion-selected RAW mart
+# column (one restate_phase_2_1_features never touches at all, e.g.
+# cash_in_comm_1m, cash_out_cust_3m) as legitimately Phase-2.1-sourced,
+# since it comes from the identical point-in-time snapshot query (same
+# `tbl_dt > dt_mN AND tbl_dt <= snapshot_dt` window guard as the columns
+# already in PHASE_21_RAW_COLS) -- never widen PHASE_21_RAW_COLS itself to
+# match, that would reintroduce the exact OOM this script already fixed.
+PHASE21_RAW_MART_SCHEMA_COLS = sorted(set(
+    ["account_balance", "average_balance", "commission"]
+    + CLUSTER_PEER_COLS
+    + ["cust_1m", "cust_3m", "cust_6m", "vol_1m", "vol_3m", "vol_6m"]
+    + [
+        f"{txn_type}_{metric}_{horizon}"
+        for txn_type in ("cash_out", "cash_in", "payment")
+        for metric in ("vol", "value", "peers", "comm", "cust")
+        for horizon in ("1m", "3m", "6m")
+    ]
+))
+
 # Every name restate_phase_2_1_features() can produce, enumerated
 # block-for-block from that function (mirrors transaction_features.py's
-# run_phase_2_1_richer_tx_behaviour verbatim) -- union of the raw
-# passthrough whitelist (PHASE_21_RAW_COLS) and every derived column name.
+# run_phase_2_1_richer_tx_behaviour verbatim) -- union of the FULL raw
+# mart schema (PHASE21_RAW_MART_SCHEMA_COLS, not the narrower
+# PHASE_21_RAW_COLS) and every derived column name.
 _PHASE21_BASE_NAMES = ("cash_out_vol", "cash_in_vol", "payment_vol", "vol")
-PHASE21_PIT_FEATURE_NAMES = set(PHASE_21_RAW_COLS) | {
+PHASE21_PIT_FEATURE_NAMES = set(PHASE21_RAW_MART_SCHEMA_COLS) | {
     "is_fully_inactive_6m", "is_consecutively_inactive", "activity_restart_flag",
     "vol_3m_if_active", "commission_without_activity_flag",
     "consistent_volume_decline_flag", "consistent_volume_growth_flag",
@@ -249,6 +275,33 @@ PHASE21_PIT_FEATURE_NAMES = set(PHASE_21_RAW_COLS) | {
 # lines 1987-1996 -- "prior_loan.disbursement_ts < current_loan.
 # disbursement_ts"). Deliberately EXCLUDES bad_state -- that is the label
 # itself (see PROHIBITED_LABEL_LEAKAGE_NAMES below), never reachable here.
+#
+# IMPORTANT: SNAPSHOT_TO_TRAINING_COLUMN_MAP is NOT an exhaustive list of
+# Phase 2.2 output names -- per its own module comment, it only lists
+# columns that need RENAMING between the scoring-time and training-time
+# queries. A real champion-coverage run found 16 genuinely PIT-safe
+# training-side sibling columns this missed entirely (same CTEs as the
+# already-mapped columns, confirmed by direct read of
+# data/loan_state_query_updated_materialized.txt's final SELECT,
+# lines 2060-2299, and each one's own source CTE):
+#   - scoring_state_features CTE (lines 1087+), same `s.` alias already
+#     producing scoring_state_date/observed_prior_loan_count etc.:
+#     active_loan_aging_bucket_at_scoring, scoring_state_loan_disbursed_ugx,
+#     scoring_state_loan_repaid_ugx, scoring_state_loan_gross_repaid_ugx,
+#     scoring_state_loan_fees_paid_ugx, scoring_state_loan_interest_paid_ugx,
+#     scoring_state_loan_gross_repayment_ratio,
+#     scoring_state_repayment_to_disbursement_event_ratio.
+#   - prior_loan_features CTE (lines 1357+), same aggregation already
+#     producing all_prior_loans_disbursed_ugx etc.:
+#     historical_anomaly_open_loan_count, avg_prior_loan_principal_
+#     repayment_ratio.
+#   - last_closed_loan_features CTE (lines 1488+), same `closed_prior_
+#     loans_ranked WHERE closed_loan_recency = 1` source already producing
+#     max_tenure_days_last_5_closed_loans's sibling:
+#     last_closed_loan_tenure_days, last_closed_loan_aging_bucket,
+#     last_closed_loan_disbursed_ugx, last_closed_loan_repaid_ugx,
+#     last_closed_loan_gross_repaid_ugx,
+#     last_closed_loan_principal_repayment_ratio.
 PHASE22_PIT_FEATURE_NAMES = set(SNAPSHOT_TO_TRAINING_COLUMN_MAP.values()) | {
     "has_observed_prior_state", "has_pre_window_history", "days_since_last_repayment",
     "avg_tenure_days_closed_loans", "max_tenure_days_last_5_closed_loans",
@@ -258,6 +311,15 @@ PHASE22_PIT_FEATURE_NAMES = set(SNAPSHOT_TO_TRAINING_COLUMN_MAP.values()) | {
     "has_ever_loan", "has_loan_history", "is_new_agent", "no_loan_history_flag",
     "thin_file_flag", "thin_file_pd_prior",
     "prior_loans_per_observed_month",
+    "active_loan_aging_bucket_at_scoring", "scoring_state_loan_disbursed_ugx",
+    "scoring_state_loan_repaid_ugx", "scoring_state_loan_gross_repaid_ugx",
+    "scoring_state_loan_fees_paid_ugx", "scoring_state_loan_interest_paid_ugx",
+    "scoring_state_loan_gross_repayment_ratio",
+    "scoring_state_repayment_to_disbursement_event_ratio",
+    "historical_anomaly_open_loan_count", "avg_prior_loan_principal_repayment_ratio",
+    "last_closed_loan_tenure_days", "last_closed_loan_aging_bucket",
+    "last_closed_loan_disbursed_ugx", "last_closed_loan_repaid_ugx",
+    "last_closed_loan_gross_repaid_ugx", "last_closed_loan_principal_repayment_ratio",
 }
 
 # Columns describing the TARGET loan/decision event itself -- no history
@@ -291,9 +353,17 @@ DECISION_CONTEXT_PLUS_PHASE22_PIT_FEATURE_NAMES = {
 # Future-derived / label columns -- never legitimately knowable
 # pre-disbursement, checked FIRST and exact-name-only (never substring),
 # regardless of which pipeline happens to emit the name. "bad_state" is
-# added explicitly: _apply_bad_flags_loan_level_inplace derives it from
-# bad_state_3dpd_30d, but it is the label itself, not a feature.
-PROHIBITED_LABEL_LEAKAGE_NAMES = set(LABEL_DIAGNOSTIC_COLUMNS) | {"bad_state"}
+# the label derived from bad_state_3dpd_30d (_apply_bad_flags_loan_level_
+# inplace); bad_state_3dpd_30d and bad_state_1dpd_7d are themselves the
+# raw primary/secondary labels straight from the materialized SQL's
+# "Targets" section (data/loan_state_query_updated_materialized.txt:2265-
+# 2266) -- loan_history_features.py's own module docstring states
+# bad_state_1dpd_7d "stays in the returned frame as a monitoring signal,
+# but must never be used as a feature." None of these three names are
+# ever legitimately a champion-selected feature.
+PROHIBITED_LABEL_LEAKAGE_NAMES = set(LABEL_DIAGNOSTIC_COLUMNS) | {
+    "bad_state", "bad_state_3dpd_30d", "bad_state_1dpd_7d",
+}
 
 # Champion-feature-coverage classification labels (checked in this order;
 # categories 2-5 are tested as set membership, not sequential elif, so a
