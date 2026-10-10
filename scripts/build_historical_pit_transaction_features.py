@@ -64,35 +64,51 @@ agents or a window not yet observable in July). That is a DIFFERENT
 leakage channel than the as-of join solves, and this script does not
 claim to have solved it.
 
-Accordingly this script reports TWO SEPARATE, independent statuses, never
-collapsed into one:
+Accordingly this script reports FOUR SEPARATE, independent facts, never
+collapsed into one combined verdict (per review -- an earlier draft
+folded "present" and "provenance" into a single status; this round
+splits them, because each answers a genuinely different question):
 - `reconstruction_status` -- whether the as-of join itself found a valid,
   strictly-prior historical mart row (`PIT_PHASE21_RECONSTRUCTED` /
-  `PIT_PHASE21_UNAVAILABLE_NO_PRIOR_SNAPSHOT`).
-- `upstream_derived_features_pit_status` -- whether any Phase 2.1 feature
-  on that row was derived from an upstream cluster/peer column.
-  `"NOT_APPLICABLE"` when no such column was present/non-null for that
-  row (no derived feature exists to be in question). `"UNKNOWN"` --
-  **never a default pass** -- whenever at least one was, because this
-  script does not audit those columns' own point-in-time construction.
-  There is no third value meaning "verified safe" until that lineage
-  audit is actually done elsewhere.
+  `PIT_PHASE21_UNAVAILABLE_NO_PRIOR_SNAPSHOT`). This is "RowPIT."
+- `cluster_peer_columns_present` (bool) -- were any upstream cluster/peer
+  columns actually present and non-null on the matched historical row?
+  Purely a data-presence fact.
+- `cluster_peer_pit_provenance` -- `"NOT_APPLICABLE"` when no such column
+  was present (no derived feature exists to be in question);
+  `"NOT_VERIFIED"` -- **never a default pass** -- whenever at least one
+  was, because this script does not audit those columns' own point-in-
+  time construction. A `"VERIFIED"` value exists in the enum for a
+  future lineage audit to use; this script never sets it.
+- `required_by_scoring_schema` -- `"YES"` / `"NO"` / `"UNKNOWN"`, a
+  SCHEMA-level fact (same for every row in a given run, broadcast for
+  convenience) from `check_upstream_feature_schema_overlap`: does the
+  champion model's `selected_features` actually include any cluster/
+  peer-derived feature name at all? `"UNKNOWN"` when no populated
+  champion schema exists yet (the real repo currently has only
+  placeholder `pd_model/artifacts/*.json` -- Stage 4A already found
+  this).
 
-A SEPARATE, SCHEMA-LEVEL CHECK narrows whether this open question even
-matters for real scoring: `check_upstream_feature_schema_overlap`
-intersects the cluster/peer-DERIVED feature names this script can produce
-(`CLUSTER_DERIVED_FEATURE_NAMES`) against the champion model's actual
-`selected_features` list (`feature_order.json`, via an optional
-`--pd-model-artifacts-dir`), yielding one of three outcomes: (1) no
-champion schema available yet (placeholder artifacts) ->
-`UNKNOWN_SCHEMA_NOT_AVAILABLE`; (2) a real schema exists and none of the
-cluster-derived features are in it -> `NOT_REQUIRED_BY_CHAMPION` (the
-unresolved per-row provenance question is moot for scoring); (3) a real
-schema exists and at least one IS in it -> `REQUIRED_BY_CHAMPION_
-PROVENANCE_UNKNOWN` (scoring with the champion would depend on an
-unverified feature). This is reported once, as a schema-level finding,
-never folded silently into the per-row CSV, since it is a fact about the
-model's requirements, not about any individual historical loan.
+THE EVENTUAL GATE LOGIC, recorded here for the NEXT step, NOT computed by
+this script: `Phase21PIT = RowPIT AND RequiredFeatureCoverage AND
+UpstreamDerivedFeaturePIT`, where `UpstreamDerivedFeaturePIT` only
+matters (a `NOT_VERIFIED` provenance only BLOCKS) when
+`required_by_scoring_schema == "YES"` -- if no cluster/peer-derived
+feature is actually required by the champion, its unresolved provenance
+is irrelevant to historical scoring. This script deliberately does NOT
+compute that combined AND, and does NOT invent a feature-requirement set
+of its own: it reconstructs and inventories the four facts above; a
+later, separate step updates Stage 4A's own Gate 1 to combine them, only
+once a real champion schema exists to combine them against.
+
+THE CORRECT CONCLUSION FOR THIS SCRIPT (per review -- the only phrasing
+this script's own output may use, printed verbatim in `main`): "Historical
+Phase 2.1 row selection and row-derived feature reconstruction succeeded.
+Full Phase 2.1 scoring-vector PIT validity remains conditional on
+required-feature coverage and PIT provenance of any required upstream-
+derived peer/cluster inputs." Never anything resembling "Phase 2.1 PIT
+reconstruction succeeded" unqualified -- that overclaims what has
+actually been established.
 
 REUSES (restates, never imports -- one-way `scripts/` layering
 convention) the exact as-of-join pattern already built, tested, and
@@ -161,8 +177,16 @@ CLUSTER_DERIVED_FEATURE_NAMES = [
 STATUS_RECONSTRUCTED = "PIT_PHASE21_RECONSTRUCTED"
 STATUS_UNAVAILABLE = "PIT_PHASE21_UNAVAILABLE_NO_PRIOR_SNAPSHOT"
 
-UPSTREAM_STATUS_NOT_APPLICABLE = "NOT_APPLICABLE"
-UPSTREAM_STATUS_UNKNOWN = "UNKNOWN"
+# cluster_peer_pit_provenance values. "VERIFIED" is never set by this
+# script -- it exists in the enum only for a future lineage audit to use.
+PROVENANCE_NOT_APPLICABLE = "NOT_APPLICABLE"
+PROVENANCE_NOT_VERIFIED = "NOT_VERIFIED"
+PROVENANCE_VERIFIED = "VERIFIED"
+
+# required_by_scoring_schema values (schema-level, broadcast per row).
+REQUIRED_YES = "YES"
+REQUIRED_NO = "NO"
+REQUIRED_UNKNOWN = "UNKNOWN"
 
 SCHEMA_CHECK_UNAVAILABLE = "UNKNOWN_SCHEMA_NOT_AVAILABLE"
 SCHEMA_CHECK_NOT_REQUIRED = "NOT_REQUIRED_BY_CHAMPION"
@@ -436,20 +460,22 @@ def restate_phase_2_1_features(df: pd.DataFrame, eps: float) -> pd.DataFrame:
     if "days_since_snapshot" not in df.columns:
         df["days_since_snapshot"] = np.nan
 
-    # Upstream cluster/peer provenance: an explicit, UNKNOWN-by-default
-    # gate, never a silent pass. "NOT_APPLICABLE" when no cluster/peer
-    # column was present+non-null for this row (no derived feature exists
-    # to be in question); "UNKNOWN" -- never anything stronger -- when at
-    # least one was, because this script does not audit those columns'
-    # own point-in-time construction.
+    # Upstream cluster/peer provenance: THREE separate, independent facts,
+    # never collapsed into one combined verdict -- presence alone cannot
+    # establish PIT validity, and "required_by_scoring_schema" is a
+    # schema-level fact, not a per-row assessment.
     present_cluster_cols = [c for c in CLUSTER_PEER_COLS if c in df.columns]
     if present_cluster_cols:
-        any_present = df[present_cluster_cols].notna().any(axis=1)
-        df["upstream_derived_features_pit_status"] = np.where(
-            any_present, UPSTREAM_STATUS_UNKNOWN, UPSTREAM_STATUS_NOT_APPLICABLE,
-        )
+        df["cluster_peer_columns_present"] = df[present_cluster_cols].notna().any(axis=1)
     else:
-        df["upstream_derived_features_pit_status"] = UPSTREAM_STATUS_NOT_APPLICABLE
+        df["cluster_peer_columns_present"] = False
+    # "NOT_VERIFIED" -- never a default pass -- whenever a cluster/peer
+    # column was present, because this script does not audit those
+    # columns' own point-in-time construction. "NOT_APPLICABLE" when none
+    # were present (no derived feature exists to be in question).
+    df["cluster_peer_pit_provenance"] = np.where(
+        df["cluster_peer_columns_present"], PROVENANCE_NOT_VERIFIED, PROVENANCE_NOT_APPLICABLE,
+    )
 
     return df
 
@@ -457,31 +483,40 @@ def restate_phase_2_1_features(df: pd.DataFrame, eps: float) -> pd.DataFrame:
 def check_upstream_feature_schema_overlap(pd_model_artifacts_dir: Path | None) -> dict:
     """Schema-level (not per-row) check: does the champion model actually
     REQUIRE any of the cluster/peer-derived features this script produces?
-    Narrows whether the per-row UNKNOWN status above is merely theoretical
-    or actually blocks confident scoring. Never claims a derived feature
-    is PIT-verified -- only ever reports whether the question is moot
-    (not required) or live (required, provenance still unknown)."""
+    Narrows whether the per-row NOT_VERIFIED provenance is merely
+    theoretical or actually blocks confident scoring -- per the eventual
+    Gate-1 rule (not computed here): Phase21PIT = RowPIT AND
+    RequiredFeatureCoverage AND RequiredUpstreamFeaturePIT, where a
+    NOT_VERIFIED provenance only blocks when required_by_scoring_schema
+    == YES. Never claims a derived feature is PIT-verified -- only ever
+    reports whether the question is moot (not required), live (required,
+    provenance unknown), or undeterminable (no populated champion schema
+    exists yet -- the real repo's artifacts are currently placeholders).
+    `required_by_scoring_schema` (YES/NO/UNKNOWN) is the simplified,
+    row-broadcastable form of `status` below."""
     if pd_model_artifacts_dir is None:
-        return {"status": SCHEMA_CHECK_UNAVAILABLE, "overlap": [], "n_selected_features": None,
-                "detail": "no --pd-model-artifacts-dir given"}
+        return {"status": SCHEMA_CHECK_UNAVAILABLE, "required_by_scoring_schema": REQUIRED_UNKNOWN,
+                "overlap": [], "n_selected_features": None, "detail": "no --pd-model-artifacts-dir given"}
     path = Path(pd_model_artifacts_dir) / "feature_order.json"
     try:
         import json
         data = json.loads(path.read_text())
     except Exception as e:
-        return {"status": SCHEMA_CHECK_UNAVAILABLE, "overlap": [], "n_selected_features": None,
-                "detail": f"could not read {path}: {e}"}
+        return {"status": SCHEMA_CHECK_UNAVAILABLE, "required_by_scoring_schema": REQUIRED_UNKNOWN,
+                "overlap": [], "n_selected_features": None, "detail": f"could not read {path}: {e}"}
     selected_features = data.get("selected_features") or []
     if not selected_features:
-        return {"status": SCHEMA_CHECK_UNAVAILABLE, "overlap": [], "n_selected_features": 0,
+        return {"status": SCHEMA_CHECK_UNAVAILABLE, "required_by_scoring_schema": REQUIRED_UNKNOWN,
+                "overlap": [], "n_selected_features": 0,
                 "detail": f"{path} has no selected_features (placeholder/unpopulated champion schema)"}
     overlap = sorted(set(selected_features) & set(CLUSTER_DERIVED_FEATURE_NAMES))
     if overlap:
-        return {"status": SCHEMA_CHECK_REQUIRED_UNKNOWN, "overlap": overlap,
-                "n_selected_features": len(selected_features),
+        return {"status": SCHEMA_CHECK_REQUIRED_UNKNOWN, "required_by_scoring_schema": REQUIRED_YES,
+                "overlap": overlap, "n_selected_features": len(selected_features),
                 "detail": f"{len(overlap)} cluster-derived feature(s) required by the champion "
                           f"schema, with unresolved upstream PIT provenance"}
-    return {"status": SCHEMA_CHECK_NOT_REQUIRED, "overlap": [], "n_selected_features": len(selected_features),
+    return {"status": SCHEMA_CHECK_NOT_REQUIRED, "required_by_scoring_schema": REQUIRED_NO,
+            "overlap": [], "n_selected_features": len(selected_features),
             "detail": "none of the cluster-derived features are in the champion's selected_features"}
 
 
@@ -498,10 +533,10 @@ def main(argv: list[str] | None = None) -> None:
     print(f"\n{'#' * 100}\nSTAGE 4A.1 -- RESEARCH-ONLY PHASE 2.1 PIT FEATURE RECONSTRUCTION\n"
           f"Produces NO PD scores, NO C3 application, no k selection, no Capacity(F) combination.\n"
           f"Never modifies production pd_model/preprocessing/transaction_features.py.\n"
-          f"Upstream cluster/peer-column provenance (commission_cluster_mean etc.) is an EXPLICIT,\n"
-          f"UNKNOWN-by-default gate (never a silent pass) -- reported per row via upstream_derived_\n"
-          f"features_pit_status, and at the schema level via the champion-feature-overlap check below.\n"
-          f"{'#' * 100}")
+          f"Reports THREE separate upstream cluster/peer facts (present, pit_provenance,\n"
+          f"required_by_scoring_schema), never a single collapsed verdict. Does NOT compute the\n"
+          f"eventual Phase21PIT = RowPIT AND RequiredFeatureCoverage AND RequiredUpstreamFeaturePIT\n"
+          f"gate -- that belongs to a later Stage 4A Gate-1 update, not this script.\n{'#' * 100}")
 
     if not args.loan_training_file.exists():
         sys.exit(f"ERROR: {args.loan_training_file} not found.")
@@ -517,12 +552,12 @@ def main(argv: list[str] | None = None) -> None:
     featured = restate_phase_2_1_features(merged, DEFAULT_CONFIG.eps)
 
     status_counts = featured["reconstruction_status"].value_counts()
-    print("\n-- Reconstruction status (as-of join validity) --")
+    print("\n-- Reconstruction status (RowPIT -- as-of join validity) --")
     print(status_counts.to_string())
 
-    upstream_counts = featured["upstream_derived_features_pit_status"].value_counts()
-    print("\n-- upstream_derived_features_pit_status (cluster/peer provenance gate) --")
-    print(upstream_counts.to_string())
+    provenance_counts = featured["cluster_peer_pit_provenance"].value_counts()
+    print("\n-- cluster_peer_pit_provenance (never VERIFIED by this script) --")
+    print(provenance_counts.to_string())
 
     age_bins = [-1, 7, 30, 60, 90, np.inf]
     age_labels = ["0-7d", "8-30d", "31-60d", "61-90d", ">90d"]
@@ -532,27 +567,37 @@ def main(argv: list[str] | None = None) -> None:
     print(age_band_counts.sort_index().to_string())
 
     schema_check = check_upstream_feature_schema_overlap(args.pd_model_artifacts_dir)
+    featured["required_by_scoring_schema"] = schema_check["required_by_scoring_schema"]
     print(f"\n{'#' * 100}\nSCHEMA-OVERLAP CHECK: does the champion model actually require a "
           f"cluster-derived feature?\n{'#' * 100}")
     print(f"Status: {schema_check['status']}")
+    print(f"required_by_scoring_schema: {schema_check['required_by_scoring_schema']}")
     print(f"Detail: {schema_check['detail']}")
     if schema_check["overlap"]:
         print(f"Overlapping feature(s): {schema_check['overlap']}")
     if schema_check["status"] == SCHEMA_CHECK_UNAVAILABLE:
-        print("Cannot yet determine whether the per-row UNKNOWN status above actually blocks "
-              "scoring -- re-run with --pd-model-artifacts-dir pointing at a populated champion "
+        print("Cannot yet determine whether NOT_VERIFIED provenance actually blocks scoring -- "
+              "re-run with --pd-model-artifacts-dir pointing at a populated champion "
               "feature_order.json once one exists.")
     elif schema_check["status"] == SCHEMA_CHECK_NOT_REQUIRED:
         print("The champion's selected_features do not include any cluster-derived feature -- the "
               "unresolved upstream provenance question is moot for scoring with this exact model.")
     else:
         print("The champion's selected_features REQUIRE at least one cluster-derived feature whose "
-              "upstream provenance remains UNKNOWN -- scoring with this exact model would depend on "
-              "an unverified assumption. This is not resolved by this script.")
+              "upstream provenance remains NOT_VERIFIED -- scoring with this exact model would "
+              "depend on an unverified assumption. This is not resolved by this script.")
+
+    print(f"\n{'#' * 100}\nCONCLUSION (the only claim this script's result supports)\n{'#' * 100}")
+    print(
+        "Historical Phase 2.1 row selection and row-derived feature reconstruction succeeded.\n"
+        "Full Phase 2.1 scoring-vector PIT validity remains conditional on required-feature\n"
+        "coverage and PIT provenance of any required upstream-derived peer/cluster inputs."
+    )
 
     feature_cols = [c for c in featured.columns if c not in merged.columns or c == "days_since_snapshot"]
     fixed_cols = ["disbursement_fid", "agent_msisdn", "loan_date", "fundamentals_snapshot_date",
-                  "days_since_snapshot", "reconstruction_status", "upstream_derived_features_pit_status"]
+                  "days_since_snapshot", "reconstruction_status", "cluster_peer_columns_present",
+                  "cluster_peer_pit_provenance", "required_by_scoring_schema"]
     out_cols = fixed_cols + [c for c in feature_cols if c not in fixed_cols]
     out_cols = [c for c in dict.fromkeys(out_cols) if c in featured.columns]
 
