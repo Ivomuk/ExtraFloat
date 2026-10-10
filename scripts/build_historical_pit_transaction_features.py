@@ -47,18 +47,52 @@ gating), and replaces ONLY the recency block: `days_since_snapshot` here
 comes from the as-of join below (each episode's own `loan_date` minus
 the matched historical snapshot's date), never a batch maximum.
 
-ONE REAL, UNRESOLVED CAVEAT, flagged rather than hidden: several Phase
-2.1 blocks consume, but do not themselves compute, upstream cluster/peer
-aggregate columns (`commission_cluster_mean`, `vol_3m_cluster_mean`,
-`cluster_avg_commission`, `cluster_avg_vol_3m`, `cash_in_peers_3m`,
-`cash_in_vol_3m`). Those columns are produced by an earlier, upstream
-phase this investigation did not read. Their OWN point-in-time validity
-(computed fresh per historical month, vs. from some other reference
-batch) is NOT verified by this script -- it passes through whatever is
-present on the matched historical mart row as-is and reports, per row,
-whether any such column was actually present and non-null
-(`cluster_columns_present`), rather than silently assuming their
-provenance is fine.
+UPSTREAM PEER/CLUSTER PROVENANCE IS AN EXPLICIT, UNRESOLVED GATE -- not a
+minor footnote (per review correction: an earlier draft under-weighted
+this as an informational caveat). Several Phase 2.1 blocks consume, but
+do not themselves compute, upstream cluster/peer aggregate columns
+(`commission_cluster_mean`, `vol_3m_cluster_mean`, `cluster_avg_
+commission`, `cluster_avg_vol_3m`, `cash_in_peers_3m`, `cash_in_vol_3m`).
+Those columns are produced by an earlier, upstream phase this
+investigation did not read. `fundamentals_snapshot_date < loan_date` is
+NECESSARY but NOT SUFFICIENT for the full Phase 2.1 vector to be PIT-
+valid: the matched historical mart row is dated correctly, but a cluster/
+peer aggregate ON that row could itself have been computed from a
+reference population or period that was not actually available as of
+that historical date (e.g. a July snapshot's cluster mean computed across
+agents or a window not yet observable in July). That is a DIFFERENT
+leakage channel than the as-of join solves, and this script does not
+claim to have solved it.
+
+Accordingly this script reports TWO SEPARATE, independent statuses, never
+collapsed into one:
+- `reconstruction_status` -- whether the as-of join itself found a valid,
+  strictly-prior historical mart row (`PIT_PHASE21_RECONSTRUCTED` /
+  `PIT_PHASE21_UNAVAILABLE_NO_PRIOR_SNAPSHOT`).
+- `upstream_derived_features_pit_status` -- whether any Phase 2.1 feature
+  on that row was derived from an upstream cluster/peer column.
+  `"NOT_APPLICABLE"` when no such column was present/non-null for that
+  row (no derived feature exists to be in question). `"UNKNOWN"` --
+  **never a default pass** -- whenever at least one was, because this
+  script does not audit those columns' own point-in-time construction.
+  There is no third value meaning "verified safe" until that lineage
+  audit is actually done elsewhere.
+
+A SEPARATE, SCHEMA-LEVEL CHECK narrows whether this open question even
+matters for real scoring: `check_upstream_feature_schema_overlap`
+intersects the cluster/peer-DERIVED feature names this script can produce
+(`CLUSTER_DERIVED_FEATURE_NAMES`) against the champion model's actual
+`selected_features` list (`feature_order.json`, via an optional
+`--pd-model-artifacts-dir`), yielding one of three outcomes: (1) no
+champion schema available yet (placeholder artifacts) ->
+`UNKNOWN_SCHEMA_NOT_AVAILABLE`; (2) a real schema exists and none of the
+cluster-derived features are in it -> `NOT_REQUIRED_BY_CHAMPION` (the
+unresolved per-row provenance question is moot for scoring); (3) a real
+schema exists and at least one IS in it -> `REQUIRED_BY_CHAMPION_
+PROVENANCE_UNKNOWN` (scoring with the champion would depend on an
+unverified feature). This is reported once, as a schema-level finding,
+never folded silently into the per-row CSV, since it is a fact about the
+model's requirements, not about any individual historical loan.
 
 REUSES (restates, never imports -- one-way `scripts/` layering
 convention) the exact as-of-join pattern already built, tested, and
@@ -113,8 +147,26 @@ CLUSTER_PEER_COLS = [
     "cash_in_peers_3m", "cash_in_vol_3m",
 ]
 
+# Output feature names this script derives FROM the CLUSTER_PEER_COLS above --
+# the schema-overlap check below intersects this list against the champion's
+# actual selected_features, never the raw upstream columns themselves.
+CLUSTER_DERIVED_FEATURE_NAMES = [
+    "commission_drop_flag",
+    "commission_vs_cluster_mean_ratio", "commission_vs_cluster_mean_diff",
+    "vol_3m_vs_cluster_mean_ratio", "vol_3m_vs_cluster_mean_diff",
+    "cluster_commission_per_vol_3m", "commission_per_vol_vs_cluster_ratio",
+    "peer_dependency_ratio", "high_peer_dependency_flag",
+]
+
 STATUS_RECONSTRUCTED = "PIT_PHASE21_RECONSTRUCTED"
 STATUS_UNAVAILABLE = "PIT_PHASE21_UNAVAILABLE_NO_PRIOR_SNAPSHOT"
+
+UPSTREAM_STATUS_NOT_APPLICABLE = "NOT_APPLICABLE"
+UPSTREAM_STATUS_UNKNOWN = "UNKNOWN"
+
+SCHEMA_CHECK_UNAVAILABLE = "UNKNOWN_SCHEMA_NOT_AVAILABLE"
+SCHEMA_CHECK_NOT_REQUIRED = "NOT_REQUIRED_BY_CHAMPION"
+SCHEMA_CHECK_REQUIRED_UNKNOWN = "REQUIRED_BY_CHAMPION_PROVENANCE_UNKNOWN"
 
 
 def _read_csv_fast(path: Path) -> pd.DataFrame:
@@ -384,28 +436,72 @@ def restate_phase_2_1_features(df: pd.DataFrame, eps: float) -> pd.DataFrame:
     if "days_since_snapshot" not in df.columns:
         df["days_since_snapshot"] = np.nan
 
-    # Cluster/peer-column provenance caveat: per-row, not assumed.
+    # Upstream cluster/peer provenance: an explicit, UNKNOWN-by-default
+    # gate, never a silent pass. "NOT_APPLICABLE" when no cluster/peer
+    # column was present+non-null for this row (no derived feature exists
+    # to be in question); "UNKNOWN" -- never anything stronger -- when at
+    # least one was, because this script does not audit those columns'
+    # own point-in-time construction.
     present_cluster_cols = [c for c in CLUSTER_PEER_COLS if c in df.columns]
     if present_cluster_cols:
-        df["cluster_columns_present"] = df[present_cluster_cols].notna().any(axis=1)
+        any_present = df[present_cluster_cols].notna().any(axis=1)
+        df["upstream_derived_features_pit_status"] = np.where(
+            any_present, UPSTREAM_STATUS_UNKNOWN, UPSTREAM_STATUS_NOT_APPLICABLE,
+        )
     else:
-        df["cluster_columns_present"] = False
+        df["upstream_derived_features_pit_status"] = UPSTREAM_STATUS_NOT_APPLICABLE
 
     return df
+
+
+def check_upstream_feature_schema_overlap(pd_model_artifacts_dir: Path | None) -> dict:
+    """Schema-level (not per-row) check: does the champion model actually
+    REQUIRE any of the cluster/peer-derived features this script produces?
+    Narrows whether the per-row UNKNOWN status above is merely theoretical
+    or actually blocks confident scoring. Never claims a derived feature
+    is PIT-verified -- only ever reports whether the question is moot
+    (not required) or live (required, provenance still unknown)."""
+    if pd_model_artifacts_dir is None:
+        return {"status": SCHEMA_CHECK_UNAVAILABLE, "overlap": [], "n_selected_features": None,
+                "detail": "no --pd-model-artifacts-dir given"}
+    path = Path(pd_model_artifacts_dir) / "feature_order.json"
+    try:
+        import json
+        data = json.loads(path.read_text())
+    except Exception as e:
+        return {"status": SCHEMA_CHECK_UNAVAILABLE, "overlap": [], "n_selected_features": None,
+                "detail": f"could not read {path}: {e}"}
+    selected_features = data.get("selected_features") or []
+    if not selected_features:
+        return {"status": SCHEMA_CHECK_UNAVAILABLE, "overlap": [], "n_selected_features": 0,
+                "detail": f"{path} has no selected_features (placeholder/unpopulated champion schema)"}
+    overlap = sorted(set(selected_features) & set(CLUSTER_DERIVED_FEATURE_NAMES))
+    if overlap:
+        return {"status": SCHEMA_CHECK_REQUIRED_UNKNOWN, "overlap": overlap,
+                "n_selected_features": len(selected_features),
+                "detail": f"{len(overlap)} cluster-derived feature(s) required by the champion "
+                          f"schema, with unresolved upstream PIT provenance"}
+    return {"status": SCHEMA_CHECK_NOT_REQUIRED, "overlap": [], "n_selected_features": len(selected_features),
+            "detail": "none of the cluster-derived features are in the champion's selected_features"}
 
 
 def main(argv: list[str] | None = None) -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--loan-training-file", type=Path, required=True)
     ap.add_argument("--transaction-mart-file", type=Path, required=True)
+    ap.add_argument("--pd-model-artifacts-dir", type=Path, default=None,
+                     help="optional; expects feature_order.json. Enables the schema-overlap check "
+                          "(whether the champion model actually requires any cluster-derived feature).")
     ap.add_argument("--out-prefix", type=str, default="stage4a1_phase21_pit")
     args = ap.parse_args(argv)
 
     print(f"\n{'#' * 100}\nSTAGE 4A.1 -- RESEARCH-ONLY PHASE 2.1 PIT FEATURE RECONSTRUCTION\n"
           f"Produces NO PD scores, NO C3 application, no k selection, no Capacity(F) combination.\n"
           f"Never modifies production pd_model/preprocessing/transaction_features.py.\n"
-          f"Upstream cluster/peer-column provenance (commission_cluster_mean etc.) is NOT verified "
-          f"by this script -- reported per row via cluster_columns_present, never assumed.\n{'#' * 100}")
+          f"Upstream cluster/peer-column provenance (commission_cluster_mean etc.) is an EXPLICIT,\n"
+          f"UNKNOWN-by-default gate (never a silent pass) -- reported per row via upstream_derived_\n"
+          f"features_pit_status, and at the schema level via the champion-feature-overlap check below.\n"
+          f"{'#' * 100}")
 
     if not args.loan_training_file.exists():
         sys.exit(f"ERROR: {args.loan_training_file} not found.")
@@ -421,8 +517,12 @@ def main(argv: list[str] | None = None) -> None:
     featured = restate_phase_2_1_features(merged, DEFAULT_CONFIG.eps)
 
     status_counts = featured["reconstruction_status"].value_counts()
-    print("\n-- Reconstruction status --")
+    print("\n-- Reconstruction status (as-of join validity) --")
     print(status_counts.to_string())
+
+    upstream_counts = featured["upstream_derived_features_pit_status"].value_counts()
+    print("\n-- upstream_derived_features_pit_status (cluster/peer provenance gate) --")
+    print(upstream_counts.to_string())
 
     age_bins = [-1, 7, 30, 60, 90, np.inf]
     age_labels = ["0-7d", "8-30d", "31-60d", "61-90d", ">90d"]
@@ -431,11 +531,29 @@ def main(argv: list[str] | None = None) -> None:
     print("\n-- days_since_snapshot age bands (reconstructed rows only) --")
     print(age_band_counts.sort_index().to_string())
 
+    schema_check = check_upstream_feature_schema_overlap(args.pd_model_artifacts_dir)
+    print(f"\n{'#' * 100}\nSCHEMA-OVERLAP CHECK: does the champion model actually require a "
+          f"cluster-derived feature?\n{'#' * 100}")
+    print(f"Status: {schema_check['status']}")
+    print(f"Detail: {schema_check['detail']}")
+    if schema_check["overlap"]:
+        print(f"Overlapping feature(s): {schema_check['overlap']}")
+    if schema_check["status"] == SCHEMA_CHECK_UNAVAILABLE:
+        print("Cannot yet determine whether the per-row UNKNOWN status above actually blocks "
+              "scoring -- re-run with --pd-model-artifacts-dir pointing at a populated champion "
+              "feature_order.json once one exists.")
+    elif schema_check["status"] == SCHEMA_CHECK_NOT_REQUIRED:
+        print("The champion's selected_features do not include any cluster-derived feature -- the "
+              "unresolved upstream provenance question is moot for scoring with this exact model.")
+    else:
+        print("The champion's selected_features REQUIRE at least one cluster-derived feature whose "
+              "upstream provenance remains UNKNOWN -- scoring with this exact model would depend on "
+              "an unverified assumption. This is not resolved by this script.")
+
     feature_cols = [c for c in featured.columns if c not in merged.columns or c == "days_since_snapshot"]
-    out_cols = (["disbursement_fid", "agent_msisdn", "loan_date", "fundamentals_snapshot_date",
-                 "days_since_snapshot", "reconstruction_status", "cluster_columns_present"]
-                + [c for c in feature_cols if c not in
-                   ("days_since_snapshot", "reconstruction_status", "cluster_columns_present")])
+    fixed_cols = ["disbursement_fid", "agent_msisdn", "loan_date", "fundamentals_snapshot_date",
+                  "days_since_snapshot", "reconstruction_status", "upstream_derived_features_pit_status"]
+    out_cols = fixed_cols + [c for c in feature_cols if c not in fixed_cols]
     out_cols = [c for c in dict.fromkeys(out_cols) if c in featured.columns]
 
     features_path = f"{args.out_prefix}_phase21_pit_features.csv"
@@ -449,6 +567,11 @@ def main(argv: list[str] | None = None) -> None:
     })
     summary_df.to_csv(summary_path, index=False)
     print(f"Wrote {summary_path}")
+
+    schema_check_path = f"{args.out_prefix}_phase21_upstream_schema_check.json"
+    import json
+    Path(schema_check_path).write_text(json.dumps(schema_check, indent=2))
+    print(f"Wrote {schema_check_path}")
 
 
 if __name__ == "__main__":
