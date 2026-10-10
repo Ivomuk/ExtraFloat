@@ -112,9 +112,15 @@ import argparse
 import importlib
 import json
 import re
+import sys
 from pathlib import Path
 
 import pandas as pd
+
+# Matches scripts/fit_shadow_risk_calibration.py's convention: running this script
+# directly (python scripts/foo.py) puts scripts/ on sys.path, not the repo root, so
+# `import extrafloat` would otherwise fail even though the package exists.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 DEFAULT_LOAN_STATE_QUERY_FILE = "data/loan_state_query_updated_materialized.txt"
 DEFAULT_TRANSACTION_FEATURES_FILE = "pd_model/preprocessing/transaction_features.py"
@@ -260,10 +266,13 @@ def check_historical_input_features(transaction_features_file, transaction_mart_
         Path(DEFAULT_LOAN_STATE_QUERY_FILE)
     if lsq_path.exists():
         text = lsq_path.read_text(errors="ignore")
-        guard_found = bool(re.search(r"state_date\s*<\s*loan_date", text))
+        # Tolerates table-alias-qualified column references (e.g. "ls.state_date < d.loan_date"),
+        # confirmed as the real pattern used in data/loan_state_query_updated_materialized.txt.
+        guard_pattern = re.search(r"(\w+\.)?state_date\s*<\s*(\w+\.)?loan_date", text)
+        guard_found = bool(guard_pattern)
         if guard_found:
             rows.append(_row("Historical input features -- Phase 2.2 (loan-history)",
-                              True, "Yes", f"{lsq_path}: 'state_date < loan_date' guard found", False,
+                              True, "Yes", f"{lsq_path}: guard found ('{guard_pattern.group(0)}')", False,
                               "PIT-safe by construction (event-log source, strict pre-disbursement guard)"))
         else:
             rows.append(_row("Historical input features -- Phase 2.2 (loan-history)",
