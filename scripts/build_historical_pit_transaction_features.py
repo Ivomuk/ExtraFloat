@@ -153,6 +153,10 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from pd_model.config.model_config import DEFAULT_CONFIG  # noqa: E402
+from pd_model.preprocessing.loan_history_features import (  # noqa: E402
+    LABEL_DIAGNOSTIC_COLUMNS,
+    SNAPSHOT_TO_TRAINING_COLUMN_MAP,
+)
 from segmentation.borrower_persona_clustering import digits  # noqa: E402
 
 LOAN_REQUIRED_COLS = ["disbursement_fid", "agent_msisdn", "loan_date"]
@@ -192,6 +196,117 @@ CLUSTER_DERIVED_FEATURE_NAMES = [
     "cluster_commission_per_vol_3m", "commission_per_vol_vs_cluster_ratio",
     "peer_dependency_ratio", "high_peer_dependency_flag",
 ]
+
+# ======================================================================== #
+# Champion-feature-coverage check: canonical PIT-lineage name sets.
+#
+# These answer a DIFFERENT question than CLUSTER_DERIVED_FEATURE_NAMES
+# above (which only tracks the 9 cluster-derived Phase 2.1 outputs for the
+# schema-overlap check). Here, EVERY champion selected_feature must be
+# classified by the PROVENANCE OF ITS GENERATION PATH -- never by whether
+# a same-named column happens to exist in some mart/history export. Each
+# set below is the full, code-verified output-name vocabulary of one
+# legitimate point-in-time lineage. See check_champion_feature_coverage().
+# ======================================================================== #
+
+# Every name restate_phase_2_1_features() can produce, enumerated
+# block-for-block from that function (mirrors transaction_features.py's
+# run_phase_2_1_richer_tx_behaviour verbatim) -- union of the raw
+# passthrough whitelist (PHASE_21_RAW_COLS) and every derived column name.
+_PHASE21_BASE_NAMES = ("cash_out_vol", "cash_in_vol", "payment_vol", "vol")
+PHASE21_PIT_FEATURE_NAMES = set(PHASE_21_RAW_COLS) | {
+    "is_fully_inactive_6m", "is_consecutively_inactive", "activity_restart_flag",
+    "vol_3m_if_active", "commission_without_activity_flag",
+    "consistent_volume_decline_flag", "consistent_volume_growth_flag",
+    "low_balance_flag", "balance_to_vol_3m_ratio", "avg_balance_to_vol_3m_ratio",
+    "balance_drawdown_flag", "cust_concentration_flag", "peer_dependency_ratio",
+    "high_peer_dependency_flag", "net_cash_flow_3m", "net_cash_flow_negative_flag",
+    "payment_intensity_ratio", "sharp_volume_drop_flag", "commission_drop_flag",
+    "commission_vs_cluster_mean_ratio", "commission_vs_cluster_mean_diff",
+    "vol_3m_vs_cluster_mean_ratio", "vol_3m_vs_cluster_mean_diff",
+    "commission_per_vol_3m", "cluster_commission_per_vol_3m",
+    "commission_per_vol_vs_cluster_ratio",
+    "is_inactive_1m", "is_inactive_3m", "is_inactive_6m",
+    "num_inactive_horizons", "max_inactivity_horizon_flag", "days_since_snapshot",
+} | {
+    f"{base}_{suffix}"
+    for base in _PHASE21_BASE_NAMES
+    for suffix in (
+        "avg_monthly_3m", "avg_monthly_6m", "share_1m_of_3m", "growth_1m_vs_prev2m",
+        "share_3m_of_6m", "growth_3m_vs_prev3m", "share_1m_of_6m",
+        "monthly_volatility_proxy", "monthly_volatility_cv",
+    )
+}
+
+# Phase 2.2 (loan-history) canonical output names: the training-side names
+# from pd_model.preprocessing.loan_history_features.SNAPSHOT_TO_TRAINING_
+# COLUMN_MAP's values, the pass-through-unrenamed columns documented in
+# that module's own comment, the thin-file/no-history derived flags from
+# _apply_thin_file_flag_inplace, and prior_loans_per_observed_month
+# (confirmed PIT-safe: data/loan_state_query_updated_materialized.txt:2039-
+# 2044 computes it purely from p.prior_disbursement_count / p.months_
+# since_first_observed_loan, both from the strictly-prior-joined CTE at
+# lines 1987-1996 -- "prior_loan.disbursement_ts < current_loan.
+# disbursement_ts"). Deliberately EXCLUDES bad_state -- that is the label
+# itself (see PROHIBITED_LABEL_LEAKAGE_NAMES below), never reachable here.
+PHASE22_PIT_FEATURE_NAMES = set(SNAPSHOT_TO_TRAINING_COLUMN_MAP.values()) | {
+    "has_observed_prior_state", "has_pre_window_history", "days_since_last_repayment",
+    "avg_tenure_days_closed_loans", "max_tenure_days_last_5_closed_loans",
+    "historical_anomaly_open_loan_rate", "consecutive_on_time_loans",
+    "months_since_first_observed_loan", "prior_loan_count_180d",
+    "prior_active_loan_months_180d",
+    "has_ever_loan", "has_loan_history", "is_new_agent", "no_loan_history_flag",
+    "thin_file_flag", "thin_file_pd_prior",
+    "prior_loans_per_observed_month",
+}
+
+# Columns describing the TARGET loan/decision event itself -- no history
+# join needed at all. Verified against data/loan_state_query_updated_
+# materialized.txt: disbursement_amount_ugx (lines 94-97, 2075) is
+# TRY_CAST(d.disbursement_amount_ugx ...) on the current target loan's own
+# record (tmp_target_loans d / current_loan); disbursement_hour (2006-2007)
+# and disbursement_day_of_week (2009-2010) are EXTRACT(... FROM d.
+# disbursement_ts); late_afternoon_disbursement (2012-2016) is a CASE on
+# that same timestamp. None of these touch a prior-loan or mart row.
+DECISION_CONTEXT_PIT_FEATURE_NAMES = {
+    "disbursement_amount_ugx", "disbursement_hour", "disbursement_day_of_week",
+    "late_afternoon_disbursement",
+}
+
+# Hybrids: a decision-context value (the current loan's own amount) divided
+# by a strictly-prior-window Phase 2.2 aggregate. Verified at data/
+# loan_state_query_updated_materialized.txt:2018-2037:
+# d.disbursement_amount_ugx / p.avg_prior_loan_amount_{30,90,180}d, where
+# avg_prior_loan_amount_Nd (lines 1919-1939) is itself restricted to
+# prior_loan.loan_date >= DATE_ADD('day', -N, current_loan.loan_date) AND
+# joined via the strict guard (lines 1989-1992) "prior_loan.disbursement_ts
+# < current_loan.disbursement_ts" -- the same pre-disbursement discipline
+# Phase 2.2 uses elsewhere.
+DECISION_CONTEXT_PLUS_PHASE22_PIT_FEATURE_NAMES = {
+    "current_to_avg_prior_loan_amount_30d",
+    "current_to_avg_prior_loan_amount_90d",
+    "current_to_avg_prior_loan_amount_180d",
+}
+
+# Future-derived / label columns -- never legitimately knowable
+# pre-disbursement, checked FIRST and exact-name-only (never substring),
+# regardless of which pipeline happens to emit the name. "bad_state" is
+# added explicitly: _apply_bad_flags_loan_level_inplace derives it from
+# bad_state_3dpd_30d, but it is the label itself, not a feature.
+PROHIBITED_LABEL_LEAKAGE_NAMES = set(LABEL_DIAGNOSTIC_COLUMNS) | {"bad_state"}
+
+# Champion-feature-coverage classification labels (checked in this order;
+# categories 2-5 are tested as set membership, not sequential elif, so a
+# genuine name collision across sets surfaces as AMBIGUOUS rather than
+# being silently resolved by whichever check happened to run first).
+COVERAGE_LABEL_LEAKAGE = "PROHIBITED_LABEL_LEAKAGE"
+COVERAGE_PHASE21 = "PHASE21_PIT_RECONSTRUCTABLE"
+COVERAGE_PHASE22 = "PHASE22_PIT_RECONSTRUCTABLE"
+COVERAGE_DECISION_CONTEXT = "DECISION_CONTEXT_PIT_AVAILABLE"
+COVERAGE_DECISION_CONTEXT_PLUS_PHASE22 = "DECISION_CONTEXT_PLUS_PHASE22_PIT"
+COVERAGE_AMBIGUOUS = "AMBIGUOUS_MULTI_PATH_SOURCE"
+COVERAGE_UNACCOUNTED = "UNACCOUNTED_FOR"
+COVERAGE_NOT_REQUIRED_UPSTREAM_DERIVED = "NOT_REQUIRED_UPSTREAM_DERIVED"
 
 STATUS_RECONSTRUCTED = "PIT_PHASE21_RECONSTRUCTED"
 STATUS_UNAVAILABLE = "PIT_PHASE21_UNAVAILABLE_NO_PRIOR_SNAPSHOT"
@@ -550,6 +665,163 @@ def check_upstream_feature_schema_overlap(pd_model_artifacts_dir: Path | None) -
             "detail": "none of the cluster-derived features are in the champion's selected_features"}
 
 
+def _load_selected_features(pd_model_artifacts_dir: Path | None) -> tuple[list[str] | None, str]:
+    """Shared loader for the coverage check -- same read path and same
+    unavailable/empty handling as check_upstream_feature_schema_overlap,
+    factored out so both checks treat a missing/placeholder feature_
+    order.json identically. Returns (selected_features_or_None, detail)."""
+    if pd_model_artifacts_dir is None:
+        return None, "no --pd-model-artifacts-dir given"
+    path = Path(pd_model_artifacts_dir) / "feature_order.json"
+    try:
+        import json
+        data = json.loads(path.read_text())
+    except Exception as e:
+        return None, f"could not read {path}: {e}"
+    selected_features = data.get("selected_features") or []
+    if not selected_features:
+        return None, f"{path} has no selected_features (placeholder/unpopulated champion schema)"
+    return list(selected_features), f"loaded {len(selected_features)} selected_features from {path}"
+
+
+def classify_champion_feature(name: str) -> tuple[str, str, str, bool]:
+    """Classifies a single selected_feature name into exactly one of the 7
+    RequiredChampionFeaturePITCoverage categories. Order matters:
+    PROHIBITED_LABEL_LEAKAGE is checked FIRST (exact-name match only,
+    never substring) so a future-derived/label column is never classified
+    PIT-reconstructable merely because some pipeline happens to emit the
+    name -- pipeline membership is not evidence of PIT safety. The four
+    legitimate-lineage sets are then tested as SET MEMBERSHIP (not
+    sequential elif), so a name present in more than one is caught as
+    AMBIGUOUS_MULTI_PATH_SOURCE and reported, never silently assigned to
+    whichever check happened to run first.
+
+    Returns (classification, pit_reconstructable, evidence, blocking)."""
+    if name in PROHIBITED_LABEL_LEAKAGE_NAMES:
+        return (
+            COVERAGE_LABEL_LEAKAGE, "NO",
+            "matches bad_state or a LABEL_DIAGNOSTIC_COLUMNS name (future-derived, label leakage)",
+            True,
+        )
+
+    matched_sets = []
+    if name in PHASE21_PIT_FEATURE_NAMES:
+        matched_sets.append(COVERAGE_PHASE21)
+    if name in PHASE22_PIT_FEATURE_NAMES:
+        matched_sets.append(COVERAGE_PHASE22)
+    if name in DECISION_CONTEXT_PIT_FEATURE_NAMES:
+        matched_sets.append(COVERAGE_DECISION_CONTEXT)
+    if name in DECISION_CONTEXT_PLUS_PHASE22_PIT_FEATURE_NAMES:
+        matched_sets.append(COVERAGE_DECISION_CONTEXT_PLUS_PHASE22)
+
+    if len(matched_sets) > 1:
+        return (
+            COVERAGE_AMBIGUOUS, "UNKNOWN",
+            f"name appears in multiple canonical PIT-lineage sets: {matched_sets} -- "
+            f"reported explicitly, never silently assigned to one",
+            True,
+        )
+    if len(matched_sets) == 1:
+        classification = matched_sets[0]
+        evidence = {
+            COVERAGE_PHASE21: "in PHASE21_PIT_FEATURE_NAMES (restated run_phase_2_1_richer_tx_behaviour "
+                               "raw-passthrough + derived output names)",
+            COVERAGE_PHASE22: "in PHASE22_PIT_FEATURE_NAMES (loan_history_features.py's "
+                               "SNAPSHOT_TO_TRAINING_COLUMN_MAP values + pass-through + derived-flag names)",
+            COVERAGE_DECISION_CONTEXT: "in DECISION_CONTEXT_PIT_FEATURE_NAMES (target loan's own "
+                                        "request/disbursement record -- no history join needed)",
+            COVERAGE_DECISION_CONTEXT_PLUS_PHASE22: "in DECISION_CONTEXT_PLUS_PHASE22_PIT_FEATURE_NAMES "
+                                                     "(current-loan value / strictly-prior Phase 2.2 aggregate)",
+        }[classification]
+        if classification == COVERAGE_PHASE21 and name in CLUSTER_DERIVED_FEATURE_NAMES:
+            evidence += (" -- NOTE: this is one of the 9 cluster-derived names; its upstream "
+                         "cluster/peer PIT provenance is a SEPARATE, still-NOT_VERIFIED caveat "
+                         "(see cluster_peer_pit_provenance), not resolved by this classification")
+        return classification, "YES", evidence, False
+
+    return COVERAGE_UNACCOUNTED, "NO", "name is not in any canonical PIT-lineage set", True
+
+
+def check_champion_feature_coverage(pd_model_artifacts_dir: Path | None) -> dict:
+    """Classifies EVERY champion selected_feature into exactly one of the 7
+    categories (see classify_champion_feature) -- the broader follow-up to
+    check_upstream_feature_schema_overlap, which only answers whether the
+    9 cluster-derived names are required. This answers: can every selected
+    feature be assigned to a legitimate, code-verified PIT reconstruction
+    lineage? Classification is by PROVENANCE OF GENERATION PATH, never by
+    whether a same-named column happens to exist in some mart/history
+    export.
+
+    Returns {"status", "n_selected_features", "rows": [...], "counts": {...},
+    "required_feature_coverage": "PASS"|"FAIL"|None,
+    "not_required_upstream_derived": [...], "detail"}.
+
+    "RequiredChampionFeaturePITCoverage" (the narrative name for this
+    result, used in printed banners) == PASS means every feature THIS
+    CHAMPION actually selected has an identified, code-supported decision-
+    time lineage with zero label-leaked, unresolved, or ambiguous
+    features -- it does not audit the full universe of features either
+    pipeline is capable of generating, only the subset this champion uses.
+    required_feature_coverage is None (never a fabricated PASS/FAIL) when
+    no populated champion schema exists yet."""
+    selected_features, detail = _load_selected_features(pd_model_artifacts_dir)
+    if selected_features is None:
+        return {
+            "status": SCHEMA_CHECK_UNAVAILABLE, "n_selected_features": None,
+            "rows": [], "counts": {}, "required_feature_coverage": None,
+            "not_required_upstream_derived": [], "detail": detail,
+        }
+
+    rows = []
+    counts = {
+        COVERAGE_LABEL_LEAKAGE: 0, COVERAGE_PHASE21: 0, COVERAGE_PHASE22: 0,
+        COVERAGE_DECISION_CONTEXT: 0, COVERAGE_DECISION_CONTEXT_PLUS_PHASE22: 0,
+        COVERAGE_AMBIGUOUS: 0, COVERAGE_UNACCOUNTED: 0,
+    }
+    for name in selected_features:
+        classification, pit_reconstructable, evidence, blocking = classify_champion_feature(name)
+        counts[classification] += 1
+        rows.append({
+            "selected_feature": name,
+            "feature_source": classification,
+            "pit_reconstructable": pit_reconstructable,
+            "evidence": evidence,
+            "blocking": "YES" if blocking else "NO",
+            "detail": "",
+        })
+
+    n_selected = len(selected_features)
+    assert sum(counts.values()) == n_selected, (
+        f"INTERNAL ERROR: classification counts ({sum(counts.values())}) do not sum to "
+        f"n_selected_features ({n_selected}) -- every selected feature must land in exactly "
+        f"one of the 7 categories."
+    )
+
+    not_required_upstream_derived = sorted(set(CLUSTER_DERIVED_FEATURE_NAMES) - set(selected_features))
+    for name in not_required_upstream_derived:
+        rows.append({
+            "selected_feature": name,
+            "feature_source": COVERAGE_NOT_REQUIRED_UPSTREAM_DERIVED,
+            "pit_reconstructable": "N/A",
+            "evidence": "cluster-derived Phase 2.1 output name, NOT in the champion's selected_features",
+            "blocking": "NO",
+            "detail": "informational only -- excluded from the n_selected_features coverage sum",
+        })
+
+    required_feature_coverage = "PASS" if (
+        counts[COVERAGE_UNACCOUNTED] == 0
+        and counts[COVERAGE_LABEL_LEAKAGE] == 0
+        and counts[COVERAGE_AMBIGUOUS] == 0
+    ) else "FAIL"
+
+    return {
+        "status": "OK", "n_selected_features": n_selected, "rows": rows, "counts": counts,
+        "required_feature_coverage": required_feature_coverage,
+        "not_required_upstream_derived": not_required_upstream_derived,
+        "detail": detail,
+    }
+
+
 def main(argv: list[str] | None = None) -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--loan-training-file", type=Path, default=None,
@@ -566,6 +838,16 @@ def main(argv: list[str] | None = None) -> None:
                           "Requires --pd-model-artifacts-dir. Use this to get required_by_scoring_"
                           "schema without re-running the full, multi-GB-output reconstruction just "
                           "to see that one answer.")
+    ap.add_argument("--champion-feature-coverage-only", action="store_true",
+                     help="skip the loan/mart reconstruction entirely (same shape as "
+                          "--schema-check-only) and classify EVERY champion selected_feature into "
+                          "one of 7 PIT-lineage categories (PROHIBITED_LABEL_LEAKAGE, "
+                          "PHASE21_PIT_RECONSTRUCTABLE, PHASE22_PIT_RECONSTRUCTABLE, "
+                          "DECISION_CONTEXT_PIT_AVAILABLE, DECISION_CONTEXT_PLUS_PHASE22_PIT, "
+                          "AMBIGUOUS_MULTI_PATH_SOURCE, UNACCOUNTED_FOR). Requires "
+                          "--pd-model-artifacts-dir. Answers whether every selected feature has an "
+                          "identified, code-verified decision-time lineage -- never whether a "
+                          "same-named column merely exists somewhere in a mart/history export.")
     ap.add_argument("--out-prefix", type=str, default="stage4a1_phase21_pit")
     args = ap.parse_args(argv)
 
@@ -586,9 +868,60 @@ def main(argv: list[str] | None = None) -> None:
         print(f"Wrote {schema_check_path}")
         return
 
+    if args.champion_feature_coverage_only:
+        if args.pd_model_artifacts_dir is None:
+            sys.exit("ERROR: --champion-feature-coverage-only requires --pd-model-artifacts-dir.")
+        print(f"\n{'#' * 100}\nSTAGE 4A.1 -- CHAMPION FEATURE COVERAGE CHECK ONLY (no loan/mart "
+              f"reconstruction, no features CSV)\nClassifies every champion selected_feature by "
+              f"PROVENANCE OF GENERATION PATH, never by column-name coincidence with a mart/history "
+              f"export.\n{'#' * 100}")
+        schema_check = check_upstream_feature_schema_overlap(args.pd_model_artifacts_dir)
+        print(f"(Context) cluster-derived schema-overlap status: {schema_check['status']} "
+              f"/ required_by_scoring_schema={schema_check['required_by_scoring_schema']}")
+
+        coverage = check_champion_feature_coverage(args.pd_model_artifacts_dir)
+        print(f"Status: {coverage['status']}")
+        print(f"n_selected_features: {coverage['n_selected_features']}")
+        print(f"Detail: {coverage['detail']}")
+        if coverage["counts"]:
+            print("-- Classification counts --")
+            for label, n in coverage["counts"].items():
+                print(f"  {label}: {n}")
+            print(f"  {COVERAGE_NOT_REQUIRED_UPSTREAM_DERIVED} (informational, excluded from sum): "
+                  f"{len(coverage['not_required_upstream_derived'])}")
+        print(f"RequiredChampionFeaturePITCoverage: {coverage['required_feature_coverage']}")
+
+        coverage_csv_path = f"{args.out_prefix}_champion_feature_coverage.csv"
+        pd.DataFrame(
+            coverage["rows"],
+            columns=["selected_feature", "feature_source", "pit_reconstructable", "evidence",
+                     "blocking", "detail"],
+        ).to_csv(coverage_csv_path, index=False)
+        print(f"Wrote {coverage_csv_path}")
+
+        coverage_json_path = f"{args.out_prefix}_champion_feature_coverage.json"
+        import json
+        counts = coverage["counts"]
+        json_summary = {
+            "champion_selected_features": coverage["n_selected_features"],
+            "phase21_pit_covered": counts.get(COVERAGE_PHASE21),
+            "phase22_pit_covered": counts.get(COVERAGE_PHASE22),
+            "decision_context_covered": counts.get(COVERAGE_DECISION_CONTEXT),
+            "decision_context_plus_phase22_covered": counts.get(COVERAGE_DECISION_CONTEXT_PLUS_PHASE22),
+            "ambiguous_multi_path": counts.get(COVERAGE_AMBIGUOUS),
+            "label_leakage_suspected": counts.get(COVERAGE_LABEL_LEAKAGE),
+            "unaccounted_for": counts.get(COVERAGE_UNACCOUNTED),
+            "not_required_upstream_derived_count": len(coverage["not_required_upstream_derived"]),
+            "required_feature_coverage": coverage["required_feature_coverage"],
+            "detail": coverage["detail"],
+        }
+        Path(coverage_json_path).write_text(json.dumps(json_summary, indent=2))
+        print(f"Wrote {coverage_json_path}")
+        return
+
     if args.loan_training_file is None or args.transaction_mart_file is None:
         sys.exit("ERROR: --loan-training-file and --transaction-mart-file are required unless "
-                  "--schema-check-only is given.")
+                  "--schema-check-only or --champion-feature-coverage-only is given.")
 
     print(f"\n{'#' * 100}\nSTAGE 4A.1 -- RESEARCH-ONLY PHASE 2.1 PIT FEATURE RECONSTRUCTION\n"
           f"Produces NO PD scores, NO C3 application, no k selection, no Capacity(F) combination.\n"
