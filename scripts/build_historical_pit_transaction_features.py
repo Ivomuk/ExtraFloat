@@ -552,13 +552,43 @@ def check_upstream_feature_schema_overlap(pd_model_artifacts_dir: Path | None) -
 
 def main(argv: list[str] | None = None) -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--loan-training-file", type=Path, required=True)
-    ap.add_argument("--transaction-mart-file", type=Path, required=True)
+    ap.add_argument("--loan-training-file", type=Path, default=None,
+                     help="required unless --schema-check-only is given")
+    ap.add_argument("--transaction-mart-file", type=Path, default=None,
+                     help="required unless --schema-check-only is given")
     ap.add_argument("--pd-model-artifacts-dir", type=Path, default=None,
                      help="optional; expects feature_order.json. Enables the schema-overlap check "
                           "(whether the champion model actually requires any cluster-derived feature).")
+    ap.add_argument("--schema-check-only", action="store_true",
+                     help="skip the loan/mart reconstruction entirely (no episodes loaded, no join, "
+                          "no leakage assertion, no features CSV) and only run the schema-overlap "
+                          "check against --pd-model-artifacts-dir, printing the result in seconds. "
+                          "Requires --pd-model-artifacts-dir. Use this to get required_by_scoring_"
+                          "schema without re-running the full, multi-GB-output reconstruction just "
+                          "to see that one answer.")
     ap.add_argument("--out-prefix", type=str, default="stage4a1_phase21_pit")
     args = ap.parse_args(argv)
+
+    if args.schema_check_only:
+        if args.pd_model_artifacts_dir is None:
+            sys.exit("ERROR: --schema-check-only requires --pd-model-artifacts-dir.")
+        print(f"\n{'#' * 100}\nSTAGE 4A.1 -- SCHEMA-OVERLAP CHECK ONLY (no loan/mart reconstruction, "
+              f"no features CSV)\n{'#' * 100}")
+        schema_check = check_upstream_feature_schema_overlap(args.pd_model_artifacts_dir)
+        print(f"Status: {schema_check['status']}")
+        print(f"required_by_scoring_schema: {schema_check['required_by_scoring_schema']}")
+        print(f"Detail: {schema_check['detail']}")
+        if schema_check["overlap"]:
+            print(f"Overlapping feature(s): {schema_check['overlap']}")
+        schema_check_path = f"{args.out_prefix}_phase21_upstream_schema_check.json"
+        import json
+        Path(schema_check_path).write_text(json.dumps(schema_check, indent=2))
+        print(f"Wrote {schema_check_path}")
+        return
+
+    if args.loan_training_file is None or args.transaction_mart_file is None:
+        sys.exit("ERROR: --loan-training-file and --transaction-mart-file are required unless "
+                  "--schema-check-only is given.")
 
     print(f"\n{'#' * 100}\nSTAGE 4A.1 -- RESEARCH-ONLY PHASE 2.1 PIT FEATURE RECONSTRUCTION\n"
           f"Produces NO PD scores, NO C3 application, no k selection, no Capacity(F) combination.\n"
