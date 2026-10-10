@@ -163,6 +163,25 @@ CLUSTER_PEER_COLS = [
     "cash_in_peers_3m", "cash_in_vol_3m",
 ]
 
+# The ENTIRE raw-mart-column whitelist restate_phase_2_1_features can ever
+# consume -- every column named in any `if ... in df.columns` check in that
+# function, plus the base_names x {1m,3m,6m} sweep. A real mart export can
+# carry dozens of OTHER columns Phase 2.1 never reads; merging all of them
+# through merge_asof's by= grouped join on millions of rows is a real,
+# observed memory blowup (a real run OOM'd inside pandas' merge_asof
+# internals on a 90-numeric-column mart x 5.6M loan episodes). Narrowing
+# load_mart to this whitelist is a memory fix, not a correctness change --
+# restate_phase_2_1_features's own per-block `if c in df.columns` gating
+# already behaves identically whether an unused column was dropped before
+# the join or merely unused after it.
+PHASE_21_RAW_COLS = sorted(set(
+    ["vol_1m", "vol_3m", "vol_6m", "commission", "account_balance", "average_balance",
+     "cust_1m", "cust_3m", "cash_in_value_3m", "cash_out_value_3m", "payment_value_3m"]
+    + CLUSTER_PEER_COLS
+    + [f"{base}_{horizon}" for base in ("cash_out_vol", "cash_in_vol", "payment_vol", "vol")
+       for horizon in ("1m", "3m", "6m")]
+))
+
 # Output feature names this script derives FROM the CLUSTER_PEER_COLS above --
 # the schema-overlap check below intersects this list against the champion's
 # actual selected_features, never the raw upstream columns themselves.
@@ -240,11 +259,15 @@ def load_loan_episodes(path: Path) -> pd.DataFrame:
 
 def load_mart(path: Path) -> pd.DataFrame:
     """Restated from build_loan_episode_capacity_dataset.py's load_mart,
-    EXCEPT this script keeps EVERY raw mart column present (not just the
-    4 capacity fundamentals) -- Phase 2.1's row-level feature blocks need
-    vol_1m/3m/6m, commission, account_balance, cust_1m/3m, cash_in/
-    cash_out/payment columns, and (optionally) the upstream cluster/peer
-    columns, whichever of these the real export actually contains."""
+    narrowed to PHASE_21_RAW_COLS (the whitelist of raw columns
+    restate_phase_2_1_features can ever consume), NOT every raw mart
+    column -- a real mart export can carry dozens of columns Phase 2.1
+    never reads, and merging all of them through merge_asof's grouped
+    join at real scale (millions of rows) is a genuine memory blowup, not
+    merely wasteful. Narrowing here is a memory fix, not a correctness
+    change: restate_phase_2_1_features's own per-block `if c in
+    df.columns` gating treats a column dropped here identically to one
+    that was simply never present in the export."""
     txn = _read_csv_fast(path)
     msisdn_col = "agent_msisdn" if "agent_msisdn" in txn.columns else "msisdn"
     if msisdn_col not in txn.columns:
@@ -253,7 +276,13 @@ def load_mart(path: Path) -> pd.DataFrame:
     if date_col is None:
         sys.exit(f"ERROR: {path} has neither 'snapshot_dt' nor 'tbl_dt' -- cannot perform a "
                   f"point-in-time join without a snapshot date.")
-    txn = txn.copy()
+    present_phase21_cols = [c for c in PHASE_21_RAW_COLS if c in txn.columns]
+    missing_phase21_cols = [c for c in PHASE_21_RAW_COLS if c not in txn.columns]
+    if missing_phase21_cols:
+        print(f"NOTE: {path.name} is missing {len(missing_phase21_cols)} Phase 2.1 raw column(s) "
+              f"-- the corresponding feature blocks will be skipped (defensive gating, not an "
+              f"error): {missing_phase21_cols}")
+    txn = txn[[msisdn_col, date_col] + present_phase21_cols].copy()
     txn["_id"] = digits(txn[msisdn_col])
     txn["fundamentals_snapshot_date"] = _parse_mart_date(txn[date_col]).dt.normalize()
     n_bad = int(txn["fundamentals_snapshot_date"].isna().sum())
@@ -262,8 +291,9 @@ def load_mart(path: Path) -> pd.DataFrame:
         txn = txn[txn["fundamentals_snapshot_date"].notna()]
     n_dates = txn["fundamentals_snapshot_date"].nunique()
     print(f"Transaction mart: {txn['_id'].nunique():,} unique agent(s) across {n_dates:,} "
-          f"distinct snapshot date(s) ({sorted(d.date().isoformat() for d in txn['fundamentals_snapshot_date'].unique())}).")
-    return txn
+          f"distinct snapshot date(s) ({sorted(d.date().isoformat() for d in txn['fundamentals_snapshot_date'].unique())}), "
+          f"narrowed to {len(present_phase21_cols)} Phase-2.1-relevant raw column(s).")
+    return txn[["_id", "fundamentals_snapshot_date"] + present_phase21_cols]
 
 
 def attach_prior_snapshot(episodes: pd.DataFrame, mart: pd.DataFrame) -> pd.DataFrame:
