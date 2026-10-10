@@ -1061,7 +1061,14 @@ def main(argv: list[str] | None = None) -> None:
     fixed_cols = ["disbursement_fid", "agent_msisdn", "loan_date", "fundamentals_snapshot_date",
                   "days_since_snapshot", "reconstruction_status", "cluster_peer_columns_present",
                   "cluster_peer_pit_provenance", "required_by_scoring_schema"]
-    out_cols = fixed_cols + [c for c in feature_cols if c not in fixed_cols]
+    # The raw, as-of-joined mart columns (vol_1m, commission, ...) themselves --
+    # previously omitted here, which would silently make any downstream consumer
+    # that re-runs the real run_phase_2_1_richer_tx_behaviour on this CSV a no-op
+    # (every one of its "if raw_col in df.columns" guards would fail). Included
+    # so this output is independently re-derivable by production code, not just
+    # by this script's own restatement.
+    raw_mart_cols_present = [c for c in PHASE_21_RAW_COLS if c in featured.columns]
+    out_cols = fixed_cols + raw_mart_cols_present + [c for c in feature_cols if c not in fixed_cols]
     out_cols = [c for c in dict.fromkeys(out_cols) if c in featured.columns]
 
     features_path = f"{args.out_prefix}_phase21_pit_features.csv"
