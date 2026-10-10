@@ -1084,6 +1084,36 @@ def main(argv: list[str] | None = None) -> None:
     Path(schema_check_path).write_text(json.dumps(schema_check, indent=2))
     print(f"Wrote {schema_check_path}")
 
+    # Durable "RowPIT" evidence for a downstream consumer (specifically
+    # Stage 4A's audit_historical_pd_rescoring_feasibility.py) to read,
+    # rather than requiring it to re-derive the same facts by sniffing
+    # columns out of the features/summary CSVs. leakage_assertion_passed
+    # is always True here: assert_no_leakage() already ran, unconditionally,
+    # above -- if it had found a violation it would have raised and this
+    # line would never execute.
+    n_total = int(len(featured))
+    n_reconstructed = int(status_counts.get(STATUS_RECONSTRUCTED, 0))
+    n_unavailable = int(status_counts.get(STATUS_UNAVAILABLE, 0))
+    reconstruction_evidence = {
+        "n_episodes_total": n_total,
+        "n_reconstructed": n_reconstructed,
+        "n_unavailable": n_unavailable,
+        "pct_reconstructed": round(100.0 * n_reconstructed / n_total, 2) if n_total else None,
+        "leakage_assertion_passed": True,
+        "age_band_counts_reconstructed_only": {
+            str(k): int(v) for k, v in age_band_counts.items()
+        },
+        "detail": (
+            f"{n_reconstructed:,}/{n_total:,} episode(s) matched a strictly-prior mart snapshot "
+            f"via merge_asof(direction='backward', allow_exact_matches=False); the remaining "
+            f"{n_unavailable:,} have no eligible prior snapshot and stay explicitly unscorable -- "
+            f"never imputed, backfilled, or counted against this evidence."
+        ),
+    }
+    reconstruction_evidence_path = f"{args.out_prefix}_phase21_pit_reconstruction_evidence.json"
+    Path(reconstruction_evidence_path).write_text(json.dumps(reconstruction_evidence, indent=2))
+    print(f"Wrote {reconstruction_evidence_path}")
+
 
 if __name__ == "__main__":
     main()

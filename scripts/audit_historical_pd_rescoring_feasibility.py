@@ -63,6 +63,37 @@ by itself flip this verdict -- the function would still need a code
 change to use it safely; this script reports the distinct-snapshot-date
 count only as a separate, informational data-level fact.
 
+STAGE 4A.1 RESEARCH-PATH EVIDENCE CHAIN FOR PHASE 2.1's GATE-1 ROLE: the
+legacy finding above is never edited in place. Instead, Phase 2.1's
+actual Gate-1 contribution is decided by a SEPARATE formula --
+FeatureGate_Phase21 = RowPIT AND RequiredChampionFeaturePITCoverage AND
+RequiredUpstreamFeaturePIT -- sourced from three durable artifacts
+produced by `scripts/build_historical_pit_transaction_features.py`
+(Stage 4A.1), passed in via `--phase21-reconstruction-evidence-json`,
+`--phase21-champion-feature-coverage-json`, and `--phase21-upstream-
+schema-check-json` respectively:
+  - RowPIT: did the strictly-prior as-of join actually reconstruct a
+    genuine subset of historical episodes, with the leakage assertion
+    passing? The ~15.5%-ish fraction with no eligible prior snapshot is
+    reported but never counted against this gate -- it stays explicitly
+    unscorable/unavailable, never imputed or backfilled.
+  - RequiredChampionFeaturePITCoverage: does every one of the champion's
+    actual selected_features have an identified, code-verified PIT
+    lineage (PASS), per Stage 4A.1's champion-feature-coverage check?
+  - RequiredUpstreamFeaturePIT: NOT_REQUIRED_BY_CHAMPION (required_by_
+    scoring_schema == NO) is an explicitly SATISFIED/not-applicable
+    condition, never a failure -- it only actually blocks when the
+    champion DOES select a cluster-derived feature whose upstream
+    provenance is NOT_VERIFIED.
+This evidence chain SUPERSEDES the legacy Phase 2.1 finding for Gate-1
+purposes ONLY WHEN all three artifacts are supplied and all three pass;
+if any is missing, unreadable, or failing, Gate 1 falls back to the
+legacy, still-true production-pipeline finding. This preserves the
+distinction between the production implementation (still lacking its
+own historical as-of mechanism) and the separate, verified research-only
+reconstruction path -- the legacy row is never simply flipped from False
+to True.
+
 EXPLICITLY PROHIBITED as substitutes if this audit returns
 PIT_RECONSTRUCTION_NOT_SUPPORTED (recorded here, not acted on by this
 script): joining current/latest PD backward onto historical periods,
@@ -285,6 +316,129 @@ def check_historical_input_features(transaction_features_file, transaction_mart_
     return rows
 
 
+ROW_PIT_COMPONENT = "RowPIT (Stage 4A.1 research-path reconstruction)"
+COVERAGE_COMPONENT = "RequiredChampionFeaturePITCoverage (Stage 4A.1 coverage check)"
+UPSTREAM_PIT_COMPONENT = "RequiredUpstreamFeaturePIT (cluster/peer schema requirement)"
+
+
+def check_row_pit(reconstruction_evidence_json):
+    """Reads the durable evidence artifact written by Stage 4A.1's
+    build_historical_pit_transaction_features.py full run
+    (`{out_prefix}_phase21_pit_reconstruction_evidence.json`). PASS
+    requires leakage_assertion_passed AND at least one episode actually
+    reconstructed -- the unmatched fraction (no eligible prior snapshot)
+    is reported but never counted against this gate: those episodes stay
+    explicitly excluded from historical scoring, never imputed or
+    backfilled, which is a separate, population-level fact from whether
+    the reconstruction MECHANISM itself is PIT-valid for the episodes it
+    does cover."""
+    if reconstruction_evidence_json is None:
+        return _row(ROW_PIT_COMPONENT, False, "N/A",
+                     "no --phase21-reconstruction-evidence-json given", True,
+                     "Gate 1 falls back to the legacy Phase 2.1 production-pipeline finding below")
+    evidence = _read_json(reconstruction_evidence_json)
+    if not evidence:
+        return _row(ROW_PIT_COMPONENT, False, "N/A",
+                     f"could not read {reconstruction_evidence_json}", True,
+                     "Gate 1 falls back to the legacy Phase 2.1 production-pipeline finding below")
+    if not evidence.get("leakage_assertion_passed"):
+        return _row(ROW_PIT_COMPONENT, True, "No",
+                     f"{reconstruction_evidence_json}: leakage_assertion_passed is not True", True,
+                     "the as-of-join reconstruction failed its own leakage guard -- cannot be PIT-valid")
+    n_total = evidence.get("n_episodes_total", 0) or 0
+    n_recon = evidence.get("n_reconstructed", 0) or 0
+    if n_recon <= 0:
+        return _row(ROW_PIT_COMPONENT, True, "No",
+                     f"{reconstruction_evidence_json}: 0 of {n_total} episode(s) reconstructed", True,
+                     "no episode has an eligible strictly-prior snapshot -- nothing to validate")
+    pct = evidence.get("pct_reconstructed")
+    return _row(ROW_PIT_COMPONENT, True, "Yes",
+                f"{reconstruction_evidence_json}: {n_recon:,}/{n_total:,} "
+                f"({pct}%) episode(s) strictly-prior reconstructed, leakage assertion passed", False,
+                f"the remaining {n_total - n_recon:,} episode(s) with no eligible prior snapshot stay "
+                "explicitly unscorable/unavailable -- never imputed or backfilled, and this does NOT "
+                "fail Gate 1 for the reconstructable subset")
+
+
+def check_required_champion_feature_coverage(coverage_json):
+    """Reads the durable `required_feature_coverage` verdict from Stage
+    4A.1's --champion-feature-coverage-only output
+    (`{out_prefix}_champion_feature_coverage.json`). A missing/null value
+    (no populated champion schema) is treated as blocking, never a
+    silent pass."""
+    if coverage_json is None:
+        return _row(COVERAGE_COMPONENT, False, "N/A",
+                     "no --phase21-champion-feature-coverage-json given", True,
+                     "Gate 1 falls back to the legacy Phase 2.1 production-pipeline finding below")
+    coverage = _read_json(coverage_json)
+    if not coverage:
+        return _row(COVERAGE_COMPONENT, False, "N/A", f"could not read {coverage_json}", True,
+                     "Gate 1 falls back to the legacy Phase 2.1 production-pipeline finding below")
+    verdict = coverage.get("required_feature_coverage")
+    if verdict == "PASS":
+        return _row(COVERAGE_COMPONENT, True, "Yes",
+                    f"{coverage_json}: {coverage.get('champion_selected_features')} selected feature(s), "
+                    f"required_feature_coverage=PASS "
+                    f"(phase21={coverage.get('phase21_pit_covered')}, "
+                    f"phase22={coverage.get('phase22_pit_covered')}, "
+                    f"decision_context={coverage.get('decision_context_covered')}, "
+                    f"hybrid={coverage.get('decision_context_plus_phase22_covered')}, "
+                    f"unaccounted={coverage.get('unaccounted_for')}, "
+                    f"leakage={coverage.get('label_leakage_suspected')}, "
+                    f"ambiguous={coverage.get('ambiguous_multi_path')})",
+                    False, "every champion-selected feature has an identified, code-verified PIT lineage")
+    if verdict == "FAIL":
+        return _row(COVERAGE_COMPONENT, True, "No",
+                    f"{coverage_json}: required_feature_coverage=FAIL "
+                    f"(unaccounted={coverage.get('unaccounted_for')}, "
+                    f"leakage={coverage.get('label_leakage_suspected')}, "
+                    f"ambiguous={coverage.get('ambiguous_multi_path')})",
+                    True, "at least one selected feature has no verified PIT lineage, is suspected "
+                    "label leakage, or is ambiguously multi-sourced")
+    return _row(COVERAGE_COMPONENT, False, "N/A",
+                f"{coverage_json}: required_feature_coverage is {verdict!r} (no populated champion "
+                "schema to classify)", True,
+                "cannot assess coverage without a populated champion feature_order.json")
+
+
+def check_required_upstream_feature_pit(upstream_schema_check_json):
+    """Reads `required_by_scoring_schema` from Stage 4A.1's
+    --schema-check-only output (`{out_prefix}_phase21_upstream_schema_
+    check.json`). NOT_REQUIRED_BY_CHAMPION (required_by_scoring_schema
+    == 'NO') is an explicitly SATISFIED/not-applicable condition, never
+    treated as a failure: if the champion doesn't select any cluster-
+    derived feature, the unresolved upstream cluster/peer PIT provenance
+    is simply irrelevant to this champion. 'YES' blocks (this script's
+    own cluster_peer_pit_provenance is NEVER VERIFIED, only NOT_VERIFIED,
+    by construction -- see build_historical_pit_transaction_features.py).
+    'UNKNOWN' also blocks -- unresolved never silently passes."""
+    if upstream_schema_check_json is None:
+        return _row(UPSTREAM_PIT_COMPONENT, False, "N/A",
+                     "no --phase21-upstream-schema-check-json given", True,
+                     "Gate 1 falls back to the legacy Phase 2.1 production-pipeline finding below")
+    schema_check = _read_json(upstream_schema_check_json)
+    if not schema_check:
+        return _row(UPSTREAM_PIT_COMPONENT, False, "N/A", f"could not read {upstream_schema_check_json}",
+                     True, "Gate 1 falls back to the legacy Phase 2.1 production-pipeline finding below")
+    required = schema_check.get("required_by_scoring_schema")
+    if required == "NO":
+        return _row(UPSTREAM_PIT_COMPONENT, True, "N/A (not required)",
+                     f"{upstream_schema_check_json}: required_by_scoring_schema=NO", False,
+                     "NOT_REQUIRED_BY_CHAMPION -- an explicitly satisfied/not-applicable condition, "
+                     "never a failure: no cluster-derived feature is selected, so its unresolved "
+                     "upstream PIT provenance is irrelevant to this champion")
+    if required == "YES":
+        return _row(UPSTREAM_PIT_COMPONENT, True, "No",
+                     f"{upstream_schema_check_json}: required_by_scoring_schema=YES, "
+                     f"overlap={schema_check.get('overlap')}", True,
+                     "the champion selects at least one cluster-derived feature whose upstream PIT "
+                     "provenance is NOT_VERIFIED by construction -- blocks until a future lineage "
+                     "audit verifies it")
+    return _row(UPSTREAM_PIT_COMPONENT, False, "N/A",
+                f"{upstream_schema_check_json}: required_by_scoring_schema={required!r} (unresolved)",
+                True, "unknown/unresolved never silently passes")
+
+
 def check_calibration(shadow_artifacts_dir):
     if shadow_artifacts_dir is None:
         return _row("Calibration", False, "N/A", "no --shadow-artifacts-dir given", True)
@@ -350,25 +504,77 @@ def check_c3_mapping(shadow_artifacts_dir):
 def determine_disposition(rows):
     """Gate 1 (feature reconstructability) decides PIT_RECONSTRUCTION_NOT_
     SUPPORTED outright, overriding anything else. Gate 2 (model/
-    calibration provenance) only runs if Gate 1 passes."""
+    calibration provenance) only runs if Gate 1 passes.
+
+    Phase 2.1's Gate-1 contribution has TWO possible sources, never
+    blended into one silent boolean flip:
+      1. The legacy, code-level finding (`check_historical_input_
+         features`'s Phase 2.1 row) -- pd_model/preprocessing/
+         transaction_features.py still has no historical as-of-date
+         mechanism of its own. This row is NEVER edited to say otherwise.
+      2. The Stage 4A.1 research-path evidence chain -- RowPIT AND
+         RequiredChampionFeaturePITCoverage AND RequiredUpstreamFeaturePIT
+         -- which, ONLY WHEN ALL THREE are actually supplied (as real
+         artifact paths) AND pass, SUPERSEDES the legacy finding for
+         Gate-1 purposes. If any piece of that evidence is missing or
+         unreadable, Gate 1 falls back to the legacy finding -- the new
+         evidence is additive and explicit, never assumed present."""
     by_component = {r["component"]: r for r in rows}
-    phase21 = next(r for r in rows if r["component"].startswith("Historical input features -- Phase 2.1"))
+    phase21_legacy = next(r for r in rows if r["component"].startswith("Historical input features -- Phase 2.1"))
     phase22 = next(r for r in rows if r["component"].startswith("Historical input features -- Phase 2.2"))
 
-    features_ok = (not phase21["blocking"]) and (not phase22["blocking"])
+    # .get(...) with a "not supplied" default, never a KeyError -- a rows
+    # list that omits these three components entirely (e.g. a caller that
+    # built one directly, without going through run_audit) is equivalent
+    # to the artifacts not being given, and must fall back to the legacy
+    # Phase 2.1 finding exactly like check_row_pit(None) etc. would.
+    row_pit = by_component.get(ROW_PIT_COMPONENT) or check_row_pit(None)
+    coverage = by_component.get(COVERAGE_COMPONENT) or check_required_champion_feature_coverage(None)
+    upstream_pit = by_component.get(UPSTREAM_PIT_COMPONENT) or check_required_upstream_feature_pit(None)
+
+    research_path_evidence_supplied = (
+        row_pit["available"] and coverage["available"] and upstream_pit["available"]
+    )
+    research_path_passed = (
+        research_path_evidence_supplied
+        and not row_pit["blocking"] and not coverage["blocking"] and not upstream_pit["blocking"]
+    )
+
+    if research_path_passed:
+        phase21_blocking = False
+        phase21_gate_note = (
+            "Phase 2.1 Gate 1 is satisfied via the Stage 4A.1 research-path evidence chain "
+            "(RowPIT AND RequiredChampionFeaturePITCoverage AND RequiredUpstreamFeaturePIT, all "
+            "PASS/satisfied) -- this SUPERSEDES the legacy production-pipeline finding below for "
+            "Gate-1 purposes only. The production pd_model/preprocessing/transaction_features.py "
+            "still has no historical as-of-date mechanism of its own; the research-only "
+            "build_historical_pit_transaction_features.py restates that logic with a verified, "
+            "strictly-prior as-of join instead."
+        )
+    else:
+        phase21_blocking = phase21_legacy["blocking"]
+        phase21_gate_note = (
+            "Stage 4A.1 research-path evidence was not fully supplied (RowPIT/coverage/upstream "
+            "artifacts missing) or did not pass -- Gate 1 falls back to the legacy Phase 2.1 "
+            "production-pipeline finding below."
+        )
+
+    features_ok = (not phase21_blocking) and (not phase22["blocking"])
     if not features_ok:
         return DISPOSITION_NOT_SUPPORTED, (
             "Gate 1 (feature reconstructability) failed -- "
-            f"Phase 2.1 blocking={phase21['blocking']}, Phase 2.2 blocking={phase22['blocking']}. "
+            f"Phase 2.1 effective blocking={phase21_blocking} (legacy={phase21_legacy['blocking']}), "
+            f"Phase 2.2 blocking={phase22['blocking']}. {phase21_gate_note} "
             "Model/calibration provenance is moot: there is no legitimate historical feature "
             "vector to feed to any model, today's or historical."
         )
+    gate1_note = phase21_gate_note
 
     champion = by_component["Champion model"]
     if champion["available"] == NOT_AVAILABLE:
         return DISPOSITION_NOT_SUPPORTED, (
-            "Gate 1 passed, but no champion model exists at all (current or historical) -- "
-            "there is nothing to score the reconstructed features with."
+            f"Gate 1 passed ({gate1_note}), but no champion model exists at all (current or "
+            "historical) -- there is nothing to score the reconstructed features with."
         )
 
     calibration = by_component["Calibration"]
@@ -381,31 +587,39 @@ def determine_disposition(rows):
             and preprocessing["available"] and calibration["available"]
             and effective_dates["available"] and c3["available"]):
         return DISPOSITION_EXACT_PIT, (
-            "Gate 1 passed, and the champion model is historically matched with full "
-            "provenance (feature schema, preprocessing, calibration, effective dates, C3 "
+            f"Gate 1 passed ({gate1_note}), and the champion model is historically matched with "
+            "full provenance (feature schema, preprocessing, calibration, effective dates, C3 "
             "mapping all available). Historical cal_pd_pit rescoring is defensible."
         )
 
     if champion["available"] in (AVAILABLE_CURRENT_ONLY, AVAILABLE_HISTORICAL_MATCHED):
         produced_object = "retrospective_current_model_pd" if calibration["available"] else "raw_model_score"
         return DISPOSITION_RETRO_CURRENT, (
-            "Gate 1 passed (features legitimately reconstructed), but historical-era-matched "
-            "model/calibration provenance is not fully established. Only today's model can "
-            f"score the reconstructed features, producing a '{produced_object}', never "
+            f"Gate 1 passed ({gate1_note}; features legitimately reconstructed), but historical-"
+            "era-matched model/calibration provenance is not fully established. Only today's "
+            f"model can score the reconstructed features, producing a '{produced_object}', never "
             "cal_pd_pit."
         )
 
-    return DISPOSITION_NOT_SUPPORTED, "Unresolved/unknown champion-model state -- defaults to blocked."
+    return DISPOSITION_NOT_SUPPORTED, (
+        f"Gate 1 passed ({gate1_note}), but champion-model state is unresolved/unknown -- "
+        "defaults to blocked."
+    )
 
 
 def run_audit(pd_model_artifacts_dir, transaction_mart_file, loan_training_file,
-              shadow_artifacts_dir, transaction_features_file=None, loan_state_query_file=None):
+              shadow_artifacts_dir, transaction_features_file=None, loan_state_query_file=None,
+              phase21_reconstruction_evidence_json=None, phase21_champion_feature_coverage_json=None,
+              phase21_upstream_schema_check_json=None):
     rows = []
     rows.append(check_champion_model(pd_model_artifacts_dir))
     rows.append(check_feature_schema(pd_model_artifacts_dir))
     rows.append(check_preprocessing(pd_model_artifacts_dir))
     rows.extend(check_historical_input_features(transaction_features_file, transaction_mart_file,
                                                  loan_state_query_file))
+    rows.append(check_row_pit(phase21_reconstruction_evidence_json))
+    rows.append(check_required_champion_feature_coverage(phase21_champion_feature_coverage_json))
+    rows.append(check_required_upstream_feature_pit(phase21_upstream_schema_check_json))
     rows.append(check_calibration(shadow_artifacts_dir))
     rows.append(check_model_effective_dates(pd_model_artifacts_dir))
     rows.append(check_c3_mapping(shadow_artifacts_dir))
@@ -434,6 +648,27 @@ def main(argv=None):
                      help=f"default: {DEFAULT_TRANSACTION_FEATURES_FILE}")
     ap.add_argument("--loan-state-query-file", type=Path, default=None,
                      help=f"default: {DEFAULT_LOAN_STATE_QUERY_FILE}")
+    ap.add_argument("--phase21-reconstruction-evidence-json", type=Path, default=None,
+                     help="optional; the "
+                          "'{out_prefix}_phase21_pit_reconstruction_evidence.json' artifact written by "
+                          "a real build_historical_pit_transaction_features.py full run. Supplies the "
+                          "RowPIT fact (strictly-prior reconstruction + leakage-assertion result) for "
+                          "the Stage 4A.1 research-path Gate-1 evidence chain. Without it, Gate 1 falls "
+                          "back to the legacy Phase 2.1 production-pipeline finding.")
+    ap.add_argument("--phase21-champion-feature-coverage-json", type=Path, default=None,
+                     help="optional; the "
+                          "'{out_prefix}_champion_feature_coverage.json' artifact written by "
+                          "build_historical_pit_transaction_features.py --champion-feature-coverage-"
+                          "only. Supplies RequiredChampionFeaturePITCoverage for the Gate-1 evidence "
+                          "chain. Without it, Gate 1 falls back to the legacy Phase 2.1 "
+                          "production-pipeline finding.")
+    ap.add_argument("--phase21-upstream-schema-check-json", type=Path, default=None,
+                     help="optional; the "
+                          "'{out_prefix}_phase21_upstream_schema_check.json' artifact written by "
+                          "build_historical_pit_transaction_features.py --schema-check-only (or by a "
+                          "full run). Supplies RequiredUpstreamFeaturePIT for the Gate-1 evidence "
+                          "chain. Without it, Gate 1 falls back to the legacy Phase 2.1 "
+                          "production-pipeline finding.")
     ap.add_argument("--out-prefix", type=str, default="stage4a_pd_rescoring_audit")
     args = ap.parse_args(argv)
 
@@ -444,6 +679,8 @@ def main(argv=None):
     rows, disposition, rationale = run_audit(
         args.pd_model_artifacts_dir, args.transaction_mart_file, args.loan_training_file,
         args.shadow_artifacts_dir, args.transaction_features_file, args.loan_state_query_file,
+        args.phase21_reconstruction_evidence_json, args.phase21_champion_feature_coverage_json,
+        args.phase21_upstream_schema_check_json,
     )
 
     table = pd.DataFrame(rows)
