@@ -632,8 +632,11 @@ def main(argv: list[str] | None = None) -> None:
     out_cols = [c for c in dict.fromkeys(out_cols) if c in featured.columns]
 
     features_path = f"{args.out_prefix}_phase21_pit_features.csv"
+    print(f"\nWriting {len(featured):,} row(s) x {len(out_cols)} column(s) to {features_path} "
+          f"(no further progress output during this step -- pandas.to_csv prints nothing while "
+          f"running; this can legitimately take several minutes at this size)...")
     featured[out_cols].to_csv(features_path, index=False)
-    print(f"\nWrote {features_path}")
+    print(f"Wrote {features_path}")
 
     summary_path = f"{args.out_prefix}_phase21_pit_summary.csv"
     summary_df = pd.DataFrame({
