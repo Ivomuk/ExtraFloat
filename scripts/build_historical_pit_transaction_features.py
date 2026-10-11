@@ -234,6 +234,19 @@ PHASE21_RAW_MART_SCHEMA_COLS = sorted(set(
     ]
 ))
 
+# The real champion's selected_features were found (via a real run of
+# --champion-feature-coverage-only) to include 22 of PHASE21_RAW_MART_
+# SCHEMA_COLS's names that are in NEITHER PHASE_21_RAW_COLS nor produced
+# by any restate_phase_2_1_features block (e.g. cash_in_comm_1m, cash_
+# out_peers_3m, cust_6m) -- pure raw passthrough features, never derived
+# from. These were silently absent from every real reconstruction run
+# until this constant and load_mart_extra_raw_cols() below were added:
+# load_mart's PHASE_21_RAW_COLS narrowing (kept deliberately unchanged,
+# for the memory reason documented on that constant) meant they were
+# never even read from the mart file, regardless of what main() later
+# tried to include in its output columns.
+PHASE21_EXTRA_RAW_COLS_FOR_CHAMPION = sorted(set(PHASE21_RAW_MART_SCHEMA_COLS) - set(PHASE_21_RAW_COLS))
+
 # Every name restate_phase_2_1_features() can produce, enumerated
 # block-for-block from that function (mirrors transaction_features.py's
 # run_phase_2_1_richer_tx_behaviour verbatim) -- union of the FULL raw
@@ -479,6 +492,41 @@ def load_mart(path: Path) -> pd.DataFrame:
           f"distinct snapshot date(s) ({sorted(d.date().isoformat() for d in txn['fundamentals_snapshot_date'].unique())}), "
           f"narrowed to {len(present_phase21_cols)} Phase-2.1-relevant raw column(s).")
     return txn[["_id", "fundamentals_snapshot_date"] + present_phase21_cols]
+
+
+def load_mart_extra_raw_cols(path: Path) -> pd.DataFrame:
+    """Second, separate, narrow read of the SAME mart file -- carries
+    PHASE21_EXTRA_RAW_COLS_FOR_CHAMPION (the raw passthrough columns the
+    real champion selects but restate_phase_2_1_features never reads)
+    WITHOUT widening load_mart's own PHASE_21_RAW_COLS. Deliberately
+    attached later via a plain equality merge on (_id, fundamentals_
+    snapshot_date) in main() -- NOT folded into attach_prior_snapshot's
+    merge_asof call -- because merge_asof's by= grouped join is the
+    specific operation that previously OOM'd at a 90-numeric-column
+    scale; a plain hash join on an already-resolved key is a materially
+    different, cheaper operation and does not reintroduce that risk.
+    Reads the file a second time rather than restructuring load_mart's
+    already-verified return shape."""
+    txn = _read_csv_fast(path)
+    msisdn_col = "agent_msisdn" if "agent_msisdn" in txn.columns else "msisdn"
+    date_col = "snapshot_dt" if "snapshot_dt" in txn.columns else ("tbl_dt" if "tbl_dt" in txn.columns else None)
+    if msisdn_col not in txn.columns or date_col is None:
+        return pd.DataFrame(columns=["_id", "fundamentals_snapshot_date"])
+    present_extra_cols = [c for c in PHASE21_EXTRA_RAW_COLS_FOR_CHAMPION if c in txn.columns]
+    missing_extra_cols = [c for c in PHASE21_EXTRA_RAW_COLS_FOR_CHAMPION if c not in txn.columns]
+    if missing_extra_cols:
+        print(f"NOTE: {path.name} is missing {len(missing_extra_cols)} extra champion-only raw "
+              f"column(s) -- these will be absent from the output too (defensive gating, not an "
+              f"error): {missing_extra_cols}")
+    if not present_extra_cols:
+        return pd.DataFrame(columns=["_id", "fundamentals_snapshot_date"])
+    txn = txn[[msisdn_col, date_col] + present_extra_cols].copy()
+    txn["_id"] = digits(txn[msisdn_col])
+    txn["fundamentals_snapshot_date"] = _parse_mart_date(txn[date_col]).dt.normalize()
+    txn = txn[txn["fundamentals_snapshot_date"].notna()]
+    print(f"Transaction mart (extra champion-only columns): narrowed to {len(present_extra_cols)} "
+          f"additional raw column(s), attached via a plain (non-merge_asof) equality join.")
+    return txn[["_id", "fundamentals_snapshot_date"] + present_extra_cols]
 
 
 def attach_prior_snapshot(episodes: pd.DataFrame, mart: pd.DataFrame) -> pd.DataFrame:
@@ -1012,6 +1060,24 @@ def main(argv: list[str] | None = None) -> None:
 
     merged = attach_prior_snapshot(episodes, mart)
     assert_no_leakage(merged)
+
+    extra_mart = load_mart_extra_raw_cols(args.transaction_mart_file)
+    extra_cols_present = [c for c in extra_mart.columns if c not in ("_id", "fundamentals_snapshot_date")]
+    if extra_cols_present:
+        dup = int(extra_mart.duplicated(subset=["_id", "fundamentals_snapshot_date"]).sum())
+        if dup:
+            sys.exit(f"ERROR: {dup} duplicate (_id, fundamentals_snapshot_date) row(s) in the extra "
+                      f"champion-only mart columns -- the mart export is expected to have at most "
+                      f"one row per agent per snapshot date.")
+        n_before = len(merged)
+        merged = merged.merge(extra_mart, on=["_id", "fundamentals_snapshot_date"], how="left")
+        if len(merged) != n_before:
+            sys.exit(f"ERROR: attaching the extra champion-only raw columns changed the row count "
+                      f"({n_before:,} -> {len(merged):,}) -- this must never happen for a left join "
+                      f"on an already-deduplicated key.")
+        print(f"Attached {len(extra_cols_present)} extra champion-only raw column(s) to "
+              f"{len(merged):,} episode(s) via a plain equality join (never merge_asof).")
+
     featured = restate_phase_2_1_features(merged, DEFAULT_CONFIG.eps)
 
     status_counts = featured["reconstruction_status"].value_counts()
@@ -1066,8 +1132,11 @@ def main(argv: list[str] | None = None) -> None:
     # that re-runs the real run_phase_2_1_richer_tx_behaviour on this CSV a no-op
     # (every one of its "if raw_col in df.columns" guards would fail). Included
     # so this output is independently re-derivable by production code, not just
-    # by this script's own restatement.
-    raw_mart_cols_present = [c for c in PHASE_21_RAW_COLS if c in featured.columns]
+    # by this script's own restatement. Uses the FULL real schema
+    # (PHASE21_RAW_MART_SCHEMA_COLS), not just the narrower PHASE_21_RAW_COLS,
+    # so the extra champion-only raw columns attached above (PHASE21_EXTRA_RAW_
+    # COLS_FOR_CHAMPION) are written out too.
+    raw_mart_cols_present = [c for c in PHASE21_RAW_MART_SCHEMA_COLS if c in featured.columns]
     out_cols = fixed_cols + raw_mart_cols_present + [c for c in feature_cols if c not in fixed_cols]
     out_cols = [c for c in dict.fromkeys(out_cols) if c in featured.columns]
 
