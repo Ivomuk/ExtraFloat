@@ -498,15 +498,17 @@ def load_mart_extra_raw_cols(path: Path) -> pd.DataFrame:
     """Second, separate, narrow read of the SAME mart file -- carries
     PHASE21_EXTRA_RAW_COLS_FOR_CHAMPION (the raw passthrough columns the
     real champion selects but restate_phase_2_1_features never reads)
-    WITHOUT widening load_mart's own PHASE_21_RAW_COLS. Deliberately
-    attached later via a plain equality merge on (_id, fundamentals_
-    snapshot_date) in main() -- NOT folded into attach_prior_snapshot's
-    merge_asof call -- because merge_asof's by= grouped join is the
-    specific operation that previously OOM'd at a 90-numeric-column
-    scale; a plain hash join on an already-resolved key is a materially
-    different, cheaper operation and does not reintroduce that risk.
-    Reads the file a second time rather than restructuring load_mart's
-    already-verified return shape."""
+    WITHOUT widening load_mart's own PHASE_21_RAW_COLS. Attached later in
+    main() via PER-COLUMN Series.reindex() on (_id, fundamentals_
+    snapshot_date) -- NOT a .merge()/.concat() call of any kind. A real
+    run showed that even a plain equality .merge() still triggers
+    pandas' internal block-consolidation step on the result, which
+    reallocates a dense array sized by the result's TOTAL float-column
+    width (not just the columns being added) -- the same class of
+    memory blowup PHASE_21_RAW_COLS exists to avoid, just reached via a
+    different pandas code path than merge_asof's. Reads the mart file a
+    second time rather than restructuring load_mart's already-verified
+    return shape."""
     txn = _read_csv_fast(path)
     msisdn_col = "agent_msisdn" if "agent_msisdn" in txn.columns else "msisdn"
     date_col = "snapshot_dt" if "snapshot_dt" in txn.columns else ("tbl_dt" if "tbl_dt" in txn.columns else None)
@@ -525,7 +527,8 @@ def load_mart_extra_raw_cols(path: Path) -> pd.DataFrame:
     txn["fundamentals_snapshot_date"] = _parse_mart_date(txn[date_col]).dt.normalize()
     txn = txn[txn["fundamentals_snapshot_date"].notna()]
     print(f"Transaction mart (extra champion-only columns): narrowed to {len(present_extra_cols)} "
-          f"additional raw column(s), attached via a plain (non-merge_asof) equality join.")
+          f"additional raw column(s), to be attached via per-column reindex (never merge_asof, "
+          f"never merge/concat).")
     return txn[["_id", "fundamentals_snapshot_date"] + present_extra_cols]
 
 
@@ -1069,14 +1072,30 @@ def main(argv: list[str] | None = None) -> None:
             sys.exit(f"ERROR: {dup} duplicate (_id, fundamentals_snapshot_date) row(s) in the extra "
                       f"champion-only mart columns -- the mart export is expected to have at most "
                       f"one row per agent per snapshot date.")
+        # NOT a .merge()/.concat() -- a real run showed those internally trigger
+        # pandas' block-consolidation step (DataFrame.copy() -> _consolidate_
+        # inplace -> merge_blocks), which reallocates a dense array sized by the
+        # TOTAL float-column width of the result (71 columns x 5.6M rows = ~3 GiB
+        # in that run), not by the few columns actually being added -- the exact
+        # same class of blowup PHASE_21_RAW_COLS already exists to avoid, just
+        # triggered by a different pandas code path than merge_asof's. Per-column
+        # Series.reindex() assignment below never concatenates whole frames, so
+        # it never hits that consolidation step; peak extra memory is one
+        # n_rows-length array at a time, not one (n_extra_cols, n_rows) block.
+        extra_mart_indexed = extra_mart.set_index(["_id", "fundamentals_snapshot_date"])
+        merged_key = pd.MultiIndex.from_arrays([merged["_id"], merged["fundamentals_snapshot_date"]])
         n_before = len(merged)
-        merged = merged.merge(extra_mart, on=["_id", "fundamentals_snapshot_date"], how="left")
+        for col in extra_cols_present:
+            merged[col] = extra_mart_indexed[col].reindex(merged_key).to_numpy()
         if len(merged) != n_before:
-            sys.exit(f"ERROR: attaching the extra champion-only raw columns changed the row count "
-                      f"({n_before:,} -> {len(merged):,}) -- this must never happen for a left join "
-                      f"on an already-deduplicated key.")
+            raise AssertionError(
+                f"attaching the extra champion-only raw columns changed the row count "
+                f"({n_before:,} -> {len(merged):,}) -- this must never happen for a per-column "
+                f"reindex, which cannot add or remove rows."
+            )
         print(f"Attached {len(extra_cols_present)} extra champion-only raw column(s) to "
-              f"{len(merged):,} episode(s) via a plain equality join (never merge_asof).")
+              f"{len(merged):,} episode(s) via per-column reindex (never merge_asof, never "
+              f"merge/concat).")
 
     featured = restate_phase_2_1_features(merged, DEFAULT_CONFIG.eps)
 
