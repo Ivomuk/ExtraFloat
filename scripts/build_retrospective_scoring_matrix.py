@@ -440,6 +440,113 @@ def classify_feature_presence(df: pd.DataFrame, feature_order: list[str]) -> pd.
     return pd.DataFrame(rows)
 
 
+def build_presence_df_from_aggregated_counts(
+    present_columns: set[str], n_missing_by_feature: dict[str, int], dtype_by_feature: dict[str, str],
+    n_total: int, feature_order: list[str],
+) -> pd.DataFrame:
+    """Same classification as classify_feature_presence, but from stats
+    aggregated across row-chunks rather than a single in-memory
+    DataFrame -- used on the real, chunked main() path (see
+    run_chunked_transform_align_write). `present_columns` must be
+    schema-only (which columns df_transformed HAS), not per-chunk data,
+    since pruning is always skipped when fitted_params is supplied
+    (production's own documented behavior) and the column set is
+    therefore identical in every chunk by construction."""
+    rows = []
+    for feat in feature_order:
+        if feat not in present_columns:
+            rows.append({"selected_feature": feat, "presence_status": PRESENCE_ABSENT,
+                         "n_missing": n_total, "pct_missing": 100.0 if n_total else 0.0, "dtype": None})
+            continue
+        n_missing = n_missing_by_feature.get(feat, 0)
+        pct_missing = round(100.0 * n_missing / n_total, 4) if n_total else 0.0
+        if n_missing == n_total and n_total > 0:
+            status = PRESENCE_ALL_NAN
+        elif n_missing > 0:
+            status = PRESENCE_PARTIAL
+        else:
+            status = PRESENCE_POPULATED
+        rows.append({"selected_feature": feat, "presence_status": status,
+                     "n_missing": n_missing, "pct_missing": pct_missing,
+                     "dtype": dtype_by_feature.get(feat)})
+    return pd.DataFrame(rows)
+
+
+def run_chunked_transform_align_write(
+    clean_df: pd.DataFrame, pd_features: list[str], log_cols: list[str], cap_cols: list[str],
+    signed_log_cols: list[str], fitted_params: dict, feature_order: list[str], matrix_path: str,
+    chunk_size: int,
+) -> tuple[pd.DataFrame, list[str], bool, int]:
+    """Calls the REAL build_transformed_dataframe + align_features on
+    ROW-CHUNKS of clean_df, streaming each chunk's aligned rows directly
+    to matrix_path, rather than holding the full transformed/aligned
+    matrix in memory at once.
+
+    WHY THIS IS SAFE (not just expedient): build_transformed_dataframe's
+    own final step concatenates the non-numeric and transformed-numeric
+    column blocks, which a real run showed triggers pandas' internal
+    block-consolidation sized by the FULL row count (an OOM on a
+    (182, 4,780,457) float32 array) -- a production-code internal this
+    script must never modify. Chunking the ROWS fed into that call is
+    safe here specifically BECAUSE fitted_params is always supplied on
+    this script's path: every transformation parameter (winsorize
+    bounds, log vs. signed-log choice) is REPLAYED from the frozen
+    artifact, never refit, so chunk boundaries cannot change any
+    transformed value -- unlike calling this with fitted_params=None,
+    where per-chunk quantiles would make results batch-dependent.
+    build_transformed_dataframe's own pruning step is also always
+    skipped when fitted_params is given (its own documented behavior),
+    so every chunk's output has the identical column set -- schema
+    presence can be read from the FIRST chunk alone; only per-feature
+    missingness needs aggregating across all of them.
+
+    Returns (presence_df, forbidden_post_sorted, feature_order_exact_match, n_rows_written)."""
+    n_total = len(clean_df)
+    n_missing_by_feature: dict[str, int] = dict.fromkeys(feature_order, 0)
+    present_columns: set[str] | None = None
+    dtype_by_feature: dict[str, str] = {}
+    forbidden_post: set[str] = set()
+    feature_order_exact_match = True
+    n_rows_written = 0
+    n_chunks = (n_total + chunk_size - 1) // chunk_size if n_total else 0
+
+    for chunk_idx, start in enumerate(range(0, n_total, chunk_size)):
+        chunk = clean_df.iloc[start:start + chunk_size]
+        df_t_chunk, _kept_pd_features, _report = build_transformed_dataframe(
+            chunk, pd_features=pd_features, log_cols=log_cols, cap_cols=cap_cols,
+            signed_log_cols=signed_log_cols, cfg=DEFAULT_CONFIG, fitted_params=fitted_params,
+        )
+        if present_columns is None:
+            present_columns = set(df_t_chunk.columns)
+            for feat in feature_order:
+                if feat in df_t_chunk.columns:
+                    dtype_by_feature[feat] = str(df_t_chunk[feat].dtype)
+
+        for feat in feature_order:
+            if feat in df_t_chunk.columns:
+                n_missing_by_feature[feat] += int(df_t_chunk[feat].isna().sum())
+
+        aligned_chunk = align_features(df_t_chunk.copy(), feature_order)
+        forbidden_post |= (FORBIDDEN_PRE_TRANSFORM_COLS & set(aligned_chunk.columns))
+        if list(aligned_chunk.columns) != list(feature_order):
+            feature_order_exact_match = False
+
+        out_chunk = pd.concat(
+            [chunk[["disbursement_fid"]].reset_index(drop=True), aligned_chunk.reset_index(drop=True)],
+            axis=1,
+        )
+        out_chunk.to_csv(matrix_path, mode="w" if chunk_idx == 0 else "a", header=(chunk_idx == 0),
+                          index=False)
+        n_rows_written += len(out_chunk)
+        print(f"  chunk {chunk_idx + 1}/{n_chunks}: rows {start:,}-{start + len(chunk):,} "
+              f"transformed, aligned, and written ({len(out_chunk):,} row(s)).")
+
+    presence_df = build_presence_df_from_aggregated_counts(
+        present_columns or set(), n_missing_by_feature, dtype_by_feature, n_total, feature_order,
+    )
+    return presence_df, sorted(forbidden_post), feature_order_exact_match, n_rows_written
+
+
 def build_disposition(
     n_rows: int, n_reconstructed_input: int, disbursement_fid_unique: bool,
     presence_df: pd.DataFrame, forbidden_remaining_pre_transform: list[str], forbidden_post: list[str],
@@ -475,6 +582,13 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--loan-training-file", type=Path, required=True)
     ap.add_argument("--pd-model-artifacts-dir", type=Path, required=True)
     ap.add_argument("--out-prefix", type=str, default="stage4br1_retrospective_matrix")
+    ap.add_argument("--chunk-size", type=int, default=250_000,
+                     help="row-chunk size for the transform+align step (default 250,000). A real "
+                          "run OOM'd calling build_transformed_dataframe on the full ~4.8M rows at "
+                          "once (production's own internal concat triggers pandas block-"
+                          "consolidation sized by the full row count); chunking is numerically "
+                          "safe here because fitted_params is always supplied (parameters are "
+                          "replayed, never refit per chunk). Lower this if the default still OOMs.")
     args = ap.parse_args(argv)
 
     print(f"\n{'#' * 100}\nSTAGE 4B-R1 -- RETROSPECTIVE SCORING MATRIX: ASSEMBLY + VALIDATION ONLY\n"
@@ -528,29 +642,27 @@ def main(argv: list[str] | None = None) -> None:
     # correct even if that assertion is ever relaxed to a warning).
     forbidden_remaining_pre_transform = sorted(FORBIDDEN_PRE_TRANSFORM_COLS & set(clean_df.columns))
 
-    disbursement_fid_col = clean_df[["disbursement_fid"]].reset_index(drop=True)
-
     pd_features, log_cols, cap_cols, _protected, signed_log_cols, _excluded = \
         get_and_classify_pd_features(clean_df)
-    # build_transformed_dataframe SKIPS its own post-transform pruning step
-    # entirely whenever fitted_params is given (its own documented inference-
-    # time behavior: "pruning against the scoring batch would be batch-
-    # dependent"), so its second return value here is simply every pd_feature
-    # that survived into the transformed numeric subset (== pd_features,
-    # always, on this script's path) -- never a "dropped" list. Captured
-    # under an underscore name to avoid that exact confusion.
-    df_transformed, _kept_pd_features, _report = build_transformed_dataframe(
-        clean_df, pd_features=pd_features, log_cols=log_cols, cap_cols=cap_cols,
-        signed_log_cols=signed_log_cols, cfg=DEFAULT_CONFIG, fitted_params=fitted_params,
-    )
 
-    # Checked on df_transformed (post-transformation, post-pruning), NEVER on
-    # clean_df -- prune_post_transform_features (inside build_transformed_
-    # dataframe) can drop a feature entirely if it is all-NaN or too few
-    # unique values in this batch, which align_features would otherwise
-    # paper over with a silent NaN fill. This is the actual input align_
-    # features is about to receive.
-    presence_df = classify_feature_presence(df_transformed, feature_order)
+    out_prefix = args.out_prefix
+    matrix_path = f"{out_prefix}_matrix.csv"
+    print(f"\nTransforming + aligning {len(clean_df):,} row(s) in chunks of "
+          f"{args.chunk_size:,}, streaming each chunk's aligned rows to {matrix_path} -- never "
+          f"holding the full transformed/aligned matrix in memory at once (build_transformed_"
+          f"dataframe's own internal concat is called per chunk, not once on the full row count).")
+    presence_df, forbidden_post, feature_order_exact_match, n_rows_written = \
+        run_chunked_transform_align_write(
+            clean_df, pd_features, log_cols, cap_cols, signed_log_cols, fitted_params,
+            feature_order, matrix_path, args.chunk_size,
+        )
+    print(f"Wrote {matrix_path} ({n_rows_written:,} row(s) total).")
+
+    # Checked on the per-chunk build_transformed_dataframe output (post-
+    # transformation, post-pruning), NEVER on clean_df -- prune_post_
+    # transform_features (inside build_transformed_dataframe) can drop a
+    # feature entirely if it is all-NaN or too few unique values, which
+    # align_features would otherwise paper over with a NaN fill.
     absent = presence_df.loc[presence_df["presence_status"] == PRESENCE_ABSENT, "selected_feature"].tolist()
     if absent:
         print(f"\n{'!' * 100}\nSCHEMA CONSTRUCTION FAILURE: {len(absent)} champion feature(s) are "
@@ -560,14 +672,17 @@ def main(argv: list[str] | None = None) -> None:
         print(f"Schema construction completeness: all {len(feature_order)} champion feature(s) are "
               f"present before alignment (not necessarily fully populated -- see the presence report).")
 
-    aligned = align_features(df_transformed.copy(), feature_order)
-    forbidden_post = sorted(FORBIDDEN_PRE_TRANSFORM_COLS & set(aligned.columns))
-    assert_no_forbidden_columns(aligned, context="final aligned 80-feature matrix")
-    feature_order_exact_match = list(aligned.columns) == list(feature_order)
-    print(f"Final aligned feature order exact match: {feature_order_exact_match}")
+    if forbidden_post:
+        raise AssertionError(
+            f"LEAKAGE GATE FAILED (final aligned matrix, aggregated across chunks): forbidden "
+            f"column(s) present: {forbidden_post}"
+        )
+    print("Leakage gate passed (final aligned matrix, every chunk): zero forbidden label/"
+          "diagnostic columns present.")
+    print(f"Final aligned feature order exact match (every chunk): {feature_order_exact_match}")
 
     disposition, conditions = build_disposition(
-        n_rows=len(aligned), n_reconstructed_input=n_reconstructed_input,
+        n_rows=n_rows_written, n_reconstructed_input=n_reconstructed_input,
         disbursement_fid_unique=disbursement_fid_unique, presence_df=presence_df,
         forbidden_remaining_pre_transform=forbidden_remaining_pre_transform, forbidden_post=forbidden_post,
         fitted_params=fitted_params, feature_order_exact_match=feature_order_exact_match,
@@ -576,14 +691,6 @@ def main(argv: list[str] | None = None) -> None:
     print(f"\n{'#' * 100}\nDISPOSITION: {disposition}\n{'#' * 100}")
     for name, ok in conditions.items():
         print(f"  [{'PASS' if ok else 'FAIL'}] {name}")
-
-    out_prefix = args.out_prefix
-    output_matrix = pd.concat([disbursement_fid_col, aligned.reset_index(drop=True)], axis=1)
-    matrix_path = f"{out_prefix}_matrix.csv"
-    print(f"\nWriting {len(output_matrix):,} row(s) x {len(output_matrix.columns)} column(s) to "
-          f"{matrix_path} (no further progress output during this step)...")
-    output_matrix.to_csv(matrix_path, index=False)
-    print(f"Wrote {matrix_path}")
 
     metadata_path = f"{out_prefix}_forbidden_columns_metadata.csv"
     metadata_df.to_csv(metadata_path, index=False)
@@ -596,7 +703,7 @@ def main(argv: list[str] | None = None) -> None:
     validation_report = {
         "disposition": disposition,
         "conditions": conditions,
-        "n_rows": len(aligned),
+        "n_rows": n_rows_written,
         "n_reconstructed_input": n_reconstructed_input,
         "n_champion_features": len(feature_order),
         "n_absent_before_alignment": len(absent),
