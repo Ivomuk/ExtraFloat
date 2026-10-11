@@ -159,23 +159,39 @@ from pd_model.preprocessing.transformations import (  # noqa: E402
 
 STATUS_RECONSTRUCTED = "PIT_PHASE21_RECONSTRUCTED"
 
-# Restated from build_historical_pit_transaction_features.py's PHASE_21_RAW_COLS
-# (one-way scripts/ layering convention: restate, never import, another scripts/
-# module's constant). Used ONLY to narrow this script's own CSV read via usecols
-# -- Stage 4A.1's output CSV also carries its OWN already-derived Phase 2.1
-# feature columns (e.g. is_fully_inactive_6m), which this script does not need:
-# apply_production_phase21() recomputes every derived feature fresh from these
-# raw columns via the real production function, so loading the already-derived
-# ones too would just be ~2x the memory for no benefit at the real 4.78M-row
-# scale this script runs at -- the same class of memory fix as PHASE_21_RAW_COLS
-# itself (see that constant's own docstring for the original OOM this pattern fixes).
+# Restated from build_historical_pit_transaction_features.py's
+# PHASE21_RAW_MART_SCHEMA_COLS -- the FULL raw mart schema (data/agent_
+# profile_snapshot_query.sql's real output), NOT the narrower PHASE_21_
+# RAW_COLS from that same module. Used ONLY to narrow this script's own
+# CSV read via usecols, to exclude Stage 4A.1's OWN already-derived
+# Phase 2.1 feature columns (e.g. is_fully_inactive_6m), which this
+# script does not need: apply_production_phase21() recomputes every
+# derived feature fresh from the raw ones via the real production
+# function, so loading the already-derived ones too would just be ~2x
+# the memory for no benefit at the real 4.78M-row scale this script runs
+# at. This must stay the FULL raw schema, never the narrower PHASE_21_
+# RAW_COLS: an earlier version of this constant WAS the narrow list, and
+# that silently filtered 22 real champion-selected raw passthrough
+# columns (cash_in_comm_1m, cust_6m, etc.) back out via usecols even
+# after build_historical_pit_transaction_features.py was fixed to write
+# them -- a real failure found on a real run, not a theoretical one.
+# PHASE_21_RAW_COLS's own narrowness exists for a DIFFERENT reason
+# (bounding a merge_asof call's memory footprint) that does not apply to
+# a plain pd.read_csv usecols filter here -- there is no equivalent risk
+# to narrowing against in this script, so there is no reason to narrow
+# past "every raw column that could conceivably be a raw passthrough
+# feature."
 _PHASE21_RAW_MART_COLS = sorted(set(
-    ["vol_1m", "vol_3m", "vol_6m", "commission", "account_balance", "average_balance",
-     "cust_1m", "cust_3m", "cash_in_value_3m", "cash_out_value_3m", "payment_value_3m",
+    ["account_balance", "average_balance", "commission",
      "commission_cluster_mean", "vol_3m_cluster_mean", "cluster_avg_commission", "cluster_avg_vol_3m",
      "cash_in_peers_3m", "cash_in_vol_3m"]
-    + [f"{base}_{horizon}" for base in ("cash_out_vol", "cash_in_vol", "payment_vol", "vol")
-       for horizon in ("1m", "3m", "6m")]
+    + ["cust_1m", "cust_3m", "cust_6m", "vol_1m", "vol_3m", "vol_6m"]
+    + [
+        f"{txn_type}_{metric}_{horizon}"
+        for txn_type in ("cash_out", "cash_in", "payment")
+        for metric in ("vol", "value", "peers", "comm", "cust")
+        for horizon in ("1m", "3m", "6m")
+    ]
 ))
 
 # Union of LABEL_DIAGNOSTIC_COLUMNS and the raw/derived label columns --
