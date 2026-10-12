@@ -215,7 +215,12 @@ def compute_tier_bucket_table(capacity_series: pd.Series, tiers: list[int]) -> p
 
     for i in range(len(boundaries) - 1):
         lo, hi = boundaries[i], boundaries[i + 1]
-        n_in_bucket = int(((s > lo) & (s <= hi)).sum())
+        # The first bucket's lower edge is inclusive (capacity_ugx_at_k is
+        # never negative, and a capacity of EXACTLY 0.0 -- e.g. both
+        # fundamentals at 0 -- is a legitimate value that must land in a
+        # bucket, not silently fall through every condition).
+        in_bucket = (s >= lo) if i == 0 else (s > lo)
+        n_in_bucket = int((in_bucket & (s <= hi)).sum())
         cumulative_n += n_in_bucket
         rows.append({
             "tier_bucket_upper_ugx": hi, "n_in_bucket": n_in_bucket,
