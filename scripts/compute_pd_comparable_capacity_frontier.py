@@ -819,9 +819,11 @@ def main(argv: list[str] | None = None) -> None:
         "matching on retrospective_current_cal_pd alone reduces, but does not eliminate, risk-selection "
         "confounding. Insufficient PD-comparable evidence NEVER reopens a breached frontier.\n\n"
         "NEXT STEP (not performed here, by design): re-run scripts/derive_capacity_function_and_backtest_"
-        "frontier.py UNCHANGED, once per fundamental x delta (6 runs total), pointing --float-frontier-"
-        "summary-csv / --commission-frontier-summary-csv at the *_pd_comparable_frontier_summary_delta*.csv "
-        "files written here, to get the k-sensitivity table against the PD-comparable surface."
+        "frontier.py UNCHANGED, once per delta (3 runs total -- that script requires BOTH --float-frontier-"
+        "summary-csv AND --commission-frontier-summary-csv in the SAME invocation, so each run must pair "
+        "one delta's float *_pd_comparable_frontier_summary_delta*.csv with that SAME delta's commission "
+        "one; each run writes its own separate float/commission backtest and k-sensitivity output files), "
+        "to get the k-sensitivity table against each PD-comparable surface."
     )
 
 
