@@ -35,6 +35,16 @@ multiplier is applied, L_full = Capacity_k(F) x M_C3(PD) is explicitly
 deferred to a separate, later, already-planned step. This script only
 ever computes and describes Capacity_k(F) in isolation.
 
+CAPACITY_NOT_ESTIMABLE, NEVER CAPACITY=0: an agent-period with
+float_activity_value_1m<=0 or commission<=0 (the same validity bar
+assign_bands already uses) does not have a measured zero economic
+capacity -- we simply lack usable fundamentals for it. These rows are
+masked to NaN before any table is built, so overall/decile/tier-bucket/
+concordance stats are computed only over the genuinely estimable
+population; their TRUE count is still reported everywhere (never
+silently dropped to n=0), just with NaN stats rather than a fabricated
+near-zero capacity.
+
 CANDIDATE k's ARE A POLICY-CONSEQUENCE CHARACTERIZATION, NOT A SEARCH:
 --candidate-ks defaults to "0.03,0.04,0.05,0.06" (0.03 = the pre-Stage-4
 unconditioned benchmark; 0.04/0.05/0.06 = the policy region emerging from
@@ -166,8 +176,14 @@ def compute_capacity_ugx(df: pd.DataFrame, cols: list[str], weights: dict, k: fl
 
 
 def _discordance_label(row) -> str:
+    """'capacity_not_estimable' (never 'unknown' -- see module docstring)
+    means float_activity_value_1m <= 0 or commission <= 0 (or missing) for
+    this agent-period, the SAME validity bar assign_bands already uses.
+    This is categorically different from a measured, low-but-real capacity:
+    we lack usable fundamentals, we did not measure a zero-capacity
+    business."""
     if pd.isna(row["float_band_rank"]) or pd.isna(row["commission_band_rank"]):
-        return "unknown"
+        return "capacity_not_estimable"
     diff = abs(row["float_band_rank"] - row["commission_band_rank"])
     if diff <= 1:
         return "concordant"
@@ -239,18 +255,25 @@ def compute_decile_table(df: pd.DataFrame, band_col: str, capacity_col: str) -> 
     rows = []
     for band, g in df.groupby(band_col, sort=False):
         stats = compute_distribution_stats(g[capacity_col])
+        stats["n"] = len(g)  # true group size -- never silently shrunk by a dropna() inside the stats helper.
         rows.append({"band": band, **stats})
     rows.sort(key=lambda r: int(str(r["band"])[1:]))
     return pd.DataFrame(rows)
 
 
 def compute_concordance_table(df: pd.DataFrame, capacity_col: str) -> pd.DataFrame:
+    """For the capacity_not_estimable segment, capacity_col is NaN for
+    every row by construction (see main()'s capacity_estimable masking),
+    so median/p25/p75/mean/min/max correctly come back NaN -- but n must
+    still report the TRUE group size, not 0, or this population's
+    existence silently disappears from the table."""
     labelled = df.assign(concordance=df.apply(_discordance_label, axis=1))
     rows = []
     for concordance, g in labelled.groupby("concordance", sort=False):
         stats = compute_distribution_stats(g[capacity_col])
+        stats["n"] = len(g)
         rows.append({"concordance": concordance, **stats})
-    order = {"concordant": 0, "middle": 1, "discordant": 2, "unknown": 3}
+    order = {"concordant": 0, "middle": 1, "discordant": 2, "capacity_not_estimable": 3}
     rows.sort(key=lambda r: order.get(r["concordance"], 99))
     return pd.DataFrame(rows)
 
@@ -298,6 +321,22 @@ def main(argv: list[str] | None = None) -> None:
     df["commission_band_rank"] = df["commission_band"].map(lambda b: np.nan if pd.isna(b) else int(str(b)[1:]))
 
     df["capacity_ugx_at_k1"] = compute_capacity_ugx(df, FUNDAMENTALS_FOR_SCORE, weights, 1.0)
+
+    # CAPACITY_NOT_ESTIMABLE, never Capacity=0: an agent-period with
+    # float_activity_value_1m<=0 or commission<=0 (the SAME validity bar
+    # assign_bands already uses) did not have its economic capacity
+    # measured as zero -- we simply lack usable fundamentals for it. Mask
+    # capacity to NaN for these rows so every downstream table (overall,
+    # decile, tier-bucket, concordance) excludes them from numeric stats
+    # by construction, rather than contaminating those stats with a
+    # formula artifact near zero.
+    capacity_estimable = (df["float_activity_value_1m"] > 0) & (df["commission"] > 0)
+    n_not_estimable = int((~capacity_estimable).sum())
+    df.loc[~capacity_estimable, "capacity_ugx_at_k1"] = np.nan
+    print(f"\n{n_not_estimable:,} of {len(df):,} agent-period(s) ({100.0 * n_not_estimable / len(df):.2f}%) "
+          f"are CAPACITY_NOT_ESTIMABLE (float_activity_value_1m<=0 or commission<=0) -- excluded from every "
+          f"numeric capacity table below, reported with their true count and NaN stats where applicable, "
+          f"never as a fabricated capacity of 0.")
 
     overall_rows, float_decile_rows, commission_decile_rows = [], [], []
     tier_bucket_rows, concordance_rows = [], []
