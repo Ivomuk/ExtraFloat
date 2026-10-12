@@ -269,10 +269,17 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--champion", choices=["xgb", "lgb"], default="xgb",
                      help="Must match the --champion Stage 4B-R2 was run with -- the calibration "
                           "map is model-specific.")
-    ap.add_argument("--r2-validation-report-json", type=Path, default=None,
-                     help="Optional. Stage 4B-R2's own validation report -- if given, cross-checks "
-                          "--champion against the champion R2 actually used (warns, does not block, "
-                          "on a mismatch) and carries R2's audit trail forward into this report.")
+    ap.add_argument("--r2-validation-report-json", type=Path, required=True,
+                     help="Stage 4B-R2's own validation report. REQUIRED: R3 represents one "
+                          "specific provenance chain (historical PIT features -> R2's current "
+                          "champion -> R2's raw score -> that SAME champion's calibration map -> "
+                          "retrospective_current_cal_pd), and this is the only way to verify "
+                          "--champion actually matches the champion R2 scored with.")
+    ap.add_argument("--allow-champion-mismatch", action="store_true", default=False,
+                     help="Override: proceed even if --champion does not match R2's champion. "
+                          "The run is then stamped is_experimental_cross_champion_run=true and is "
+                          "explicitly NOT the canonical Stage 4B-R3 result -- use only for a "
+                          "deliberate cross-champion calibration sensitivity experiment.")
     ap.add_argument("--out-prefix", type=str, default="stage4br3_retrospective_cal_scores")
     ap.add_argument("--n-bands", type=int, default=10)
     args = ap.parse_args(argv)
@@ -281,24 +288,38 @@ def main(argv: list[str] | None = None) -> None:
           f"No isotonic regression is refit here -- only the frozen artifact's existing bin-lookup "
           f"map is replayed. No C3, no Capacity(F), no k selection.\n{'#' * 100}")
 
-    r2_champion_cross_check: dict = {"r2_validation_report_provided": False}
-    if args.r2_validation_report_json is not None:
-        r2_report_path = Path(args.r2_validation_report_json)
-        if r2_report_path.exists():
-            r2_report = json.loads(r2_report_path.read_text())
-            r2_champion = r2_report.get("champion_artifact_identity", {}).get("champion")
-            match = r2_champion == args.champion
-            r2_champion_cross_check = {
-                "r2_validation_report_provided": True, "r2_champion": r2_champion,
-                "r3_champion": args.champion, "match": match,
-                "r2_model_file_sha256": r2_report.get("champion_artifact_identity", {}).get("model_file_sha256"),
-            }
-            if not match:
-                print(f"\n{'!' * 100}\nWARNING: --champion={args.champion} does not match the champion "
-                      f"R2 was run with ({r2_champion}) -- proceeding anyway (not a hard block), but "
-                      f"this is almost certainly a mistake.\n{'!' * 100}")
-        else:
-            print(f"NOTE: --r2-validation-report-json given but {r2_report_path} does not exist -- skipping cross-check.")
+    r2_report_path = Path(args.r2_validation_report_json)
+    if not r2_report_path.exists():
+        sys.exit(f"ERROR: --r2-validation-report-json {r2_report_path} does not exist -- cannot "
+                  f"verify the provenance chain to Stage 4B-R2 without it.")
+    r2_report = json.loads(r2_report_path.read_text())
+    r2_champion = r2_report.get("champion_artifact_identity", {}).get("champion")
+    r2_model_file_sha256 = r2_report.get("champion_artifact_identity", {}).get("model_file_sha256")
+    champion_match = r2_champion == args.champion
+    is_experimental_cross_champion_run = False
+
+    if not champion_match:
+        if not args.allow_champion_mismatch:
+            sys.exit(
+                f"ERROR: --champion={args.champion} does not match the champion Stage 4B-R2 was "
+                f"run with ({r2_champion}). This breaks the R3 provenance chain (R2's raw score "
+                f"came from champion={r2_champion}; its calibration map is model-specific and "
+                f"would not correspond to that score). Re-run with --champion={r2_champion}, or "
+                f"pass --allow-champion-mismatch to run this deliberately as an experimental "
+                f"cross-champion sensitivity check (stamped as such, never the canonical R3 result)."
+            )
+        is_experimental_cross_champion_run = True
+        print(f"\n{'!' * 100}\nEXPERIMENTAL CROSS-CHAMPION RUN: --champion={args.champion} does "
+              f"NOT match the champion R2 was run with ({r2_champion}). Proceeding only because "
+              f"--allow-champion-mismatch was given. This run is stamped "
+              f"is_experimental_cross_champion_run=true and is NOT the canonical Stage 4B-R3 "
+              f"result.\n{'!' * 100}")
+
+    r2_champion_cross_check = {
+        "r2_champion": r2_champion, "r3_requested_champion": args.champion, "match": champion_match,
+        "r2_model_file_sha256": r2_model_file_sha256,
+        "is_experimental_cross_champion_run": is_experimental_cross_champion_run,
+    }
 
     # ------------------------------------------------------------------ #
     # 1) Load R2's scores + the real champion artifact (frozen cal_map)
@@ -312,6 +333,30 @@ def main(argv: list[str] | None = None) -> None:
     cal_map_fidelity = check_cal_map_intrinsic_monotonicity(artifacts.cal_map, args.champion)
     print(f"Loaded cal_map: {cal_map_fidelity['cal_map_rows_for_champion']} row(s) for champion="
           f"{args.champion}, intrinsically monotonic={cal_map_fidelity['cal_map_intrinsically_monotonic']}.")
+
+    # Full model_metadata.json content (whatever fields it carries -- e.g. a
+    # calibration/training version tag) + the calibration artifact's own
+    # hash, recorded alongside the R2/R3 champion identities above so the
+    # whole chain (historical PIT features -> R2 champion -> R2 raw score ->
+    # that SAME champion's calibration map -> retrospective_current_cal_pd)
+    # is self-contained in one report, per explicit review.
+    model_metadata: dict = {}
+    meta_path = Path(args.pd_model_artifacts_dir) / "model_metadata.json"
+    if meta_path.exists():
+        try:
+            model_metadata = json.loads(meta_path.read_text())
+        except Exception as exc:
+            model_metadata = {"_error": f"could not parse model_metadata.json: {exc}"}
+    calibration_artifact_identity = {
+        "champion": args.champion,
+        "pd_calibration_map_csv_sha256": _sha256_file(
+            Path(args.pd_model_artifacts_dir) / "pd_calibration_map.csv"),
+        "model_metadata": model_metadata,
+        "r2_champion": r2_champion,
+        "r2_model_file_sha256": r2_model_file_sha256,
+        "r3_requested_champion": args.champion,
+        "is_experimental_cross_champion_run": is_experimental_cross_champion_run,
+    }
 
     # ------------------------------------------------------------------ #
     # 2) Apply calibration to the THICK subset only
@@ -389,7 +434,9 @@ def main(argv: list[str] | None = None) -> None:
             "bad_rate_by_band_calibrated_score": cal_bad_rate,
         },
         "champion": args.champion,
+        "is_experimental_cross_champion_run": is_experimental_cross_champion_run,
         "r2_cross_check": r2_champion_cross_check,
+        "calibration_artifact_identity": calibration_artifact_identity,
         "terminology_note": (
             f"{CAL_COL} is the frozen current isotonic calibration applied to {RAW_COL} for "
             f"thick-file episodes only -- never bare 'cal_pd' (which could be confused with a "
@@ -419,12 +466,18 @@ def main(argv: list[str] | None = None) -> None:
     Path(report_path).write_text(json.dumps(validation_report, indent=2, default=str))
     print(f"Wrote {report_path}")
 
+    experimental_banner = (
+        "\n\nTHIS IS AN EXPERIMENTAL CROSS-CHAMPION SENSITIVITY RUN, NOT THE CANONICAL STAGE "
+        "4B-R3 RESULT (--champion did not match the champion R2 was run with; "
+        "--allow-champion-mismatch was given to permit it)."
+        if is_experimental_cross_champion_run else ""
+    )
     print(
         f"\n{'#' * 100}\nCONCLUSION\n{'#' * 100}\n"
         f"{disposition}. {n_thick_cal_nonnull:,} thick-file episode(s) calibrated with "
         f"{CAL_COL}; {n_thin:,} thin-file episode(s) remain NaN ({ROUTE_THIN}). No C3, no "
         f"Capacity(F), no k selection performed. Stage 4B-R4/R3B must not proceed unless "
-        f"disposition == {DISPOSITION_READY}."
+        f"disposition == {DISPOSITION_READY}.{experimental_banner}"
     )
 
 
