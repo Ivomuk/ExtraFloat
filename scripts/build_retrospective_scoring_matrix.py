@@ -511,7 +511,20 @@ def run_chunked_transform_align_write(
     n_chunks = (n_total + chunk_size - 1) // chunk_size if n_total else 0
 
     for chunk_idx, start in enumerate(range(0, n_total, chunk_size)):
-        chunk = clean_df.iloc[start:start + chunk_size]
+        # .copy() is required, not cosmetic: build_transformed_dataframe's
+        # own step 1 mutates its df_pd parameter's columns in place
+        # (`df_pd[col] = pd.to_numeric(...).astype("float32")`). Passing a
+        # bare .iloc[] slice of clean_df here is exactly the chained-
+        # indexing pattern pandas' own SettingWithCopyWarning exists to
+        # catch (confirmed by a real run's warning, fired once per chunk,
+        # pointing at that exact production line) -- an unresolved
+        # ambiguity about whether the mutation lands on this chunk alone
+        # or back-propagates into clean_df's shared blocks. .copy() makes
+        # the chunk a genuinely independent object, so production's
+        # in-place column mutation can never reach clean_df, and removes
+        # the ambiguity the warning is reporting rather than just
+        # silencing it.
+        chunk = clean_df.iloc[start:start + chunk_size].copy()
         df_t_chunk, _kept_pd_features, _report = build_transformed_dataframe(
             chunk, pd_features=pd_features, log_cols=log_cols, cap_cols=cap_cols,
             signed_log_cols=signed_log_cols, cfg=DEFAULT_CONFIG, fitted_params=fitted_params,
