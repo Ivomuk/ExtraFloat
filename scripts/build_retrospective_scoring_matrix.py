@@ -642,8 +642,22 @@ def main(argv: list[str] | None = None) -> None:
     # correct even if that assertion is ever relaxed to a warning).
     forbidden_remaining_pre_transform = sorted(FORBIDDEN_PRE_TRANSFORM_COLS & set(clean_df.columns))
 
+    # get_and_classify_pd_features classifies candidate PD features purely
+    # from column NAME and DTYPE (confirmed by reading transformations.py:
+    # `df_pd.select_dtypes(include=["number"]).columns` is a schema-only
+    # filter -- it never inspects row values), so it is safe, and produces
+    # an IDENTICAL result, to call it on a tiny row-sample rather than the
+    # full clean_df: a column's dtype does not change when a subset of its
+    # rows is selected. Calling it on the full-size frame instead triggers
+    # the exact same pandas block-consolidation OOM mechanism already fixed
+    # inside build_transformed_dataframe -- a real run crashed here too,
+    # inside select_dtypes's own internal df.copy() ->
+    # _consolidate_inplace() -> merge_blocks(), trying to allocate 5.16 GiB
+    # for shape (145, 4_780_457). Classification only needs the schema, so
+    # a 1-row sample is enough and the result is used for every chunk.
+    classification_sample = clean_df.iloc[:1] if len(clean_df) else clean_df
     pd_features, log_cols, cap_cols, _protected, signed_log_cols, _excluded = \
-        get_and_classify_pd_features(clean_df)
+        get_and_classify_pd_features(classification_sample)
 
     out_prefix = args.out_prefix
     matrix_path = f"{out_prefix}_matrix.csv"
