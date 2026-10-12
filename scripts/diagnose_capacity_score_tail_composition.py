@@ -248,6 +248,24 @@ def build_extreme_rows_table(df: pd.DataFrame, top_n: int, ascending: bool, clas
     ]].rename(columns={"float_activity_value_1m_percentile_rank": "float_percentile_rank"})
 
 
+def lookup_agent_source_rows(episode_dataset_path: Path, msisdn: str) -> pd.DataFrame:
+    """Source-record check for ONE agent_msisdn: reads the episode dataset
+    WITHOUT the usual usecols whitelist (every column present), filters to
+    that agent, and returns every matching row UNDEDUPLICATED (unlike
+    load_agent_period_fundamentals's own .first()-per-snapshot collapse --
+    a source-record check needs to see whether multiple raw rows per
+    snapshot ever disagreed, not just the one that got kept downstream).
+    Intentionally a one-off diagnostic path, not part of the main
+    tail-analysis pipeline -- it never feeds back into any table above."""
+    df = pd.read_csv(episode_dataset_path, low_memory=False, dtype={"agent_msisdn": str})
+    if "agent_msisdn" not in df.columns:
+        sys.exit("ERROR: episode dataset has no agent_msisdn column -- cannot look up an agent.")
+    matched = df[df["agent_msisdn"].astype(str) == str(msisdn)].copy()
+    if "fundamentals_snapshot_date" in matched.columns:
+        matched = matched.sort_values("fundamentals_snapshot_date")
+    return matched
+
+
 def main(argv: list[str] | None = None) -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--episode-dataset", type=Path, default=Path("loan_episode_capacity_dataset.csv"))
@@ -257,7 +275,25 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--high-tail-threshold-ugx", type=float, default=DEFAULT_HIGH_TAIL_THRESHOLD_UGX)
     ap.add_argument("--top-n-extreme", type=int, default=DEFAULT_TOP_N_EXTREME)
     ap.add_argument("--out-prefix", type=str, default="capacity_tail_composition")
+    ap.add_argument("--lookup-agent-msisdn", type=str, default=None,
+                     help="Source-record check for ONE agent_msisdn: prints and saves every raw "
+                          "row for that agent from the episode dataset (no usecols whitelist, no "
+                          "dedup) -- independent of, and in addition to, the main tail analysis "
+                          "below. Use this to verify a specific extreme row against its source "
+                          "before treating it as real or as a data issue.")
     args = ap.parse_args(argv)
+
+    if args.lookup_agent_msisdn:
+        print(f"\n{'#' * 100}\nSOURCE-RECORD LOOKUP: agent_msisdn={args.lookup_agent_msisdn}\n{'#' * 100}")
+        lookup_df = lookup_agent_source_rows(args.episode_dataset, args.lookup_agent_msisdn)
+        if lookup_df.empty:
+            print(f"No rows found for agent_msisdn={args.lookup_agent_msisdn} in {args.episode_dataset}.")
+        else:
+            with pd.option_context("display.width", 220, "display.max_columns", None):
+                print(lookup_df.to_string(index=False))
+            lookup_path = f"{args.out_prefix}_agent_lookup_{args.lookup_agent_msisdn}.csv"
+            lookup_df.to_csv(lookup_path, index=False)
+            print(f"\nWrote {lookup_path} ({len(lookup_df):,} row(s)).")
 
     if not args.episode_dataset.exists():
         sys.exit(f"ERROR: {args.episode_dataset} not found.")
