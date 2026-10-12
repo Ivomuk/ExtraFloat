@@ -564,6 +564,7 @@ def build_disposition(
     n_rows: int, n_reconstructed_input: int, disbursement_fid_unique: bool,
     presence_df: pd.DataFrame, forbidden_remaining_pre_transform: list[str], forbidden_post: list[str],
     fitted_params: dict, feature_order_exact_match: bool,
+    champion_features_missing_fitted_params: list[str] | None = None,
 ) -> tuple[str, dict]:
     """`forbidden_remaining_pre_transform` is the set of forbidden names
     STILL PRESENT in the dataframe actually handed to get_and_classify_
@@ -572,7 +573,25 @@ def build_disposition(
     deliberately NOT the same thing as "how many forbidden columns were
     found and separated," which is expected to be non-zero whenever the
     raw input legitimately contains labels (that IS the point of
-    separating them, not a failure)."""
+    separating them, not a failure).
+
+    `champion_features_missing_fitted_params` is a SEPARATE, stricter
+    check from `training_fitted_transformation_params_replayed` (a real
+    run surfaced this gap: that check only confirms SOME fitted_params
+    dict was loaded, not that every champion feature needing a transform
+    actually has an entry in it). build_transformed_dataframe's own
+    _use_fitted() replays a column's frozen training-time winsorize
+    bounds only when that column is a KEY in fitted_params; for any
+    champion feature requiring a LOG/CAP/SIGNED_LOG transform that is
+    NOT a key, _use_fitted() returns False and the column's winsorize
+    bounds (and its broken-column revert-to-raw-cap decision) are
+    recomputed from scratch on whatever data happens to be in front of
+    it -- under this script's chunked execution, that means PER CHUNK,
+    on that chunk's own ~chunk_size-row slice, which can differ from one
+    chunk to the next. That is exactly the batch-dependence this script's
+    chunking is otherwise designed to avoid, so an affected champion
+    feature must fail the disposition, not merely log a warning."""
+    champion_features_missing_fitted_params = champion_features_missing_fitted_params or []
     schema_construction_complete = bool((presence_df["presence_status"] != PRESENCE_ABSENT).all())
     conditions = {
         "n_rows_equals_reconstructed_input": n_rows == n_reconstructed_input,
@@ -583,6 +602,7 @@ def build_disposition(
         "forbidden_fields_pre_transformation": len(forbidden_remaining_pre_transform) == 0,
         "forbidden_fields_in_final_matrix": len(forbidden_post) == 0,
         "training_fitted_transformation_params_replayed": len(fitted_params) > 0,
+        "no_champion_features_missing_fitted_params": len(champion_features_missing_fitted_params) == 0,
         "final_aligned_feature_order_exact_match": feature_order_exact_match,
     }
     disposition = DISPOSITION_READY if all(conditions.values()) else DISPOSITION_NOT_READY
@@ -672,6 +692,31 @@ def main(argv: list[str] | None = None) -> None:
     pd_features, log_cols, cap_cols, _protected, signed_log_cols, _excluded = \
         get_and_classify_pd_features(classification_sample)
 
+    # A real run surfaced production's own "N feature(s) reverted to raw
+    # cap" WARNING log line -- harmless for a feature that ISN'T one of
+    # the 80 champion features (align_features drops it), but a real
+    # batch-dependence risk for one that IS: build_transformed_dataframe's
+    # _use_fitted() only replays frozen training-time winsorize bounds for
+    # a column that is a KEY in fitted_params; any champion feature
+    # requiring a transform but missing from that dict gets its bounds
+    # (and its broken-column revert decision) recomputed independently
+    # PER CHUNK, which can differ chunk to chunk for the same feature.
+    cols_requiring_fitted_replay = sorted((set(log_cols) | set(cap_cols) | set(signed_log_cols))
+                                           & set(feature_order))
+    champion_features_missing_fitted_params = sorted(
+        c for c in cols_requiring_fitted_replay if c not in fitted_params)
+    if champion_features_missing_fitted_params:
+        print(f"\n{'!' * 100}\nBATCH-DEPENDENCE RISK: {len(champion_features_missing_fitted_params)} "
+              f"champion feature(s) require a LOG/CAP/SIGNED_LOG transform but have no entry in the "
+              f"loaded transform_report.csv fitted_params -- their winsorize bounds and broken-column "
+              f"revert-to-raw-cap decision are recomputed independently PER CHUNK (chunk_size="
+              f"{args.chunk_size:,}) rather than replayed from frozen training parameters, so this "
+              f"feature's values can depend on which chunk a row landed in: "
+              f"{champion_features_missing_fitted_params}\n{'!' * 100}")
+    else:
+        print(f"Every one of the {len(cols_requiring_fitted_replay)} champion feature(s) requiring a "
+              f"transform has a fitted_params entry: zero batch-dependence risk from chunking.")
+
     out_prefix = args.out_prefix
     matrix_path = f"{out_prefix}_matrix.csv"
     print(f"\nTransforming + aligning {len(clean_df):,} row(s) in chunks of "
@@ -713,6 +758,7 @@ def main(argv: list[str] | None = None) -> None:
         disbursement_fid_unique=disbursement_fid_unique, presence_df=presence_df,
         forbidden_remaining_pre_transform=forbidden_remaining_pre_transform, forbidden_post=forbidden_post,
         fitted_params=fitted_params, feature_order_exact_match=feature_order_exact_match,
+        champion_features_missing_fitted_params=champion_features_missing_fitted_params,
     )
 
     print(f"\n{'#' * 100}\nDISPOSITION: {disposition}\n{'#' * 100}")
@@ -735,6 +781,7 @@ def main(argv: list[str] | None = None) -> None:
         "n_champion_features": len(feature_order),
         "n_absent_before_alignment": len(absent),
         "absent_before_alignment": absent,
+        "champion_features_missing_fitted_params": champion_features_missing_fitted_params,
         "forbidden_columns_separated_before_transformation": forbidden_separated_names,
         "forbidden_columns_remaining_pre_transformation": forbidden_remaining_pre_transform,
         "forbidden_columns_found_in_final_matrix": forbidden_post,
