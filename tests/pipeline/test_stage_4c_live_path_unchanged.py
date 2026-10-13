@@ -223,3 +223,31 @@ def test_stage_4c_raw_model_score_nullability_through_real_pipeline(tmp_path):
     assert thick_rows["raw_model_score"].notna().all(), "raw_model_score did not propagate for thick-route agents"
     assert thin_rows["cal_pd"].isna().all(), "cal_pd was not nulled for thin-route agents"
     assert thick_rows["cal_pd"].notna().all(), "cal_pd did not propagate for thick-route agents"
+
+
+def test_stage_4c_misconfigured_fails_fast_without_attempting_construction(tmp_path, caplog):
+    """Deployment-readiness review, item 7: stage_4c_logging_enabled=True
+    with no sink and no stage_4c_output_dir must be treated as NOT
+    enabled -- a loud warning, no Decision Log construction attempted at
+    all (not even a FAILED manifest, since nothing with a sink to write
+    one to was ever reached), and the live result_df completely
+    unaffected either way."""
+    import logging
+
+    n = 4
+    msisdn_list = [f"256700{i:06d}" for i in range(n)]
+    df_features = _minimal_features_df(n=n)
+    pd_scored = _make_pd_scored_with_raw_score(msisdn_list)
+    df_raw = _df_raw_with_capacity_inputs(msisdn_list)
+
+    result_disabled = _run_pipeline(tmp_path, df_raw, df_features, pd_scored, stage_4c_logging_enabled=False)
+
+    with caplog.at_level(logging.WARNING, logger="credit_risk_pipeline"):
+        result_misconfigured = _run_pipeline(
+            tmp_path, df_raw, df_features, pd_scored, stage_4c_logging_enabled=True, sink=None,
+        )
+
+    assert any("NOT considered enabled" in r.message for r in caplog.records), (
+        "expected a loud warning when Stage 4C is enabled but unconfigured"
+    )
+    pdt.assert_frame_equal(result_disabled, result_misconfigured, check_exact=True)

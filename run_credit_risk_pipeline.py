@@ -643,7 +643,6 @@ def run_credit_risk_pipeline(
     # value either way; a failure here degrades to a FAILED run manifest,
     # never an exception propagated out of this function.
     if stage_4c_logging_enabled:
-        logger.info("Stage 9: Stage 4C Decision Log (shadow logging enabled)")
         # Convenience: a bare output directory auto-constructs the CSV
         # sink (Stage 4C-S1's answer -- a folder, same convention as the
         # existing --output mechanism, interim until a later DB push).
@@ -652,21 +651,40 @@ def run_credit_risk_pipeline(
         sink = stage_4c_sink
         if sink is None and stage_4c_output_dir is not None:
             sink = CsvDecisionLogSink(stage_4c_output_dir)
-        capacity_weights, capacity_weights_version = load_capacity_weights(
-            stage_4c_capacity_weights_file, FUNDAMENTALS_FOR_SCORE
-        )
-        manifest = run_decision_log_stage(
-            df_agent_raw=df_agent,
-            result_df=result_df,
-            run_id=run_id,
-            scoring_run_timestamp=run_id,
-            capacity_weights=capacity_weights,
-            capacity_weights_version=capacity_weights_version,
-            artifact_versions=stage_4c_artifact_versions or {},
-            sink=sink,
-            shadow_population_label=stage_4c_shadow_population_label,
-        )
-        logger.info("Stage 9: Stage 4C Decision Log manifest: %s", manifest)
+
+        # Deployment-readiness review, item 7: "enabling it should
+        # require a configured stage_4c_output_dir; missing/invalid
+        # configuration should prevent Stage 4C from being considered
+        # enabled." Fail FAST here -- skip the block entirely, never
+        # attempt Decision Log construction -- rather than running the
+        # full build/verify path only to fail at the final write step
+        # on every single run. This check never touches result_df or
+        # raises out of this function either way; it only decides
+        # whether Stage 4C is treated as enabled for this run.
+        if sink is None:
+            logger.warning(
+                "Stage 9: stage_4c_logging_enabled=True but no sink is configured "
+                "(neither stage_4c_sink nor stage_4c_output_dir was provided) -- "
+                "Stage 4C is NOT considered enabled for this run; no Decision Log "
+                "construction was attempted. Live lending decisions are unaffected."
+            )
+        else:
+            logger.info("Stage 9: Stage 4C Decision Log (shadow logging enabled)")
+            capacity_weights, capacity_weights_version = load_capacity_weights(
+                stage_4c_capacity_weights_file, FUNDAMENTALS_FOR_SCORE
+            )
+            manifest = run_decision_log_stage(
+                df_agent_raw=df_agent,
+                result_df=result_df,
+                run_id=run_id,
+                scoring_run_timestamp=run_id,
+                capacity_weights=capacity_weights,
+                capacity_weights_version=capacity_weights_version,
+                artifact_versions=stage_4c_artifact_versions or {},
+                sink=sink,
+                shadow_population_label=stage_4c_shadow_population_label,
+            )
+            logger.info("Stage 9: Stage 4C Decision Log manifest: %s", manifest)
 
     # -- Restore this call's own output contract -----------------------------
     # The Stage 6 call above always requested keep_intermediate=True

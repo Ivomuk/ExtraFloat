@@ -24,6 +24,7 @@ import pytest
 
 from extrafloat.shadow_logging.stage_4c_csv_sink import (
     CsvDecisionLogSink,
+    _filename_safe_run_id,
     _sanitize_run_id_for_filename,
 )
 from extrafloat.shadow_logging.stage_4c_decision_logger import (
@@ -88,7 +89,7 @@ def test_round_trip_integrity(tmp_path):
     })
     sink.write_decision_log_rows(df)
 
-    written_path = tmp_path / "stage_4c_decision_log_run_a.csv"
+    written_path = sink._decision_log_path("run_a")
     assert written_path.exists()
     roundtrip = pd.read_csv(written_path)
     assert len(roundtrip) == 3
@@ -103,7 +104,7 @@ def test_mkdir_parents_true_creates_nested_output_dir(tmp_path):
     df = pd.DataFrame({"run_id": ["run_a"], "agent_msisdn": ["1"], "l_current": [1.0]})
     sink.write_decision_log_rows(df)
     assert nested.exists()
-    assert (nested / "stage_4c_decision_log_run_a.csv").exists()
+    assert sink._decision_log_path("run_a").exists()
 
 
 def test_one_file_per_run_id_never_clobbers_another_run(tmp_path):
@@ -114,8 +115,8 @@ def test_one_file_per_run_id_never_clobbers_another_run(tmp_path):
     sink.write_decision_log_rows(df_run_a)
     sink.write_decision_log_rows(df_run_b)
 
-    assert pd.read_csv(tmp_path / "stage_4c_decision_log_run_a.csv")["agent_msisdn"].iloc[0] == 1
-    assert pd.read_csv(tmp_path / "stage_4c_decision_log_run_b.csv")["agent_msisdn"].iloc[0] == 2
+    assert pd.read_csv(sink._decision_log_path("run_a"))["agent_msisdn"].iloc[0] == 1
+    assert pd.read_csv(sink._decision_log_path("run_b"))["agent_msisdn"].iloc[0] == 2
 
 
 def test_idempotent_retry_does_not_raise_and_does_not_overwrite(tmp_path):
@@ -132,7 +133,7 @@ def test_idempotent_retry_does_not_raise_and_does_not_overwrite(tmp_path):
     })
     sink.write_decision_log_rows(different_retry_data)  # must not raise
 
-    final = pd.read_csv(tmp_path / "stage_4c_decision_log_run_a.csv")
+    final = pd.read_csv(sink._decision_log_path("run_a"))
     assert len(final) == 2
     assert list(final["agent_msisdn"].astype(str)) == ["1", "2"]
 
@@ -144,7 +145,8 @@ def test_simulated_crash_leaves_stray_tmp_file_that_is_not_mistaken_for_complete
     succeed cleanly despite the leftover garbage."""
     sink = CsvDecisionLogSink(tmp_path)
     tmp_path.mkdir(parents=True, exist_ok=True)
-    stray_tmp = tmp_path / "stage_4c_decision_log_run_crash.csv.tmp99999"
+    _final_path = sink._decision_log_path("run_crash")
+    stray_tmp = _final_path.with_name(_final_path.name + ".tmp99999")
     stray_tmp.write_text("garbage,from,a,dead,process\n1,2,3,4,5")
 
     assert not sink.has_decision_log("run_crash")
@@ -153,7 +155,7 @@ def test_simulated_crash_leaves_stray_tmp_file_that_is_not_mistaken_for_complete
     sink.write_decision_log_rows(retry_df)
 
     assert sink.has_decision_log("run_crash")
-    final = pd.read_csv(tmp_path / "stage_4c_decision_log_run_crash.csv")
+    final = pd.read_csv(sink._decision_log_path("run_crash"))
     assert final["agent_msisdn"].iloc[0] == 1
     # The real retry succeeded; the stray garbage file is simply orphaned
     # (a real deployment's cleanup job sweeps *.tmp* files -- not this
@@ -202,6 +204,36 @@ def test_run_id_sanitization_keeps_filenames_safe_and_traceable():
     assert sanitized == _sanitize_run_id_for_filename("2026-10-13T06:04:53.255990Z")
 
 
+def test_filename_safe_run_id_disambiguates_sanitization_collisions():
+    """Deployment-readiness review finding: sanitization alone can map
+    two DISTINCT raw run_ids to the identical string (e.g. "run:1" and
+    "run_1" both sanitize to "run_1"), which would make their files
+    collide. _filename_safe_run_id must disambiguate them."""
+    colliding_a, colliding_b = "run:1", "run_1"
+    assert _sanitize_run_id_for_filename(colliding_a) == _sanitize_run_id_for_filename(colliding_b), (
+        "test setup assumption failed: these two run_ids were expected to sanitize identically"
+    )
+    assert _filename_safe_run_id(colliding_a) != _filename_safe_run_id(colliding_b)
+    assert _filename_safe_run_id(colliding_a) == _filename_safe_run_id(colliding_a), "must be deterministic"
+
+
+def test_sink_never_collides_two_run_ids_that_sanitize_identically(tmp_path):
+    """End-to-end version of the above, through the real sink: two
+    distinct run_ids that sanitize to the same string must still land
+    in two separate, independently-readable files."""
+    sink = CsvDecisionLogSink(tmp_path)
+    df_a = pd.DataFrame({"run_id": ["run:1"], "agent_msisdn": ["1"], "l_current": [1.0]})
+    df_b = pd.DataFrame({"run_id": ["run_1"], "agent_msisdn": ["2"], "l_current": [2.0]})
+
+    sink.write_decision_log_rows(df_a)
+    sink.write_decision_log_rows(df_b)
+
+    path_a, path_b = sink._decision_log_path("run:1"), sink._decision_log_path("run_1")
+    assert path_a != path_b
+    assert pd.read_csv(path_a)["agent_msisdn"].iloc[0] == 1
+    assert pd.read_csv(path_b)["agent_msisdn"].iloc[0] == 2
+
+
 # -----------------------------------------------------------------------------
 # Orchestration-level retry test: run_decision_log_stage + a sink that
 # fails once, then succeeds on retry -- the actual "retry after an
@@ -245,7 +277,7 @@ def test_retry_after_uncertain_write_recovers_via_run_decision_log_stage(tmp_pat
     )
     assert first_manifest["shadow_logging_status"] == MANIFEST_STATUS_FAILED
     assert first_manifest["logged_agent_count"] == 0
-    assert not (tmp_path / "stage_4c_decision_log_run_retry_001.csv").exists()
+    assert not sink._decision_log_path("run_retry_001").exists()
     assert sink.read_manifest("run_retry_001")["shadow_logging_status"] == MANIFEST_STATUS_FAILED
 
     second_manifest = run_decision_log_stage(
@@ -255,7 +287,7 @@ def test_retry_after_uncertain_write_recovers_via_run_decision_log_stage(tmp_pat
     )
     assert second_manifest["shadow_logging_status"] == MANIFEST_STATUS_SUCCESS
     assert second_manifest["logged_agent_count"] == 1
-    written_path = tmp_path / "stage_4c_decision_log_run_retry_001.csv"
+    written_path = sink._decision_log_path("run_retry_001")
     assert written_path.exists()
     assert pd.read_csv(written_path)["agent_msisdn"].iloc[0] == 256700000001
     # The manifest for this run_id now reflects the LATEST (successful) attempt.
@@ -284,5 +316,5 @@ def test_retry_of_an_already_succeeded_run_is_a_safe_no_op(tmp_path):
         artifact_versions=ARTIFACT_VERSIONS, sink=sink,
     )
     assert second_manifest["shadow_logging_status"] == MANIFEST_STATUS_SUCCESS
-    written_path = tmp_path / "stage_4c_decision_log_run_retry_002.csv"
+    written_path = sink._decision_log_path("run_retry_002")
     assert pd.read_csv(written_path)["agent_msisdn"].iloc[0] == 256700000002

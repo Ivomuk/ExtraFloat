@@ -46,6 +46,7 @@ write case to worry about distinguishing.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -59,14 +60,39 @@ logger = logging.getLogger(__name__)
 DECISION_LOG_FILENAME_PREFIX = "stage_4c_decision_log"
 RUN_MANIFEST_FILENAME_PREFIX = "stage_4c_run_manifest"
 
+# Length of the disambiguation hash suffix appended to every filename
+# (see _filename_safe_run_id). 8 hex chars = 32 bits -- astronomically
+# low collision odds for any realistic run volume, while staying short
+# enough that filenames remain readable.
+_FILENAME_HASH_LEN = 8
+
 
 def _sanitize_run_id_for_filename(run_id) -> str:
     """run_id is typically an ISO-8601-with-'Z' timestamp string
     (":" and other characters are invalid or awkward in filenames on
     some filesystems) -- replace anything outside [A-Za-z0-9_.-] with
-    "_", never silently truncate or hash it away (the sanitized name
-    must still be visually traceable back to the real run_id)."""
+    "_" so the result is traceable back to the real run_id at a glance.
+    NOT collision-safe on its own: two distinct raw run_ids that differ
+    only in characters this replaces to the same "_" (e.g. "run:1" and
+    "run_1") sanitize to the identical string. _filename_safe_run_id
+    below is what callers actually use for filenames; this function is
+    kept separate (and still used, as the human-readable component of
+    that combined name) because the sanitized form is what makes a
+    filename legible, even though it is not what makes it unique."""
     return re.sub(r"[^A-Za-z0-9_.-]", "_", str(run_id))
+
+
+def _filename_safe_run_id(run_id) -> str:
+    """The collision-safe filename component this sink actually uses:
+    the human-readable sanitized form, plus a short hash of the ORIGINAL
+    (unsanitized) run_id string. Fixes a real gap found during
+    deployment-readiness review: sanitization alone can map two distinct
+    run_ids to the same string, which would make their decision-log/
+    manifest files collide. Hashing the pre-sanitization string, not the
+    sanitized one, means the two inputs that collided under sanitization
+    are (overwhelmingly likely to be) disambiguated by the hash."""
+    digest = hashlib.sha256(str(run_id).encode("utf-8")).hexdigest()[:_FILENAME_HASH_LEN]
+    return f"{_sanitize_run_id_for_filename(run_id)}_{digest}"
 
 
 class CsvDecisionLogSink:
@@ -79,10 +105,10 @@ class CsvDecisionLogSink:
         self.output_dir = Path(output_dir)
 
     def _decision_log_path(self, run_id) -> Path:
-        return self.output_dir / f"{DECISION_LOG_FILENAME_PREFIX}_{_sanitize_run_id_for_filename(run_id)}.csv"
+        return self.output_dir / f"{DECISION_LOG_FILENAME_PREFIX}_{_filename_safe_run_id(run_id)}.csv"
 
     def _manifest_path(self, run_id) -> Path:
-        return self.output_dir / f"{RUN_MANIFEST_FILENAME_PREFIX}_{_sanitize_run_id_for_filename(run_id)}.json"
+        return self.output_dir / f"{RUN_MANIFEST_FILENAME_PREFIX}_{_filename_safe_run_id(run_id)}.json"
 
     def _write_atomic_text(self, final_path: Path, write_fn) -> None:
         """write_fn(tmp_path) must write the complete file content to
