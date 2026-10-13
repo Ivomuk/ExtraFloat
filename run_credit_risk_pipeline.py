@@ -94,6 +94,7 @@ from extrafloat.io.extrafloat_data_loaders import (
     load_loan_summary_recent_features,
     load_transaction_capacity_features,
 )
+from extrafloat.shadow_logging.stage_4c_csv_sink import CsvDecisionLogSink
 from extrafloat.shadow_logging.stage_4c_decision_logger import (
     FUNDAMENTALS_FOR_SCORE,
     run_decision_log_stage,
@@ -238,6 +239,7 @@ def run_credit_risk_pipeline(
     allow_provisional_scorecard: bool = False,
     stage_4c_logging_enabled: bool = False,
     stage_4c_sink: object | None = None,
+    stage_4c_output_dir: str | Path | None = None,
     stage_4c_capacity_weights_file: str | Path | None = None,
     stage_4c_artifact_versions: dict | None = None,
     stage_4c_shadow_population_label: str = "FULL_EVALUATION_POPULATION",
@@ -642,6 +644,14 @@ def run_credit_risk_pipeline(
     # never an exception propagated out of this function.
     if stage_4c_logging_enabled:
         logger.info("Stage 9: Stage 4C Decision Log (shadow logging enabled)")
+        # Convenience: a bare output directory auto-constructs the CSV
+        # sink (Stage 4C-S1's answer -- a folder, same convention as the
+        # existing --output mechanism, interim until a later DB push).
+        # An explicitly-passed stage_4c_sink always takes precedence, so
+        # a caller can still supply a different sink implementation.
+        sink = stage_4c_sink
+        if sink is None and stage_4c_output_dir is not None:
+            sink = CsvDecisionLogSink(stage_4c_output_dir)
         capacity_weights, capacity_weights_version = load_capacity_weights(
             stage_4c_capacity_weights_file, FUNDAMENTALS_FOR_SCORE
         )
@@ -653,7 +663,7 @@ def run_credit_risk_pipeline(
             capacity_weights=capacity_weights,
             capacity_weights_version=capacity_weights_version,
             artifact_versions=stage_4c_artifact_versions or {},
-            sink=stage_4c_sink,
+            sink=sink,
             shadow_population_label=stage_4c_shadow_population_label,
         )
         logger.info("Stage 9: Stage 4C Decision Log manifest: %s", manifest)
