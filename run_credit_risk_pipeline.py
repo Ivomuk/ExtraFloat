@@ -438,8 +438,20 @@ def run_credit_risk_pipeline(
     # -- Stage 5: Join cal_pd and capacity_tier onto engine features ---------
     # PD model key: agent_msisdn  |  engine key: msisdn  (same identifier)
     logger.info("Stage 5: joining PD scores and segmentation onto engine features")
-    pd_join_cols = [c for c in ["agent_msisdn", "cal_pd", "thin_file_flag"] if c in pd_scored.columns]
-    pd_join = pd_scored[pd_join_cols].rename(columns={"agent_msisdn": "msisdn"})
+    # {champion}_raw_score -> raw_model_score: carries the champion's own
+    # pre-calibration score through to the Stage 4C Decision Log (closes
+    # the raw_model_score provenance gap flagged in extrafloat.shadow_
+    # logging.stage_4c_decision_logger's module docstring -- this is the
+    # one join widening that module's own docstring asked for, never a
+    # recomputation of the raw score itself, and never a reach into
+    # pd_model inference internals from the logger). Harmless no-op when
+    # Stage 4C logging is disabled or when pd_scored lacks this column
+    # (e.g. in tests using a minimal pd_scored fixture).
+    champion_raw_score_col = f"{champion}_raw_score"
+    pd_join_cols = [c for c in ["agent_msisdn", "cal_pd", "thin_file_flag", champion_raw_score_col] if c in pd_scored.columns]
+    pd_join = pd_scored[pd_join_cols].rename(
+        columns={"agent_msisdn": "msisdn", champion_raw_score_col: "raw_model_score"}
+    )
 
     # Normalise MSISDN on both sides before joining to prevent .0-suffix /
     # whitespace mismatches that would silently leave agents without cal_pd.

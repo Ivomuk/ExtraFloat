@@ -62,6 +62,17 @@ class _FakeSink:
         self.manifests.append(manifest)
 
 
+def _make_pd_scored_with_raw_score(msisdn_list):
+    """_make_pd_scored's output plus xgb_raw_score (the default champion),
+    matching the real score_new_agents output shape -- the shared helper
+    in test_credit_risk_pipeline.py predates the raw_model_score
+    propagation follow-up and other tests there don't need this column,
+    so it's added here locally rather than widening the shared fixture."""
+    pd_scored = _make_pd_scored(msisdn_list)
+    pd_scored["xgb_raw_score"] = np.linspace(-2.0, 2.0, len(msisdn_list))
+    return pd_scored
+
+
 def _df_raw_with_capacity_inputs(msisdn_list, seed=7):
     """Raw agent snapshot carrying BOTH the columns the existing pipeline
     already reads (agent_msisdn, commission, account_balance) AND the
@@ -123,7 +134,7 @@ def test_stage_4c_disabled_matches_stage_4c_enabled_at_keep_intermediate_false(t
     n = 6
     msisdn_list = [f"256700{i:06d}" for i in range(n)]
     df_features = _minimal_features_df(n=n)
-    pd_scored = _make_pd_scored(msisdn_list)
+    pd_scored = _make_pd_scored_with_raw_score(msisdn_list)
     df_raw = _df_raw_with_capacity_inputs(msisdn_list)
 
     result_off = _run_pipeline(tmp_path, df_raw, df_features, pd_scored, stage_4c_logging_enabled=False)
@@ -136,6 +147,15 @@ def test_stage_4c_disabled_matches_stage_4c_enabled_at_keep_intermediate_false(t
     assert len(sink.manifests) == 1
     assert sink.manifests[0]["shadow_logging_status"] == "SUCCESS"
     assert sink.manifests[0]["logged_agent_count"] == n
+
+    # raw_model_score propagation follow-up: all agents here are thick-route
+    # (_make_pd_scored fixes thin_file_flag=0 for every row), so every
+    # written Decision Log row must carry a propagated, non-null
+    # raw_model_score -- confirms the widened Stage 5 join actually reaches
+    # the Decision Log, not just that invariant #3 happened not to fire.
+    assert sink.written_rows["raw_model_score"].notna().all(), (
+        "raw_model_score did not propagate through the widened Stage 5 join for thick-route agents"
+    )
 
     pdt.assert_frame_equal(result_off, result_on, check_exact=True)
 
@@ -155,7 +175,7 @@ def test_stage_4c_disabled_output_columns_unchanged_from_pre_stage_4c_baseline(t
     n = 5
     msisdn_list = [f"256700{i:06d}" for i in range(n)]
     df_features = _minimal_features_df(n=n)
-    pd_scored = _make_pd_scored(msisdn_list)
+    pd_scored = _make_pd_scored_with_raw_score(msisdn_list)
     df_raw = _df_raw_with_capacity_inputs(msisdn_list)
 
     result = _run_pipeline(tmp_path, df_raw, df_features, pd_scored, stage_4c_logging_enabled=False)
@@ -170,3 +190,36 @@ def test_stage_4c_disabled_output_columns_unchanged_from_pre_stage_4c_baseline(t
     always_present = {"assigned_limit", "risk_tier", "cal_pd", "final_decision_reason", "score_source", "scored_at"}
     missing_required = always_present - set(result.columns)
     assert not missing_required, f"Pre-existing, unconditional output columns went missing: {missing_required}"
+
+
+def test_stage_4c_raw_model_score_nullability_through_real_pipeline(tmp_path):
+    """Synthetic thick/thin test for the raw_model_score propagation
+    follow-up, exercised through the REAL pipeline path (not just the
+    stage_4c_decision_logger unit functions, which already cover this at
+    the module level): a mixed thick/thin population must come out of
+    the widened Stage 5 join with raw_model_score populated for thick
+    agents and nulled for thin agents in the written Decision Log, and
+    the run must still report SUCCESS (confirming the restored half of
+    invariant #3 passes against real pipeline-shaped data, not just
+    hand-built fixtures)."""
+    n = 6
+    msisdn_list = [f"256700{i:06d}" for i in range(n)]
+    df_features = _minimal_features_df(n=n)
+    pd_scored = _make_pd_scored_with_raw_score(msisdn_list)
+    # Mark half the population thin-file -- _make_pd_scored otherwise
+    # fixes thin_file_flag=0 for every row.
+    pd_scored.loc[pd_scored.index[: n // 2], "thin_file_flag"] = 1
+    df_raw = _df_raw_with_capacity_inputs(msisdn_list)
+
+    sink = _FakeSink()
+    result = _run_pipeline(tmp_path, df_raw, df_features, pd_scored, stage_4c_logging_enabled=True, sink=sink)
+
+    assert sink.manifests[0]["shadow_logging_status"] == "SUCCESS"
+    written = sink.written_rows
+    thin_rows = written[written["challenger_risk_signal_type"] == "THIN_SCORECARD_PD_LIKE"]
+    thick_rows = written[written["challenger_risk_signal_type"] == "CALIBRATED_CHAMPION_PD"]
+    assert len(thin_rows) > 0 and len(thick_rows) > 0, "fixture did not actually produce a mixed thick/thin population"
+    assert thin_rows["raw_model_score"].isna().all(), "raw_model_score was not nulled for thin-route agents"
+    assert thick_rows["raw_model_score"].notna().all(), "raw_model_score did not propagate for thick-route agents"
+    assert thin_rows["cal_pd"].isna().all(), "cal_pd was not nulled for thin-route agents"
+    assert thick_rows["cal_pd"].notna().all(), "cal_pd did not propagate for thick-route agents"

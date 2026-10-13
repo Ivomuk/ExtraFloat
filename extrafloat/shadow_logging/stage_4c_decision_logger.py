@@ -24,14 +24,15 @@ integration (run_credit_risk_pipeline.py) calls, already wrapped so that
 a construction/write failure degrades to a FAILED run manifest rather
 than propagating.
 
-KNOWN, FLAGGED GAP (not silently worked around): raw_model_score is not
-yet wired through the live pipeline -- run_credit_risk_pipeline.py's
-existing Stage 5 join only carries cal_pd/thin_file_flag from pd_scored
-onto features_df, never xgb_raw_score/lgb_raw_score. This column is
-therefore always NaN here, and the corresponding half of frozen-schema
-invariant #3 (raw_model_score nullability tied to risk_route) is not
-enforced by verify_decision_log_invariants until that join is widened --
-a follow-up, not invented here.
+RESOLVED GAP: raw_model_score is now propagated. run_credit_risk_
+pipeline.py's Stage 5 join was widened to also carry
+f"{champion}_raw_score" from pd_scored onto features_df, renamed to the
+generic raw_model_score (the join widening lives entirely in that
+pipeline file -- this module never recomputes the raw score itself and
+never reaches into pd_model inference internals). The corresponding half
+of frozen-schema invariant #3 (raw_model_score nullability tied to
+risk_route, mirroring the already-enforced cal_pd half) is enforced below
+in verify_decision_log_invariants.
 """
 
 from __future__ import annotations
@@ -332,7 +333,18 @@ def attach_challenger_risk_signal(result_df: pd.DataFrame) -> pd.DataFrame:
     promotion logic -- never re-derived independently here). The output
     schema's own cal_pd field is a SEPARATE write: kept for thick,
     explicitly nulled for thin -- this is exactly why challenger_risk_
-    signal was introduced (implementation mapping Section 5)."""
+    signal was introduced (implementation mapping Section 5).
+
+    raw_model_score (resolved gap, see module docstring): read from
+    result_df's own raw_model_score column, populated by run_credit_risk_
+    pipeline.py's widened Stage 5 join (f"{champion}_raw_score" renamed
+    generically) -- never recomputed here. Masked NULL for thin rows
+    exactly like cal_pd, since on the thin route the champion's raw
+    score is not what drove the final risk signal (never_loan_pd_like
+    is). If result_df was built by a caller that has not widened its own
+    Stage 5 join, the column is simply absent and raw_model_score stays
+    NaN for every row -- a caller-side gap, not something this function
+    papers over."""
     required = ["msisdn", "cal_pd", "thin_file_flag"]
     missing_cols = [c for c in required if c not in result_df.columns]
     if missing_cols:
@@ -351,9 +363,10 @@ def attach_challenger_risk_signal(result_df: pd.DataFrame) -> pd.DataFrame:
     out["challenger_risk_signal_type"] = np.where(is_thin, RISK_SCORE_TYPE_THIN, RISK_SCORE_TYPE_THICK)
     out["cal_pd"] = pooled_cal_pd.mask(is_thin)
     out["risk_route"] = np.where(is_thin, "THIN_FILE_SCORECARD", "THICK_CHAMPION_SCORED")
-    # Known, flagged gap (see module docstring): raw_model_score is not yet
-    # wired through the live pipeline's Stage 5 join. Left NaN, not invented.
-    out["raw_model_score"] = np.nan
+    if "raw_model_score" in result_df.columns:
+        out["raw_model_score"] = pd.to_numeric(result_df["raw_model_score"], errors="coerce").mask(is_thin)
+    else:
+        out["raw_model_score"] = np.nan
 
     return out
 
@@ -559,14 +572,20 @@ def verify_decision_log_invariants(decision_log_df: pd.DataFrame, capacity_weigh
     capacity_cols = ["capacity_shadow_k0_05", "capacity_sensitivity_k0_04", "capacity_sensitivity_k0_06"]
     _verify_capacity_triple_invariants(df[capacity_cols], inputs_df, capacity_weights, tolerance)
 
-    # #3 (partial -- see module docstring re: raw_model_score gap):
-    # cal_pd / challenger_risk_signal_type nullability pairing.
+    # #3: cal_pd / raw_model_score nullability tied to challenger_risk_
+    # signal_type exactly as specified (the raw_model_score half was
+    # restored once run_credit_risk_pipeline.py's Stage 5 join was
+    # widened to propagate it -- see module docstring).
     thick = df["challenger_risk_signal_type"] == RISK_SCORE_TYPE_THICK
     thin = df["challenger_risk_signal_type"] == RISK_SCORE_TYPE_THIN
     if df.loc[thin, "cal_pd"].notna().any():
         raise ValueError("invariant #3 violated: cal_pd populated on a THIN_SCORECARD_PD_LIKE row.")
     if df.loc[thick, "cal_pd"].isna().any():
         raise ValueError("invariant #3 violated: cal_pd NULL on a CALIBRATED_CHAMPION_PD row.")
+    if df.loc[thin, "raw_model_score"].notna().any():
+        raise ValueError("invariant #3 violated: raw_model_score populated on a THIN_SCORECARD_PD_LIKE row.")
+    if df.loc[thick, "raw_model_score"].isna().any():
+        raise ValueError("invariant #3 violated: raw_model_score NULL on a CALIBRATED_CHAMPION_PD row.")
 
     # #4: l_full_* NOT NULL iff both its capacity and its multiplier are
     # NOT NULL for that (k, scenario) pair.
