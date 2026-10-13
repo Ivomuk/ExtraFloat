@@ -237,6 +237,7 @@ def run_credit_risk_pipeline(
     allow_unverified_artifacts: bool = False,
     scorecard_path: str | Path | None = None,
     allow_provisional_scorecard: bool = False,
+    shadow_artifacts_dir: str | Path | None = None,
     stage_4c_logging_enabled: bool = False,
     stage_4c_sink: object | None = None,
     stage_4c_output_dir: str | Path | None = None,
@@ -293,6 +294,14 @@ def run_credit_risk_pipeline(
                                  testing the full pipeline against a not-yet-finalized
                                  scorecard.  Never set True to make an unreviewed scorecard's
                                  output stand in for a business-approved run.
+    shadow_artifacts_dir       : optional directory containing the C3 shadow calibration
+                                 artifact (pd_isotonic_calibrated_risk.joblib + its metadata
+                                 JSON). Defaults to artifacts_dir when omitted (the previous,
+                                 only behaviour). Set this explicitly when the shadow artifact
+                                 lives in a different directory than the PD model's own
+                                 required artifacts -- e.g. artifacts_dir=pd_model/artifacts/
+                                 but the C3 artifact sits in capacity_artifacts/. Never affects
+                                 Stage 3 PD inference, which always reads artifacts_dir.
 
     Returns
     -------
@@ -304,10 +313,11 @@ def run_credit_risk_pipeline(
         shadow_limit_pre_transition_<scenario>, shadow_limit_post_transition_<scenario>,
         etc. -- see extrafloat.engine.extrafloat_shadow_risk_multiplier.SHADOW_OUTPUT_COLUMNS),
         computed read-only alongside the live decision and never affecting
-        assigned_limit/risk_tier. Shadow is sourced from the same artifacts_dir;
-        if the shadow calibration artifact isn't present there, these columns
-        are NaN with shadow_status explaining why (the live decision is
-        unaffected either way).
+        assigned_limit/risk_tier. Shadow is sourced from shadow_artifacts_dir
+        (artifacts_dir when not separately specified); if the shadow
+        calibration artifact isn't present there, these columns are NaN with
+        shadow_status explaining why (the live decision is unaffected either
+        way).
     """
     artifacts_dir = Path(artifacts_dir)
 
@@ -560,6 +570,13 @@ def run_credit_risk_pipeline(
     # -- Stage 6: Run credit limit engine -----------------------------------
     logger.info("Stage 6: running credit limit engine")
     run_id = _dt.datetime.utcnow().isoformat() + "Z"
+    # The C3 shadow multiplier's artifact may live in a different directory
+    # than the PD model's own required artifacts (artifacts_dir) -- default
+    # to artifacts_dir, unchanged from before, only when the caller didn't
+    # separately specify shadow_artifacts_dir.
+    resolved_shadow_artifacts_dir = (
+        Path(shadow_artifacts_dir) if shadow_artifacts_dir is not None else artifacts_dir
+    )
     # Always request keep_intermediate=True from THIS internal call,
     # independent of the caller's own keep_intermediate argument above --
     # the Stage 9 Decision Log block (added below, after Stage 8) needs
@@ -576,7 +593,7 @@ def run_credit_risk_pipeline(
         features_df,
         config=engine_config,
         keep_intermediate=True,
-        shadow_artifacts_dir=artifacts_dir,
+        shadow_artifacts_dir=resolved_shadow_artifacts_dir,
         run_id=run_id,
     )
     _engine_intermediate_only_cols = [c for c in result_df.columns if c not in FINAL_OUTPUT_COLUMNS]
@@ -775,6 +792,20 @@ def _parse_args(argv=None):
         ),
     )
     p.add_argument(
+        "--shadow-artifacts-dir",
+        default=None,
+        help=(
+            "Directory containing the C3 shadow calibration artifact "
+            "(pd_isotonic_calibrated_risk.joblib + its metadata JSON). "
+            "Defaults to --artifacts-dir when omitted (the previous, only "
+            "behaviour). Set this when the shadow artifact lives in a "
+            "different directory than the PD model's own required "
+            "artifacts -- e.g. --artifacts-dir pd_model/artifacts/ but the "
+            "C3 artifact sits in capacity_artifacts/. Never affects Stage 3 "
+            "PD inference, which always reads --artifacts-dir."
+        ),
+    )
+    p.add_argument(
         "--stage-4c-logging-enabled",
         action="store_true",
         help=(
@@ -850,6 +881,7 @@ def main(argv=None):
         allow_unverified_artifacts=args.allow_unverified_artifacts,
         scorecard_path=args.scorecard_path,
         allow_provisional_scorecard=args.allow_provisional_scorecard,
+        shadow_artifacts_dir=args.shadow_artifacts_dir,
         stage_4c_logging_enabled=args.stage_4c_logging_enabled,
         stage_4c_output_dir=args.stage_4c_output_dir,
         stage_4c_capacity_weights_file=args.stage_4c_capacity_weights_file,

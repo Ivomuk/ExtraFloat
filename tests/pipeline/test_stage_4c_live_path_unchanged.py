@@ -302,6 +302,32 @@ def test_stage_4c_cli_flags_default_to_disabled_and_unset():
     assert args.stage_4c_logging_enabled is False
     assert args.stage_4c_output_dir is None
     assert args.stage_4c_capacity_weights_file is None
+    assert args.shadow_artifacts_dir is None
+
+
+def test_shadow_artifacts_dir_cli_flag_parses_and_defaults_to_none():
+    """--shadow-artifacts-dir (the fix for the C3 shadow artifact living in
+    a directory separate from --artifacts-dir, e.g. capacity_artifacts/ vs.
+    pd_model/artifacts/) parses correctly when given, and defaults to None
+    (resolved to --artifacts-dir downstream) when omitted."""
+    from run_credit_risk_pipeline import _parse_args
+
+    args = _parse_args([
+        "--transaction-file", "txn.csv",
+        "--loan-file", "loan.csv",
+        "--borrower-file", "bor.csv",
+        "--artifacts-dir", "pd_model/artifacts/",
+        "--shadow-artifacts-dir", "capacity_artifacts/",
+    ])
+    assert args.shadow_artifacts_dir == "capacity_artifacts/"
+
+    args_default = _parse_args([
+        "--transaction-file", "txn.csv",
+        "--loan-file", "loan.csv",
+        "--borrower-file", "bor.csv",
+        "--artifacts-dir", "pd_model/artifacts/",
+    ])
+    assert args_default.shadow_artifacts_dir is None
 
 
 def test_stage_4c_main_cli_invocation_writes_decision_log_end_to_end(tmp_path):

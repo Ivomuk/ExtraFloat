@@ -15,15 +15,15 @@ rem   - capacity_artifacts\capacity_score_weights.json -> version
 rem     "capacity_weights_v1", recommended_weights 0.5/0.5 -- confirmed to
 rem     match derive_capacity_score_weights.py's real output schema exactly.
 rem
-rem STILL TO CONFIRM BEFORE RUNNING: the C3 shadow multiplier also needs
-rem the MODEL file (pd_isotonic_calibrated_risk.joblib) sitting in the
-rem SAME directory as its metadata, inside --artifacts-dir (pd_model/
-rem artifacts/ -- compute_shadow_risk_multiplier reads shadow_artifacts_
-rem dir=artifacts_dir, the SAME path the PD model artifacts live in). If
-rem that .joblib file is not actually there, shadow_multiplier_*/
-rem l_full_*/disagreement_* will come back NULL for every row -- exactly
-rem as in the artifact-less sandbox demo -- and that is the first thing
-rem to check if it happens here, per the acceptance criteria already agreed.
+rem The C3 shadow multiplier's artifact (pd_isotonic_calibrated_risk.joblib
+rem + its metadata) lives in capacity_artifacts\, NOT in --artifacts-dir
+rem (pd_model/artifacts/ -- the PD model's own required files). These used
+rem to be hardwired to the same directory in run_credit_risk_pipeline.py,
+rem which would have made the C3 lookup fail (shadow_multiplier_*/l_full_*/
+rem disagreement_* NULL for every row) purely because of that coupling, not
+rem because the artifact doesn't exist. Fixed by the new, independent
+rem --shadow-artifacts-dir flag below, which this script now points at
+rem capacity_artifacts\ directly.
 rem
 rem --stage-4c-c3-policy-version is left at "c3_v1" (the SHADOW_POLICY_
 rem VERSION constant in extrafloat_shadow_risk_multiplier.py) since the
@@ -125,6 +125,7 @@ python run_credit_risk_pipeline.py ^
     --loan-history-file data\loan_history_snapshot_20260817_retail_filtered.csv ^
     --snapshot-date 20260817 ^
     --artifacts-dir pd_model/artifacts/ ^
+    --shadow-artifacts-dir capacity_artifacts/ ^
     --scorecard-path scorecards/capacity_scorecard_v1.json ^
     --allow-provisional-scorecard ^
     --keep-intermediate ^

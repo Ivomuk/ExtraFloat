@@ -1252,7 +1252,9 @@ def test_shadow_columns_present_and_nan_when_artifact_missing(tmp_path):
 def test_pipeline_threads_artifacts_dir_to_shadow_call(tmp_path):
     """run_credit_risk_pipeline() passes its own artifacts_dir straight
     through to compute_shadow_risk_multiplier() -- spied via wraps so the
-    real computation still runs, only the call arguments are inspected."""
+    real computation still runs, only the call arguments are inspected --
+    when shadow_artifacts_dir is NOT separately specified (the previous,
+    only behaviour, now the default)."""
     from extrafloat.engine import run_extrafloat_limit_engine as rele_module
     from run_credit_risk_pipeline import run_credit_risk_pipeline
 
@@ -1282,6 +1284,108 @@ def test_pipeline_threads_artifacts_dir_to_shadow_call(tmp_path):
             loan_file="dummy.csv",
             borrower_file="dummy.csv",
             artifacts_dir=str(tmp_path),
+        )
+
+    spy.assert_called_once()
+    _, kwargs = spy.call_args
+    assert str(kwargs["artifacts_dir"]) == str(tmp_path)
+
+
+def test_pipeline_threads_explicit_shadow_artifacts_dir_when_given(tmp_path):
+    """When shadow_artifacts_dir is explicitly given and differs from
+    artifacts_dir, the shadow multiplier is sourced from shadow_artifacts_dir,
+    not artifacts_dir -- the fix for the real architectural gap where a C3
+    shadow artifact lives in a directory separate from the PD model's own
+    required artifacts (e.g. capacity_artifacts/ vs. pd_model/artifacts/)."""
+    from extrafloat.engine import run_extrafloat_limit_engine as rele_module
+    from run_credit_risk_pipeline import run_credit_risk_pipeline
+
+    pd_artifacts_dir = tmp_path / "pd_model_artifacts"
+    pd_artifacts_dir.mkdir()
+    shadow_dir = tmp_path / "capacity_artifacts"
+    shadow_dir.mkdir()
+    # The real shadow artifact lives ONLY in shadow_dir -- pd_artifacts_dir
+    # (the main --artifacts-dir) deliberately has no shadow joblib/metadata
+    # pair, proving the engine looked in the right place rather than
+    # falling back to artifacts_dir.
+    _write_fitted_shadow_artifact(shadow_dir)
+
+    n = 3
+    msisdn_list = [f"256700{i:06d}" for i in range(n)]
+    df_features = _minimal_features_df(n=n)
+    pd_scored = _make_pd_scored(msisdn_list)
+
+    with (
+        patch("run_credit_risk_pipeline._check_artifacts"),
+        patch(
+            "run_credit_risk_pipeline.pd.read_csv", return_value=pd.DataFrame({"agent_msisdn": msisdn_list})
+        ),
+        patch("run_credit_risk_pipeline.load_transaction_capacity_features", return_value=MagicMock()),
+        patch("run_credit_risk_pipeline.load_loan_summary_recent_features", return_value=MagicMock()),
+        patch("run_credit_risk_pipeline.load_borrower_limit_features", return_value=MagicMock()),
+        patch("run_credit_risk_pipeline.run_inference_pipeline", return_value=pd_scored),
+        patch("run_credit_risk_pipeline.build_extrafloat_limit_engine_features", return_value=df_features),
+        patch.object(
+            rele_module, "compute_shadow_risk_multiplier", wraps=rele_module.compute_shadow_risk_multiplier
+        ) as spy,
+    ):
+        result = run_credit_risk_pipeline(
+            transaction_file="dummy.csv",
+            loan_file="dummy.csv",
+            borrower_file="dummy.csv",
+            artifacts_dir=str(pd_artifacts_dir),
+            shadow_artifacts_dir=str(shadow_dir),
+        )
+
+    spy.assert_called_once()
+    _, kwargs = spy.call_args
+    assert str(kwargs["artifacts_dir"]) == str(shadow_dir)
+    # Proves the lookup actually succeeded against shadow_dir, not just that
+    # the right path was passed -- status would be skipped_missing_artifact
+    # if it had (wrongly) fallen back to pd_artifacts_dir.
+    assert (result["shadow_status"] == "ok").all()
+    assert result["shadow_calibrated_risk"].notna().all()
+    # Live decision is unaffected either way.
+    assert result["assigned_limit"].notna().all()
+
+
+def test_pipeline_shadow_artifacts_dir_defaults_to_artifacts_dir_when_omitted(tmp_path):
+    """Regression guard for the fix itself: when shadow_artifacts_dir is
+    omitted (the default, None), the shadow multiplier is still sourced
+    from artifacts_dir -- confirms no caller is broken by the new parameter
+    existing. Deliberately mirrors
+    test_pipeline_threads_artifacts_dir_to_shadow_call but asserts via the
+    resolved kwarg name to make the default-resolution explicit."""
+    from extrafloat.engine import run_extrafloat_limit_engine as rele_module
+    from run_credit_risk_pipeline import run_credit_risk_pipeline
+
+    _write_fitted_shadow_artifact(tmp_path)
+
+    n = 3
+    msisdn_list = [f"256700{i:06d}" for i in range(n)]
+    df_features = _minimal_features_df(n=n)
+    pd_scored = _make_pd_scored(msisdn_list)
+
+    with (
+        patch("run_credit_risk_pipeline._check_artifacts"),
+        patch(
+            "run_credit_risk_pipeline.pd.read_csv", return_value=pd.DataFrame({"agent_msisdn": msisdn_list})
+        ),
+        patch("run_credit_risk_pipeline.load_transaction_capacity_features", return_value=MagicMock()),
+        patch("run_credit_risk_pipeline.load_loan_summary_recent_features", return_value=MagicMock()),
+        patch("run_credit_risk_pipeline.load_borrower_limit_features", return_value=MagicMock()),
+        patch("run_credit_risk_pipeline.run_inference_pipeline", return_value=pd_scored),
+        patch("run_credit_risk_pipeline.build_extrafloat_limit_engine_features", return_value=df_features),
+        patch.object(
+            rele_module, "compute_shadow_risk_multiplier", wraps=rele_module.compute_shadow_risk_multiplier
+        ) as spy,
+    ):
+        run_credit_risk_pipeline(
+            transaction_file="dummy.csv",
+            loan_file="dummy.csv",
+            borrower_file="dummy.csv",
+            artifacts_dir=str(tmp_path),
+            shadow_artifacts_dir=None,
         )
 
     spy.assert_called_once()
