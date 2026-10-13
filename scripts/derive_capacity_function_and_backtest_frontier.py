@@ -90,6 +90,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from extrafloat.capacity.capacity_function import compute_capacity_ugx, load_capacity_weights
+
 EXPOSURE_TIERS_UGX = [50_000, 100_000, 250_000, 350_000, 500_000, 750_000, 1_000_000]
 N_DECILES_DEFAULT = 10
 DEFAULT_TOLERANCES_PP = [2.0, 3.0, 4.0, 5.0]
@@ -146,27 +148,15 @@ def assign_bands(df: pd.DataFrame, fund_col: str, n_bands: int = N_DECILES_DEFAU
 
 
 def load_weights(weights_file: Path | None, fundamentals: list[str]) -> dict:
-    """Reads derive_capacity_score_weights.py's recommended_weights if
-    given, else falls back to DEFAULT_WEIGHTS with a printed warning.
-    Validates sum-to-1, renormalizes defensively with a loud warning if
-    not -- never silently wrong."""
-    if weights_file is None:
-        print(f"WARNING: no --weights-file given -- using DEFAULT_WEIGHTS {DEFAULT_WEIGHTS}. "
-              f"Run derive_capacity_score_weights.py first to produce a governed artifact.")
-        weights = dict(DEFAULT_WEIGHTS)
-    else:
-        import json
-        meta = json.loads(Path(weights_file).read_text())
-        weights = dict(meta["recommended_weights"])
-        missing = [c for c in fundamentals if c not in weights]
-        if missing:
-            sys.exit(f"ERROR: --weights-file has no weight for {missing}.")
-        weights = {c: weights[c] for c in fundamentals}
-
-    total = sum(weights.values())
-    if abs(total - 1.0) > 1e-9:
-        print(f"WARNING: weights sum to {total}, not 1.0 -- renormalizing.")
-        weights = {c: w / total for c, w in weights.items()}
+    """Thin CLI wrapper around the promoted, canonical
+    extrafloat.capacity.capacity_function.load_capacity_weights --
+    preserves this script's existing sys.exit-on-error CLI behavior
+    exactly (the promoted library function raises ValueError instead,
+    since sys.exit is not appropriate inside a reusable library)."""
+    try:
+        weights, _version = load_capacity_weights(weights_file, fundamentals)
+    except ValueError as exc:
+        sys.exit(f"ERROR: {exc}")
     return weights
 
 
@@ -181,20 +171,6 @@ def compute_diagnostic_score(df: pd.DataFrame, cols: list[str], weights: dict) -
     z = (log1p_df - log1p_df.mean()) / log1p_df.std().replace(0, np.nan)
     score.loc[valid_mask] = sum(weights[c] * z[c].fillna(0) for c in cols)
     return score
-
-
-def compute_capacity_ugx(df: pd.DataFrame, cols: list[str], weights: dict, k: float) -> pd.Series:
-    """Capacity(F) = k * (exp(sum_i w_i*log1p(x_i)) - 1). Implemented in
-    log-space for numerical stability at real UGX scale rather than
-    chaining literal (1+x)**w products."""
-    valid_mask = pd.Series(True, index=df.index)
-    for c in cols:
-        valid_mask &= df[c].notna() & (df[c] >= 0)
-    out = pd.Series(np.nan, index=df.index)
-    log1p_df = np.log1p(df.loc[valid_mask, cols])
-    s_log = sum(weights[c] * log1p_df[c] for c in cols)
-    out.loc[valid_mask] = k * (np.exp(s_log) - 1.0)
-    return out
 
 
 def monotonicity_sweep_check(cols: list[str], weights: dict, k: float, grid: np.ndarray) -> pd.DataFrame:

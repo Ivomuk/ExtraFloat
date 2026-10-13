@@ -80,15 +80,23 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from extrafloat.capacity.capacity_function import load_capacity_weights
 from extrafloat.engine.extrafloat_limit_engine_features import (
     build_extrafloat_limit_engine_features,
 )
-from extrafloat.engine.run_extrafloat_limit_engine import run_extrafloat_limit_engine
+from extrafloat.engine.run_extrafloat_limit_engine import (
+    FINAL_OUTPUT_COLUMNS,
+    run_extrafloat_limit_engine,
+)
 from extrafloat.io.extrafloat_data_loaders import (
     load_borrower_limit_features,
     load_loan_history_snapshot_features,
     load_loan_summary_recent_features,
     load_transaction_capacity_features,
+)
+from extrafloat.shadow_logging.stage_4c_decision_logger import (
+    FUNDAMENTALS_FOR_SCORE,
+    run_decision_log_stage,
 )
 from pd_model.exceptions import ArtifactVerificationError, DataAlignmentError, MissingArtifactError
 from pd_model.logging_config import install_pii_filter
@@ -228,6 +236,11 @@ def run_credit_risk_pipeline(
     allow_unverified_artifacts: bool = False,
     scorecard_path: str | Path | None = None,
     allow_provisional_scorecard: bool = False,
+    stage_4c_logging_enabled: bool = False,
+    stage_4c_sink: object | None = None,
+    stage_4c_capacity_weights_file: str | Path | None = None,
+    stage_4c_artifact_versions: dict | None = None,
+    stage_4c_shadow_population_label: str = "FULL_EVALUATION_POPULATION",
 ) -> pd.DataFrame:
     """
     Run the full PD model -> credit limit engine pipeline.
@@ -533,13 +546,26 @@ def run_credit_risk_pipeline(
     # -- Stage 6: Run credit limit engine -----------------------------------
     logger.info("Stage 6: running credit limit engine")
     run_id = _dt.datetime.utcnow().isoformat() + "Z"
+    # Always request keep_intermediate=True from THIS internal call,
+    # independent of the caller's own keep_intermediate argument above --
+    # the Stage 9 Decision Log block (added below, after Stage 8) needs
+    # capacity_cap/policy_multiplier/combined_cap/thin_file_flag, which
+    # FINAL_OUTPUT_COLUMNS drops whenever keep_intermediate=False (see
+    # docs/stage_4c_logger_implementation_plan.md Section 4). The
+    # caller's own keep_intermediate request is honored afterward, right
+    # before this function returns, by dropping exactly the columns this
+    # trimming would otherwise have dropped -- never by re-trimming to a
+    # fixed keep-list, which would also strip the Stage 7/7b/8 columns
+    # this function adds AFTER the engine call (capacity_tier,
+    # agent_category, score_source, scored_at, ...).
     result_df = run_extrafloat_limit_engine(
         features_df,
         config=engine_config,
-        keep_intermediate=keep_intermediate,
+        keep_intermediate=True,
         shadow_artifacts_dir=artifacts_dir,
         run_id=run_id,
     )
+    _engine_intermediate_only_cols = [c for c in result_df.columns if c not in FINAL_OUTPUT_COLUMNS]
     logger.info(
         "Engine complete: %d agents | mean_limit=%.0f | risk_tier distribution:\n%s",
         len(result_df),
@@ -593,6 +619,44 @@ def run_credit_risk_pipeline(
     # propagate as exceptions rather than silent NaN.
     result_df["score_source"] = np.where(result_df["cal_pd"].notna(), "pd_model", "7_signal_fallback")
     result_df["scored_at"] = run_id
+
+    # -- Stage 9: Stage 4C Decision Log (shadow, read-only, additive) -------
+    # Off by default. Gated behind an explicit feature flag per
+    # docs/stage_4c_logger_implementation_plan.md Section 3.4/8 item 4:
+    # "sink unconfirmed" and "feature live" can never both be true --
+    # enabling this requires BOTH stage_4c_logging_enabled=True AND a real
+    # stage_4c_sink. Never affects result_df or this function's return
+    # value either way; a failure here degrades to a FAILED run manifest,
+    # never an exception propagated out of this function.
+    if stage_4c_logging_enabled:
+        logger.info("Stage 9: Stage 4C Decision Log (shadow logging enabled)")
+        capacity_weights, capacity_weights_version = load_capacity_weights(
+            stage_4c_capacity_weights_file, FUNDAMENTALS_FOR_SCORE
+        )
+        manifest = run_decision_log_stage(
+            df_agent_raw=df_agent,
+            result_df=result_df,
+            run_id=run_id,
+            scoring_run_timestamp=run_id,
+            capacity_weights=capacity_weights,
+            capacity_weights_version=capacity_weights_version,
+            artifact_versions=stage_4c_artifact_versions or {},
+            sink=stage_4c_sink,
+            shadow_population_label=stage_4c_shadow_population_label,
+        )
+        logger.info("Stage 9: Stage 4C Decision Log manifest: %s", manifest)
+
+    # -- Restore this call's own output contract -----------------------------
+    # The Stage 6 call above always requested keep_intermediate=True
+    # internally (for Stage 9's benefit); drop exactly the engine-
+    # intermediate columns that keep_intermediate=False would have
+    # dropped, now that Stage 9 has already captured what it needed --
+    # never re-trim to a fixed keep-list, which would also strip the
+    # Stage 7/7b/8 columns added above (capacity_tier, agent_category,
+    # score_source, scored_at, ...).
+    if not keep_intermediate:
+        drop_cols = [c for c in _engine_intermediate_only_cols if c in result_df.columns]
+        result_df = result_df.drop(columns=drop_cols)
 
     return result_df
 
