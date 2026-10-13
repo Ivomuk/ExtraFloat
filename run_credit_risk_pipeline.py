@@ -774,6 +774,63 @@ def _parse_args(argv=None):
             "the full pipeline against a not-yet-finalized scorecard."
         ),
     )
+    p.add_argument(
+        "--stage-4c-logging-enabled",
+        action="store_true",
+        help=(
+            "Enable Stage 4C shadow Decision Log logging. Off by default. Never "
+            "affects assigned_limit/risk_tier/final_decision_reason or any other "
+            "live output column either way -- purely additive, read-only. Requires "
+            "--stage-4c-output-dir (or the run is treated as not-enabled and skipped "
+            "with a loud warning, per the deployment-readiness fail-fast design)."
+        ),
+    )
+    p.add_argument(
+        "--stage-4c-output-dir",
+        default=None,
+        help=(
+            "Directory for Stage 4C's CSV sink (one stage_4c_decision_log_<run_id>.csv "
+            "+ one stage_4c_run_manifest_<run_id>.json per run). Should be a dedicated, "
+            "persistent, writable path -- e.g. a separate shadow/test subdirectory, not "
+            "an ephemeral or working-directory-relative default."
+        ),
+    )
+    p.add_argument(
+        "--stage-4c-capacity-weights-file",
+        default=None,
+        help=(
+            "Path to the frozen capacity_score_weights.json artifact (produced by "
+            "scripts/derive_capacity_score_weights.py). Omit to fall back to "
+            "DEFAULT_WEIGHTS (0.5/0.5) with a printed warning -- fine for a first "
+            "controlled shadow run, but the governed artifact should be used once "
+            "available so capacity_weights_artifact_version in the Decision Log is "
+            "a real, traceable version rather than 'default_unversioned'."
+        ),
+    )
+    p.add_argument(
+        "--stage-4c-pd-calibration-artifact-version",
+        default=None,
+        help="Logged as pd_calibration_artifact_version (nullable; NULL is correct for thin-file rows).",
+    )
+    p.add_argument(
+        "--stage-4c-c3-shadow-artifact-version",
+        default=None,
+        help=(
+            "Logged as c3_shadow_artifact_version when the real C3 shadow artifact "
+            "is present at --artifacts-dir (nullable; NULL iff shadow_multiplier_* "
+            "could not be computed, e.g. the artifact is missing)."
+        ),
+    )
+    p.add_argument(
+        "--stage-4c-c3-policy-version",
+        default=None,
+        help="Logged as c3_policy_version (nullable, same gating as --stage-4c-c3-shadow-artifact-version).",
+    )
+    p.add_argument(
+        "--stage-4c-fundamentals-source-version",
+        default=None,
+        help="Logged as fundamentals_source_version -- the transaction-mart/ETL export version, if known.",
+    )
     return p.parse_args(argv)
 
 
@@ -793,6 +850,16 @@ def main(argv=None):
         allow_unverified_artifacts=args.allow_unverified_artifacts,
         scorecard_path=args.scorecard_path,
         allow_provisional_scorecard=args.allow_provisional_scorecard,
+        stage_4c_logging_enabled=args.stage_4c_logging_enabled,
+        stage_4c_output_dir=args.stage_4c_output_dir,
+        stage_4c_capacity_weights_file=args.stage_4c_capacity_weights_file,
+        stage_4c_artifact_versions={
+            "champion_model_version": args.champion,
+            "pd_calibration_artifact_version": args.stage_4c_pd_calibration_artifact_version,
+            "c3_shadow_artifact_version": args.stage_4c_c3_shadow_artifact_version,
+            "c3_policy_version": args.stage_4c_c3_policy_version,
+            "fundamentals_source_version": args.stage_4c_fundamentals_source_version,
+        },
     )
 
     if args.output:

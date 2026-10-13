@@ -251,3 +251,112 @@ def test_stage_4c_misconfigured_fails_fast_without_attempting_construction(tmp_p
         "expected a loud warning when Stage 4C is enabled but unconfigured"
     )
     pdt.assert_frame_equal(result_disabled, result_misconfigured, check_exact=True)
+
+
+# -----------------------------------------------------------------------------
+# CLI surface: Stage 4C's parameters were originally only exposed as Python
+# function arguments, never as CLI flags -- meaning there was no way to
+# actually invoke Stage 4C logging the way a real scoring cycle runs (via
+# the command line / Makefile target). Added as part of preparing for a
+# controlled real-data shadow run.
+# -----------------------------------------------------------------------------
+
+
+def test_stage_4c_cli_flags_parse_correctly():
+    from run_credit_risk_pipeline import _parse_args
+
+    args = _parse_args([
+        "--transaction-file", "txn.csv",
+        "--loan-file", "loan.csv",
+        "--borrower-file", "bor.csv",
+        "--artifacts-dir", "artifacts/",
+        "--stage-4c-logging-enabled",
+        "--stage-4c-output-dir", "/some/shadow/dir",
+        "--stage-4c-capacity-weights-file", "capacity_artifacts/capacity_score_weights.json",
+        "--stage-4c-pd-calibration-artifact-version", "cal_v3",
+        "--stage-4c-c3-shadow-artifact-version", "c3_v2",
+        "--stage-4c-c3-policy-version", "c3_policy_v2",
+        "--stage-4c-fundamentals-source-version", "mart_v2026_09",
+    ])
+    assert args.stage_4c_logging_enabled is True
+    assert args.stage_4c_output_dir == "/some/shadow/dir"
+    assert args.stage_4c_capacity_weights_file == "capacity_artifacts/capacity_score_weights.json"
+    assert args.stage_4c_pd_calibration_artifact_version == "cal_v3"
+    assert args.stage_4c_c3_shadow_artifact_version == "c3_v2"
+    assert args.stage_4c_c3_policy_version == "c3_policy_v2"
+    assert args.stage_4c_fundamentals_source_version == "mart_v2026_09"
+
+
+def test_stage_4c_cli_flags_default_to_disabled_and_unset():
+    """Without any --stage-4c-* flag, Stage 4C must default to fully off
+    -- same off-by-default guarantee the feature flag design requires,
+    now confirmed at the CLI parsing layer too."""
+    from run_credit_risk_pipeline import _parse_args
+
+    args = _parse_args([
+        "--transaction-file", "txn.csv",
+        "--loan-file", "loan.csv",
+        "--borrower-file", "bor.csv",
+        "--artifacts-dir", "artifacts/",
+    ])
+    assert args.stage_4c_logging_enabled is False
+    assert args.stage_4c_output_dir is None
+    assert args.stage_4c_capacity_weights_file is None
+
+
+def test_stage_4c_main_cli_invocation_writes_decision_log_end_to_end(tmp_path):
+    """The actual command-line path a real scoring cycle would use:
+    main(argv=[...]) with --stage-4c-logging-enabled and
+    --stage-4c-output-dir, with no stage_4c_sink Python kwarg involved at
+    all (the CLI only ever auto-constructs CsvDecisionLogSink from the
+    output dir). Confirms a real file lands on disk from the CLI entry
+    point, and that champion_model_version defaults to --champion when
+    no explicit --stage-4c-champion-model-version-style flag exists."""
+    from run_credit_risk_pipeline import main
+
+    n = 4
+    msisdn_list = [f"256700{i:06d}" for i in range(n)]
+    df_features = _minimal_features_df(n=n)
+    pd_scored = _make_pd_scored_with_raw_score(msisdn_list)
+    df_raw = _df_raw_with_capacity_inputs(msisdn_list)
+    stage_4c_dir = tmp_path / "shadow_output"
+
+    with (
+        patch("run_credit_risk_pipeline._check_artifacts"),
+        patch("run_credit_risk_pipeline.pd.read_csv", return_value=df_raw),
+        patch("run_credit_risk_pipeline.load_transaction_capacity_features") as mock_txn,
+        patch("run_credit_risk_pipeline.load_loan_summary_recent_features") as mock_loan,
+        patch("run_credit_risk_pipeline.load_borrower_limit_features") as mock_bor,
+        patch("run_credit_risk_pipeline.run_inference_pipeline", return_value=pd_scored),
+        patch("run_credit_risk_pipeline.build_extrafloat_limit_engine_features", return_value=df_features),
+        patch("run_credit_risk_pipeline._dt", _FakeDtNamespace),
+    ):
+        mock_txn.return_value = MagicMock()
+        mock_loan.return_value = MagicMock()
+        mock_bor.return_value = MagicMock()
+
+        exit_code = main(argv=[
+            "--transaction-file", "dummy_txn.csv",
+            "--loan-file", "dummy_loan.csv",
+            "--borrower-file", "dummy_bor.csv",
+            "--artifacts-dir", str(tmp_path),
+            "--stage-4c-logging-enabled",
+            "--stage-4c-output-dir", str(stage_4c_dir),
+        ])
+
+    assert exit_code == 0
+    decision_log_files = list(stage_4c_dir.glob("stage_4c_decision_log_*.csv"))
+    manifest_files = list(stage_4c_dir.glob("stage_4c_run_manifest_*.json"))
+    assert len(decision_log_files) == 1, "expected the CLI invocation to write exactly one Decision Log file"
+    assert len(manifest_files) == 1, "expected the CLI invocation to write exactly one run manifest"
+
+    import json
+    manifest = json.loads(manifest_files[0].read_text())
+    assert manifest["shadow_logging_status"] == "SUCCESS"
+    assert manifest["logged_agent_count"] == n
+
+    decision_log = pd.read_csv(decision_log_files[0])
+    assert len(decision_log) == n
+    # champion_model_version defaults from --champion (default "xgb") when
+    # no separate override flag is given.
+    assert (decision_log["champion_model_version"] == "xgb").all()
