@@ -16,14 +16,20 @@ rem     "capacity_weights_v1", recommended_weights 0.5/0.5 -- confirmed to
 rem     match derive_capacity_score_weights.py's real output schema exactly.
 rem
 rem The C3 shadow multiplier's artifact (pd_isotonic_calibrated_risk.joblib
-rem + its metadata) lives in capacity_artifacts\, NOT in --artifacts-dir
-rem (pd_model/artifacts/ -- the PD model's own required files). These used
-rem to be hardwired to the same directory in run_credit_risk_pipeline.py,
-rem which would have made the C3 lookup fail (shadow_multiplier_*/l_full_*/
-rem disagreement_* NULL for every row) purely because of that coupling, not
-rem because the artifact doesn't exist. Fixed by the new, independent
-rem --shadow-artifacts-dir flag below, which this script now points at
-rem capacity_artifacts\ directly.
+rem + its metadata) was previously hardwired to the same directory as
+rem --artifacts-dir in run_credit_risk_pipeline.py -- the new, independent
+rem --shadow-artifacts-dir flag below removes that coupling. CONFIRMED
+rem against the real files on the user's machine (a dir listing of both
+rem pd_model\artifacts\ and capacity_artifacts\): the real
+rem pd_isotonic_calibrated_risk.joblib + its metadata actually live in
+rem pd_model\artifacts\ (the SAME directory as --artifacts-dir) --
+rem capacity_artifacts\ holds only capacity_score_weights.json. An
+rem earlier confirmation that the C3 artifact lived in capacity_
+rem artifacts\ was wrong (the same mislabeling mix-up as the pasted-JSON
+rem confusion earlier in this workstream). --shadow-artifacts-dir is set
+rem to pd_model/artifacts/ below to match reality; if the artifact is
+rem later physically moved to capacity_artifacts\, update this flag to
+rem match.
 rem
 rem --stage-4c-c3-policy-version is left at "c3_v1" (the SHADOW_POLICY_
 rem VERSION constant in extrafloat_shadow_risk_multiplier.py) since the
@@ -125,7 +131,7 @@ python run_credit_risk_pipeline.py ^
     --loan-history-file data\loan_history_snapshot_20260817_retail_filtered.csv ^
     --snapshot-date 20260817 ^
     --artifacts-dir pd_model/artifacts/ ^
-    --shadow-artifacts-dir capacity_artifacts/ ^
+    --shadow-artifacts-dir pd_model/artifacts/ ^
     --scorecard-path scorecards/capacity_scorecard_v1.json ^
     --allow-provisional-scorecard ^
     --keep-intermediate ^
