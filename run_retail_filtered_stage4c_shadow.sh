@@ -4,21 +4,34 @@
 # version and the full explanation of what Stage 4C shadow logging adds
 # over run_retail_filtered.sh.
 #
-# BEFORE RUNNING: confirm your real C3 shadow calibration artifact
-# (pd_isotonic_calibrated_risk.joblib + its metadata JSON) is actually
-# present inside --artifacts-dir (pd_model/artifacts/ -- the SAME
-# directory compute_shadow_risk_multiplier reads via shadow_artifacts_
-# dir=artifacts_dir). If it is not there, shadow_multiplier_*/l_full_*/
-# disagreement_* will come back NULL for every row, same as the
-# artifact-less sandbox demo -- check this first if it happens here.
+# Real artifact versions confirmed directly from the user's own files:
+#   - pd_isotonic_calibrated_risk_metadata.json -> version "iso_v1_2026_10_06"
+#     (C3 shadow calibration artifact -- used below for
+#     --stage-4c-c3-shadow-artifact-version)
+#   - capacity_artifacts/capacity_score_weights.json -> version
+#     "capacity_weights_v1", recommended_weights 0.5/0.5 -- confirmed to
+#     match derive_capacity_score_weights.py's real output schema exactly.
 #
-# Fill in --stage-4c-c3-shadow-artifact-version from your real artifact
-# metadata's own "version" field; --stage-4c-c3-policy-version from
-# whatever your own C3 policy-version convention is (e.g. "c3_v1" if you
-# have not introduced a separate scheme). Remove --stage-4c-capacity-
-# weights-file entirely if you have not yet run scripts/derive_capacity_
-# score_weights.py -- the run falls back to the documented 0.5/0.5
-# default weights with a printed warning, which is fine for this first run.
+# STILL TO CONFIRM BEFORE RUNNING: the C3 shadow multiplier also needs
+# the MODEL file (pd_isotonic_calibrated_risk.joblib) sitting in the
+# SAME directory as its metadata, inside --artifacts-dir (pd_model/
+# artifacts/ -- compute_shadow_risk_multiplier reads shadow_artifacts_
+# dir=artifacts_dir, the SAME path the PD model artifacts live in). If
+# that .joblib file is not actually there, shadow_multiplier_*/
+# l_full_*/disagreement_* will come back NULL for every row -- exactly
+# as in the artifact-less sandbox demo -- and that is the first thing
+# to check if it happens here, per the acceptance criteria already agreed.
+#
+# --stage-4c-c3-policy-version is left at "c3_v1" (the SHADOW_POLICY_
+# VERSION constant in extrafloat_shadow_risk_multiplier.py) since the
+# calibration metadata above only tracks the calibration version, not a
+# separate policy version -- change it if a different convention is
+# actually in use.
+#
+# --stage-4c-capacity-weights-file below assumes capacity_artifacts/
+# capacity_score_weights.json sits at that path relative to wherever
+# this script is run from (same relative-path convention as every other
+# --*-file argument in this script) -- adjust if the real path differs.
 set -u
 
 echo "=== Step 1/6: Auditing retail filter against activity signal ==="
@@ -116,7 +129,7 @@ python3 run_credit_risk_pipeline.py \
     --stage-4c-logging-enabled \
     --stage-4c-output-dir output/stage_4c_shadow \
     --stage-4c-capacity-weights-file capacity_artifacts/capacity_score_weights.json \
-    --stage-4c-c3-shadow-artifact-version FILL_IN_FROM_YOUR_METADATA_JSON \
+    --stage-4c-c3-shadow-artifact-version iso_v1_2026_10_06 \
     --stage-4c-c3-policy-version c3_v1 \
     --stage-4c-fundamentals-source-version mfs_daily_agent_mart_20260731 > engine_log_stage4c_shadow.txt 2>&1
 

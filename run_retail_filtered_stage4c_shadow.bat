@@ -7,27 +7,35 @@ rem the controlled real-data Stage 4C shadow run -- it makes EXACTLY the
 rem same live lending decisions as run_retail_filtered.bat; Stage 4C only
 rem observes and logs, never feeds back into assigned_limit.
 rem
-rem BEFORE RUNNING: confirm your real C3 shadow calibration artifact
-rem (pd_isotonic_calibrated_risk.joblib + its metadata JSON) is actually
-rem present inside --artifacts-dir (pd_model/artifacts/, same directory
-rem the PD model artifacts already live in -- compute_shadow_risk_
-rem multiplier reads shadow_artifacts_dir=artifacts_dir, the SAME path).
-rem If it is not there, shadow_multiplier_*/l_full_*/disagreement_* will
-rem come back NULL for every row -- exactly as in the artifact-less
-rem sandbox demo -- and that is the first thing to check if it happens
-rem here, per the acceptance criteria already agreed.
+rem Real artifact versions confirmed directly from the user's own files:
+rem   - pd_isotonic_calibrated_risk_metadata.json -> version "iso_v1_2026_10_06"
+rem     (C3 shadow calibration artifact -- used below for
+rem     --stage-4c-c3-shadow-artifact-version)
+rem   - capacity_artifacts\capacity_score_weights.json -> version
+rem     "capacity_weights_v1", recommended_weights 0.5/0.5 -- confirmed to
+rem     match derive_capacity_score_weights.py's real output schema exactly.
 rem
-rem Fill in the two --stage-4c-c3-*-version values below from your real
-rem artifact metadata (open pd_model/artifacts/pd_isotonic_calibrated_
-rem risk_metadata.json and use its own "version" field for
-rem --stage-4c-c3-shadow-artifact-version; use whatever your own c3
-rem policy-version convention is for --stage-4c-c3-policy-version, e.g.
-rem the SHADOW_POLICY_VERSION constant "c3_v1" if you have not
-rem introduced a separate policy-version scheme). --stage-4c-capacity-
-rem weights-file assumes you have already run scripts/derive_capacity_
-rem score_weights.py -- if that artifact does not exist yet, remove that
-rem line entirely and the run will fall back to the documented 0.5/0.5
-rem default weights with a printed warning (fine for this first run).
+rem STILL TO CONFIRM BEFORE RUNNING: the C3 shadow multiplier also needs
+rem the MODEL file (pd_isotonic_calibrated_risk.joblib) sitting in the
+rem SAME directory as its metadata, inside --artifacts-dir (pd_model/
+rem artifacts/ -- compute_shadow_risk_multiplier reads shadow_artifacts_
+rem dir=artifacts_dir, the SAME path the PD model artifacts live in). If
+rem that .joblib file is not actually there, shadow_multiplier_*/
+rem l_full_*/disagreement_* will come back NULL for every row -- exactly
+rem as in the artifact-less sandbox demo -- and that is the first thing
+rem to check if it happens here, per the acceptance criteria already agreed.
+rem
+rem --stage-4c-c3-policy-version is left at "c3_v1" (the SHADOW_POLICY_
+rem VERSION constant in extrafloat_shadow_risk_multiplier.py) since the
+rem calibration metadata above only tracks the calibration version, not
+rem a separate policy version -- change it if a different convention is
+rem actually in use.
+rem
+rem --stage-4c-capacity-weights-file below assumes capacity_artifacts\
+rem capacity_score_weights.json sits at that path relative to wherever
+rem this script is run from (same relative-path convention as every
+rem other --*-file argument in this script) -- adjust if the real path
+rem differs on this machine.
 
 echo === Step 1/6: Auditing retail filter against activity signal ===
 python scripts\audit_retail_filter_via_activity.py ^
@@ -124,7 +132,7 @@ python run_credit_risk_pipeline.py ^
     --stage-4c-logging-enabled ^
     --stage-4c-output-dir output\stage_4c_shadow ^
     --stage-4c-capacity-weights-file capacity_artifacts\capacity_score_weights.json ^
-    --stage-4c-c3-shadow-artifact-version FILL_IN_FROM_YOUR_METADATA_JSON ^
+    --stage-4c-c3-shadow-artifact-version iso_v1_2026_10_06 ^
     --stage-4c-c3-policy-version c3_v1 ^
     --stage-4c-fundamentals-source-version mfs_daily_agent_mart_20260731 > engine_log_stage4c_shadow.txt 2>&1
 
