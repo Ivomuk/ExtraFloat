@@ -231,6 +231,107 @@ def compute_r_capacity(df: pd.DataFrame) -> pd.Series:
     return pd.Series(np.where(lc.notna() & (lc != 0), cap / lc, np.nan), index=df.index)
 
 
+# Finer-grained R_capacity magnitude bands, per review -- the 85.18% BELOW
+# count from decomposition_crosstab() is a count statistic; it conflates
+# capacity at 0.95x current with capacity at 0.30x current. These bands
+# (and the percentile stats in summarize_r_capacity_distribution below)
+# are a descriptive diagnostic of the already-frozen k=0.05, never a new
+# threshold used to gate or reclassify anything.
+R_CAPACITY_SCALE_BAND_EDGES = [-np.inf, 0.25, 0.50, 0.75, 0.90, 1.10, 1.50, 2.00, np.inf]
+R_CAPACITY_SCALE_BAND_LABELS = [
+    "<0.25", "0.25-0.50", "0.50-0.75", "0.75-0.90 (moderately below)",
+    "0.90-1.10 (agreement)", "1.10-1.50 (moderately above)", "1.50-2.00 (materially above)", ">2.00",
+]
+R_CAPACITY_PERCENTILES = [0.10, 0.25, 0.50, 0.75, 0.90]
+
+
+def summarize_r_capacity_distribution(df: pd.DataFrame, population_label: str) -> pd.DataFrame:
+    """Magnitude distribution of R_capacity = Capacity(F)/l_current --
+    band counts (R_CAPACITY_SCALE_BAND_LABELS) plus median/p10/p25/p75/p90
+    -- restricted to capacity_estimable=True rows with a defined R_capacity
+    (l_current non-null/non-zero), with the excluded counts reported
+    alongside, never silently dropped from the denominator without being
+    shown (same discipline as summarize_r_band_distribution)."""
+    estimable = df[df["capacity_estimable"] == True].copy()  # noqa: E712
+    not_estimable_n = int((df["capacity_estimable"] == False).sum())  # noqa: E712
+    r_cap = compute_r_capacity(estimable)
+    valid = r_cap.dropna()
+    n = len(valid)
+    n_estimable_but_undefined = len(estimable) - n
+
+    band = pd.cut(valid, bins=R_CAPACITY_SCALE_BAND_EDGES, labels=R_CAPACITY_SCALE_BAND_LABELS, right=False)
+    counts = band.value_counts().reindex(R_CAPACITY_SCALE_BAND_LABELS, fill_value=0)
+    pct = (counts / n * 100).round(2) if n else counts.astype(float)
+
+    rows = [{"population": population_label, "metric": lbl, "n": int(counts[lbl]), "value": float(pct[lbl])}
+            for lbl in R_CAPACITY_SCALE_BAND_LABELS]
+    if n:
+        q = valid.quantile(R_CAPACITY_PERCENTILES)
+        for p in R_CAPACITY_PERCENTILES:
+            rows.append({"population": population_label, "metric": f"p{int(p * 100)}", "n": np.nan,
+                         "value": round(float(q.loc[p]), 4)})
+    else:
+        for p in R_CAPACITY_PERCENTILES:
+            rows.append({"population": population_label, "metric": f"p{int(p * 100)}", "n": np.nan, "value": np.nan})
+    rows.append({"population": population_label, "metric": "(capacity_estimable=False, excluded)",
+                 "n": not_estimable_n, "value": np.nan})
+    rows.append({"population": population_label, "metric": "(capacity_estimable=True but R_capacity undefined)",
+                 "n": n_estimable_but_undefined, "value": np.nan})
+    rows.append({"population": population_label, "metric": "n_valid", "n": n, "value": np.nan})
+    return pd.DataFrame(rows)
+
+
+def _qcut_safe(s: pd.Series, q: int = 10, prefix: str = "D") -> pd.Series:
+    """Restated (not imported) from this repo's established convention
+    (e.g. analyze_business_state_exposure_variation.py) -- degrades the
+    requested number of quantile bins downward if duplicate edges would
+    otherwise make pd.qcut raise, rather than failing the whole
+    diagnostic over a sparse/skewed tail."""
+    for n_bins in range(q, 1, -1):
+        try:
+            return pd.qcut(s, n_bins, labels=[f"{prefix}{i}" for i in range(1, n_bins + 1)], duplicates="drop")
+        except ValueError:
+            continue
+    return pd.Series([f"{prefix}1"] * len(s), index=s.index)
+
+
+def r_capacity_by_scale_decile(df: pd.DataFrame, scale_col: str, population_label: str) -> pd.DataFrame:
+    """Does R_capacity trend toward/above 1.0 as business scale (float or
+    commission) increases? Deciled independently per fundamental -- NEVER
+    combined/averaged into one score, per this repo's established
+    convention throughout the capacity workstream. One row per decile:
+    n, median/p25/p75 R_capacity, and the 3-band pct (below/agreement/
+    above 1.0 using the 0.90/1.10 agreement convention) -- a monotonic
+    trend here would directly explain a scale-driven BELOW result."""
+    estimable = df[df["capacity_estimable"] == True].copy()  # noqa: E712
+    r_cap = compute_r_capacity(estimable)
+    scale = pd.to_numeric(estimable[scale_col], errors="coerce")
+    valid = r_cap.notna() & scale.notna()
+    r_cap, scale = r_cap[valid], scale[valid]
+    if len(r_cap) == 0:
+        return pd.DataFrame()
+
+    decile = _qcut_safe(scale, 10, prefix="D")
+    rows = []
+    for d in sorted(decile.dropna().unique(), key=lambda x: int(x[1:])):
+        sub_r = r_cap[decile == d]
+        n = len(sub_r)
+        below = (sub_r < 0.90).mean() * 100 if n else np.nan
+        agreement = ((sub_r >= 0.90) & (sub_r < 1.10)).mean() * 100 if n else np.nan
+        above = (sub_r >= 1.10).mean() * 100 if n else np.nan
+        q = sub_r.quantile([0.25, 0.50, 0.75]) if n else pd.Series([np.nan, np.nan, np.nan], index=[0.25, 0.5, 0.75])
+        rows.append({
+            "population": population_label, "scale_fundamental": scale_col, "decile": d, "n": n,
+            "median_r_capacity": round(float(q.loc[0.50]), 4) if n else np.nan,
+            "p25_r_capacity": round(float(q.loc[0.25]), 4) if n else np.nan,
+            "p75_r_capacity": round(float(q.loc[0.75]), 4) if n else np.nan,
+            "pct_below_0.90": round(below, 2) if n else np.nan,
+            "pct_agreement_0.90_1.10": round(agreement, 2) if n else np.nan,
+            "pct_above_1.10": round(above, 2) if n else np.nan,
+        })
+    return pd.DataFrame(rows)
+
+
 def decomposition_crosstab(df: pd.DataFrame, population_label: str) -> pd.DataFrame:
     """Answers: is a population's BELOW-current result coming from
     Capacity(F) itself, or from the subsequent C3 risk adjustment? Cross-
@@ -344,6 +445,11 @@ def main(argv=None):
     p.add_argument("--engine-output-file", default=None,
                     help="Same shadow run's engine output CSV, for risk_tier (not a Decision Log "
                          "column). Required only when --severity-detail-band is given.")
+    p.add_argument("--r-capacity-scale-diagnostic", action="store_true",
+                    help="Print the R_capacity magnitude distribution (bands + percentiles) and its "
+                         "breakdown by float_activity_value_1m / commission decile, for Diamond A, the "
+                         "non-Diamond-A complement, and overall. Descriptive diagnostic of the already-"
+                         "frozen k=0.05 -- never a new threshold.")
     args = p.parse_args(argv)
 
     print("=" * 80)
@@ -441,6 +547,44 @@ def main(argv=None):
     print(pd.concat([decomp_diamond_a, decomp_non_diamond_a, decomp_overall], ignore_index=True)
           .to_string(index=False))
 
+    r_cap_dist = None
+    r_cap_by_float = None
+    r_cap_by_commission = None
+    if args.r_capacity_scale_diagnostic:
+        print("\n" + "=" * 80)
+        print("R_capacity MAGNITUDE DISTRIBUTION (does NOT collapse 0.95x and 0.30x into one")
+        print("'BELOW' count -- descriptive diagnostic of the already-frozen k=0.05, not a new")
+        print("threshold; the formula and k remain frozen regardless of this result)")
+        print("=" * 80)
+        r_cap_dist = pd.concat([
+            summarize_r_capacity_distribution(diamond_a_rows, "Diamond A"),
+            summarize_r_capacity_distribution(non_diamond_a_disbursed_rows, "Non-Diamond-A disbursed"),
+            summarize_r_capacity_distribution(overall_rows, "OVERALL"),
+        ], ignore_index=True)
+        print(r_cap_dist.to_string(index=False))
+
+        print("\n" + "=" * 80)
+        print("R_capacity BY float_activity_value_1m DECILE (does it trend toward/above 1.0 as")
+        print("business scale increases? deciled independently per fundamental, never averaged)")
+        print("=" * 80)
+        r_cap_by_float = pd.concat([
+            r_capacity_by_scale_decile(diamond_a_rows, "float_activity_value_1m", "Diamond A"),
+            r_capacity_by_scale_decile(non_diamond_a_disbursed_rows, "float_activity_value_1m",
+                                        "Non-Diamond-A disbursed"),
+            r_capacity_by_scale_decile(overall_rows, "float_activity_value_1m", "OVERALL"),
+        ], ignore_index=True)
+        print(r_cap_by_float.to_string(index=False))
+
+        print("\n" + "=" * 80)
+        print("R_capacity BY commission DECILE (same question, independent fundamental)")
+        print("=" * 80)
+        r_cap_by_commission = pd.concat([
+            r_capacity_by_scale_decile(diamond_a_rows, "commission", "Diamond A"),
+            r_capacity_by_scale_decile(non_diamond_a_disbursed_rows, "commission", "Non-Diamond-A disbursed"),
+            r_capacity_by_scale_decile(overall_rows, "commission", "OVERALL"),
+        ], ignore_index=True)
+        print(r_cap_by_commission.to_string(index=False))
+
     if args.severity_detail_band:
         if not args.engine_output_file:
             print("\nERROR: --severity-detail-band requires --engine-output-file (for risk_tier).")
@@ -465,8 +609,15 @@ def main(argv=None):
         diamond_a_rows.to_csv(f"{args.out_prefix}_diamond_a_matched_rows.csv", index=False)
         pd.concat([decomp_diamond_a, decomp_non_diamond_a, decomp_overall], ignore_index=True).to_csv(
             f"{args.out_prefix}_decomposition_crosstab.csv", index=False)
+        extra_written = ""
+        if r_cap_dist is not None:
+            r_cap_dist.to_csv(f"{args.out_prefix}_r_capacity_distribution.csv", index=False)
+            r_cap_by_float.to_csv(f"{args.out_prefix}_r_capacity_by_float_decile.csv", index=False)
+            r_cap_by_commission.to_csv(f"{args.out_prefix}_r_capacity_by_commission_decile.csv", index=False)
+            extra_written = (" / _r_capacity_distribution.csv / _r_capacity_by_float_decile.csv / "
+                              "_r_capacity_by_commission_decile.csv")
         print(f"\nWrote {args.out_prefix}_r_band_summary.csv / _severity_breakdown.csv / "
-              f"_diamond_a_matched_rows.csv / _decomposition_crosstab.csv")
+              f"_diamond_a_matched_rows.csv / _decomposition_crosstab.csv{extra_written}")
 
     return 0
 
