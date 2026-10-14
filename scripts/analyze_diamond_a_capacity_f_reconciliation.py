@@ -139,6 +139,51 @@ def classify_r_band(r: pd.Series) -> pd.Series:
     return pd.cut(pd.to_numeric(r, errors="coerce"), bins=R_BAND_EDGES, labels=R_BAND_LABELS)
 
 
+def attach_risk_tier(df: pd.DataFrame, engine_output_file) -> pd.DataFrame:
+    """risk_tier is not a Decision Log column (by frozen schema design) --
+    read from the same shadow run's own engine output CSV and joined in
+    for this detail dump only, same convention as
+    check_stage_4c_shadow_distribution_sanity.py's load_joined()."""
+    eng = pd.read_csv(engine_output_file, usecols=lambda c: c in {"msisdn", "risk_tier"})
+    if "risk_tier" not in eng.columns:
+        raise ValueError(f"{engine_output_file} has no risk_tier column.")
+    eng["_key"] = _norm_msisdn(eng["msisdn"])
+    eng = eng.drop_duplicates(subset=["_key"])
+    return df.merge(eng[["_key", "risk_tier"]], on="_key", how="left")
+
+
+# Column order for the --severity-detail-band row dump, per the reviewer's
+# exact request: a narrow decomposition, not a new analysis. challenger_risk_signal
+# is included alongside cal_pd (both already distinct Decision Log columns --
+# cal_pd is NULL on the thin-file route, challenger_risk_signal is the pooled
+# value regardless of route; both are shown rather than picking one).
+SEVERITY_DETAIL_COLUMNS = [
+    "agent_msisdn", "max_pct_of_live_disbursed", "n_months_over_threshold",
+    "float_activity_value_1m", "commission", "capacity_estimable",
+    "capacity_shadow_k0_05", "challenger_risk_signal", "cal_pd",
+    "shadow_multiplier_base", "l_current", "l_full_shadow_k0_05_base",
+    "disagreement_ratio_shadow_base", "r_band", "risk_tier",
+]
+
+
+def severity_band_detail(diamond_a_rows: pd.DataFrame, severity_label: str) -> pd.DataFrame:
+    """Row-level dump of exactly SEVERITY_DETAIL_COLUMNS for one severity
+    band -- no aggregation, no new thresholds. Sorted by r_band (BELOW
+    first) then by disagreement_ratio_shadow_base ascending within each
+    band, so the printed table itself reads as a worst-to-best ordering."""
+    sub = diamond_a_rows.copy()
+    sub["severity_band"] = pd.cut(
+        sub["max_pct_of_live_disbursed"], bins=SEVERITY_EDGES, labels=SEVERITY_LABELS, right=False
+    )
+    band = sub[sub["severity_band"].astype(str) == severity_label].copy()
+    cols = [c for c in SEVERITY_DETAIL_COLUMNS if c in band.columns]
+    band["_r_band_order"] = band["r_band"].map({label: i for i, label in enumerate(R_BAND_LABELS)})
+    band = band.sort_values(
+        ["_r_band_order", "disagreement_ratio_shadow_base"], ascending=[True, True], na_position="first"
+    )
+    return band[cols]
+
+
 def build_joined(decision_log_df: pd.DataFrame, diamond_a_df: pd.DataFrame) -> pd.DataFrame:
     """Left join from the Decision Log's full scored population -- so the
     match rate against the Diamond A file is itself visible (agents in a
@@ -208,6 +253,13 @@ def main(argv=None):
     p.add_argument("--decision-log-file", required=True)
     p.add_argument("--diamond-a-threshold", type=float, default=DIAMOND_A_THRESHOLD)
     p.add_argument("--out-prefix", default=None)
+    p.add_argument("--severity-detail-band", default=None, choices=SEVERITY_LABELS,
+                    help="If given, print+write a row-level decomposition (SEVERITY_DETAIL_COLUMNS "
+                         "only, no aggregation) for Diamond A agents in exactly this severity band. "
+                         "Requires --engine-output-file for risk_tier.")
+    p.add_argument("--engine-output-file", default=None,
+                    help="Same shadow run's engine output CSV, for risk_tier (not a Decision Log "
+                         "column). Required only when --severity-detail-band is given.")
     args = p.parse_args(argv)
 
     print("=" * 80)
@@ -268,6 +320,23 @@ def main(argv=None):
     print(" not a new business threshold)")
     print("=" * 80)
     print(severity_summary.to_string(index=False))
+
+    if args.severity_detail_band:
+        if not args.engine_output_file:
+            print("\nERROR: --severity-detail-band requires --engine-output-file (for risk_tier).")
+            return 1
+        detail_rows = attach_risk_tier(diamond_a_rows, args.engine_output_file)
+        detail = severity_band_detail(detail_rows, args.severity_detail_band)
+        print("\n" + "=" * 80)
+        print(f"SEVERITY DETAIL: Diamond A, severity={args.severity_detail_band} "
+              f"({len(detail)} agents) -- row-level decomposition, no aggregation")
+        print("=" * 80)
+        print(detail.to_string(index=False))
+        if args.out_prefix:
+            detail.to_csv(f"{args.out_prefix}_severity_detail_{args.severity_detail_band.replace('%', 'pct')}.csv",
+                           index=False)
+            print(f"\nWrote {args.out_prefix}_severity_detail_"
+                  f"{args.severity_detail_band.replace('%', 'pct')}.csv")
 
     if args.out_prefix:
         pd.concat([diamond_a_summary, overall_summary], ignore_index=True).to_csv(
