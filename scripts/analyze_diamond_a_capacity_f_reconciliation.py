@@ -136,7 +136,14 @@ def load_decision_log(path) -> pd.DataFrame:
 
 
 def classify_r_band(r: pd.Series) -> pd.Series:
-    return pd.cut(pd.to_numeric(r, errors="coerce"), bins=R_BAND_EDGES, labels=R_BAND_LABELS)
+    # right=False: bins are [a, b), matching the documented intent exactly
+    # ("R_i >= 1.10" and "0.90 <= R_i < 1.10"). pd.cut's default (right=True,
+    # bins (a, b]) would put R==0.90 in the BELOW band instead of AT, and
+    # R==1.10 in the AT band instead of ABOVE -- found by a boundary-value
+    # test fixture (R=0.90 exactly), not observed in the real data pulled
+    # so far (an exact-boundary float match is highly unlikely there), but
+    # a real latent correctness bug regardless.
+    return pd.cut(pd.to_numeric(r, errors="coerce"), bins=R_BAND_EDGES, labels=R_BAND_LABELS, right=False)
 
 
 def attach_risk_tier(df: pd.DataFrame, engine_output_file) -> pd.DataFrame:
@@ -189,12 +196,26 @@ def build_joined(decision_log_df: pd.DataFrame, diamond_a_df: pd.DataFrame) -> p
     match rate against the Diamond A file is itself visible (agents in a
     different population snapshot/run than this shadow run are expected
     to not all match), rather than silently restricting to only matched
-    rows from the start."""
+    rows from the start. diamond_a_df is the FULL population returned by
+    load_diamond_a_population() (every agent with ANY disbursement
+    record, is_diamond_a True or False) -- NOT pre-filtered to
+    is_diamond_a==True -- so has_disbursement_record can distinguish
+    "non-Diamond-A but has a disbursement history" from "no disbursement
+    record at all" (the latter must never be silently folded into the
+    former)."""
     joined = decision_log_df.merge(
         diamond_a_df[["_key", "is_diamond_a", "max_pct_of_live_disbursed", "n_months_over_threshold"]],
         on="_key", how="left",
     )
-    joined["is_diamond_a"] = joined["is_diamond_a"].fillna(False)
+    joined["has_disbursement_record"] = joined["_key"].isin(diamond_a_df["_key"])
+    # .astype(bool) is NOT cosmetic: the merge leaves is_diamond_a as
+    # object dtype (mixed real bool / NaN before fillna), and `~` on an
+    # object-dtype Series of Python True/False does raw bitwise complement
+    # (~True == -2, ~False == -1 -- BOTH truthy), silently selecting every
+    # row instead of negating. Found via a real test failure where the
+    # "non-Diamond-A" filter returned the entire population, Diamond A
+    # agents included.
+    joined["is_diamond_a"] = joined["is_diamond_a"].fillna(False).astype(bool)
     joined["r_band"] = classify_r_band(joined["disagreement_ratio_shadow_base"])
     return joined
 
@@ -237,14 +258,18 @@ def summarize_by_severity(diamond_a_rows: pd.DataFrame) -> pd.DataFrame:
     return pd.concat(out, ignore_index=True) if out else pd.DataFrame()
 
 
-def compute_lift(diamond_a_summary: pd.DataFrame, overall_summary: pd.DataFrame, band: str) -> dict:
-    """The single number that most directly answers the reviewer's
-    question: is Diamond A OVER-represented in a given R-band relative to
-    the overall capacity-estimable population? lift > 1 means yes."""
-    d_pct = diamond_a_summary.loc[diamond_a_summary["r_band"] == band, "pct"].iloc[0]
-    o_pct = overall_summary.loc[overall_summary["r_band"] == band, "pct"].iloc[0]
-    lift = d_pct / o_pct if o_pct else np.nan
-    return {"r_band": band, "diamond_a_pct": d_pct, "overall_pct": o_pct, "lift": lift}
+def compute_lift(treatment_summary: pd.DataFrame, reference_summary: pd.DataFrame, band: str) -> dict:
+    """Is the treatment group (Diamond A) OVER-represented in a given
+    R-band relative to some reference population? lift > 1 means yes.
+    Reports BOTH lift (ratio) and the percentage-point difference
+    alongside it, per the reviewer's own point: lift can look large
+    purely because the reference prevalence is low, while the pp
+    difference shows the practical magnitude directly."""
+    t_pct = treatment_summary.loc[treatment_summary["r_band"] == band, "pct"].iloc[0]
+    r_pct = reference_summary.loc[reference_summary["r_band"] == band, "pct"].iloc[0]
+    lift = t_pct / r_pct if r_pct else np.nan
+    return {"r_band": band, "treatment_pct": t_pct, "reference_pct": r_pct,
+            "lift": lift, "pp_difference": t_pct - r_pct}
 
 
 def main(argv=None):
@@ -275,43 +300,67 @@ def main(argv=None):
     dlog = load_decision_log(args.decision_log_file)
 
     n_diamond_a_agents = int(diamond_a["is_diamond_a"].sum())
-    print(f"\nDiamond A agents identified in {args.live_shadow_vs_category_file}: "
-          f"{n_diamond_a_agents:,} (>= {args.diamond_a_threshold:.0%} of their own assigned_limit "
-          f"in at least one month) out of {len(diamond_a):,} agents with any disbursement record.")
+    n_non_diamond_a_in_file = int((~diamond_a["is_diamond_a"]).sum())
+    print(f"\nAgents with any disbursement record in {args.live_shadow_vs_category_file}: {len(diamond_a):,}")
+    print(f"  Diamond A (>= {args.diamond_a_threshold:.0%} in at least one month): {n_diamond_a_agents:,}")
+    print(f"  Non-Diamond-A (same file, same eligibility universe): {n_non_diamond_a_in_file:,}")
+    arithmetic_ok = n_diamond_a_agents + n_non_diamond_a_in_file == len(diamond_a)
+    print(f"  Arithmetic check: {n_diamond_a_agents:,} + {n_non_diamond_a_in_file:,} "
+          f"{'==' if arithmetic_ok else '!='} {len(diamond_a):,} total "
+          f"-- {'OK' if arithmetic_ok else 'MISMATCH -- investigate before interpreting anything below'}")
 
-    joined = build_joined(dlog, diamond_a[diamond_a["is_diamond_a"]])
-    n_matched = int(joined["is_diamond_a"].sum())
-    print(f"Decision Log rows (this shadow run): {len(joined):,}")
-    print(f"Of those, matched to a Diamond A agent_msisdn: {n_matched:,} "
-          f"({n_matched / len(joined) * 100:.2f}% of this run's scored population; "
-          f"{n_matched / n_diamond_a_agents * 100:.2f}% of all Diamond A agents found, if the "
-          f"shadow run's population differs from the file the Diamond A list came from).")
+    joined = build_joined(dlog, diamond_a)
+    n_matched_diamond_a = int(joined["is_diamond_a"].sum())
+    n_matched_non_diamond_a = int((joined["has_disbursement_record"] & ~joined["is_diamond_a"]).sum())
+    print(f"\nDecision Log rows (this shadow run): {len(joined):,}")
+    print(f"  Matched to Diamond A: {n_matched_diamond_a:,} ({n_matched_diamond_a / n_diamond_a_agents * 100:.2f}% "
+          f"of all Diamond A agents in the file)")
+    print(f"  Matched to non-Diamond-A disbursed: {n_matched_non_diamond_a:,} "
+          f"({n_matched_non_diamond_a / n_non_diamond_a_in_file * 100:.2f}% of all non-Diamond-A disbursed "
+          f"agents in the file)")
+    print("  (match rate < 100% on either side means this shadow run's scored population differs from "
+          "the file the Diamond A list came from -- e.g. a retail-filtered run vs. a full-population file)")
 
     # build_joined() already attached max_pct_of_live_disbursed/
     # n_months_over_threshold via its own merge -- re-merging the same
     # columns here would just produce pandas-suffixed duplicates.
     diamond_a_rows = joined[joined["is_diamond_a"]].copy()
+    non_diamond_a_disbursed_rows = joined[joined["has_disbursement_record"] & ~joined["is_diamond_a"]].copy()
     overall_rows = joined  # includes Diamond A rows too, by design -- "overall" = the full scored population
 
     diamond_a_summary = summarize_r_band_distribution(diamond_a_rows, "Diamond A")
+    non_diamond_a_summary = summarize_r_band_distribution(
+        non_diamond_a_disbursed_rows, "Non-Diamond-A disbursed (direct complement)")
     overall_summary = summarize_r_band_distribution(overall_rows, "OVERALL (full scored population)")
 
     pd.set_option("display.width", 160)
     print("\n" + "=" * 80)
     print("R_i = L_full_shadow_k0_05_base / l_current -- band distribution")
-    print("Diamond A vs. the overall scored population")
+    print("Diamond A vs. its direct complement (same disbursement-record population) vs. overall")
     print("=" * 80)
-    print(pd.concat([diamond_a_summary, overall_summary], ignore_index=True).to_string(index=False))
+    print(pd.concat([diamond_a_summary, non_diamond_a_summary, overall_summary], ignore_index=True)
+          .to_string(index=False))
 
     print("\n" + "=" * 80)
-    print("LIFT: Diamond A's representation in each R-band vs. the overall population")
-    print("(lift > 1 => Diamond A is over-represented in that band; this is the number")
-    print(" that directly answers the question posed)")
+    print("LIFT + pp DIFFERENCE: Diamond A vs. its direct complement (same eligibility universe)")
+    print("(lift > 1 / pp_difference > 0 => Diamond A is over-represented in that band;")
+    print(" this is the cleanest answer, since both sides have a disbursement history)")
+    print("=" * 80)
+    for band in R_BAND_LABELS:
+        lift = compute_lift(diamond_a_summary, non_diamond_a_summary, band)
+        print(f"  {band:55s} Diamond A={lift['treatment_pct']:6.2f}%  "
+              f"Non-Diamond-A disbursed={lift['reference_pct']:6.2f}%  "
+              f"lift={lift['lift']:.2f}x  pp_diff={lift['pp_difference']:+.2f}")
+
+    print("\n" + "=" * 80)
+    print("LIFT + pp DIFFERENCE: Diamond A vs. the OVERALL scored population (original framing,")
+    print("kept for continuity with the earlier result)")
     print("=" * 80)
     for band in R_BAND_LABELS:
         lift = compute_lift(diamond_a_summary, overall_summary, band)
-        print(f"  {band:55s} Diamond A={lift['diamond_a_pct']:6.2f}%  "
-              f"Overall={lift['overall_pct']:6.2f}%  lift={lift['lift']:.2f}x")
+        print(f"  {band:55s} Diamond A={lift['treatment_pct']:6.2f}%  "
+              f"Overall={lift['reference_pct']:6.2f}%  lift={lift['lift']:.2f}x  "
+              f"pp_diff={lift['pp_difference']:+.2f}")
 
     severity_summary = summarize_by_severity(diamond_a_rows)
     print("\n" + "=" * 80)
@@ -339,7 +388,7 @@ def main(argv=None):
                   f"{args.severity_detail_band.replace('%', 'pct')}.csv")
 
     if args.out_prefix:
-        pd.concat([diamond_a_summary, overall_summary], ignore_index=True).to_csv(
+        pd.concat([diamond_a_summary, non_diamond_a_summary, overall_summary], ignore_index=True).to_csv(
             f"{args.out_prefix}_r_band_summary.csv", index=False)
         severity_summary.to_csv(f"{args.out_prefix}_severity_breakdown.csv", index=False)
         diamond_a_rows.to_csv(f"{args.out_prefix}_diamond_a_matched_rows.csv", index=False)
