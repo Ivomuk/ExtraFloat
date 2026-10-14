@@ -1,16 +1,17 @@
 # Diamond A x Capacity(F) Reconciliation, and the Capacity(F) vs. C3 Decomposition
 
 **Status:** Frozen on `claude/integrated-solution-analysis-atdfe6`, against the real controlled shadow run `run_id = 2026-10-13T14:52:11.085567Z` (the Stage 4C integration baseline frozen in `docs/stage_4c_prospective_validation_schema_design.md` Section 9 / the Decision Log at that run_id).
-**Next step:** Prospective outcome maturation and, eventually, a controlled-exposure (Tier B) test. No further retrospective slicing of this result is planned — both questions below were opened, answered, and closed within this session.
+**Next step:** Prospective outcome maturation and, eventually, a controlled-exposure (Tier B) test. No further retrospective slicing of this result is planned — all three questions below (Sections 2, 3, 6) were opened, answered, and closed within this session.
 
 ## 1. Objective
 
-Two related, but distinct, retrospective questions were asked of the frozen Stage 4C integration baseline, using the independent `Capacity(F; k=0.05) x M_C3` challenger already logged in the Decision Log, without touching `k`, `Capacity(F)`, C3, or any already-frozen artifact:
+Three related, but distinct, retrospective questions were asked of the frozen Stage 4C integration baseline, using the independent `Capacity(F; k=0.05) x M_C3` challenger already logged in the Decision Log, without touching `k`, `Capacity(F)`, C3, or any already-frozen artifact:
 
 1. **Diamond A reconciliation** — do agents who historically received disbursements >= 2x their engine-proposed `assigned_limit` ("Diamond A") show the independent challenger disproportionately recommending *more* exposure for them, corroborating the earlier "possible underfunding" hypothesis with a methodologically independent signal?
 2. **Capacity(F) vs. C3 decomposition** — for the general population, is the challenger's generally-lower recommendation coming from `Capacity(F)` itself, or from the subsequent C3 risk adjustment?
+3. **Scale decomposition of Capacity(F) conservatism** (Section 6) — is the 85.18% `CAPACITY_BELOW_CURRENT` result for non-Diamond-A disbursed agents uniform across the population, or concentrated among smaller businesses?
 
-Both are answered below. Neither establishes that acting on the challenger (raising or lowering any live limit) would be safe or economically optimal — that remains explicitly deferred to prospective monitoring and an eventual controlled-exposure test.
+All three are answered below. None establishes that acting on the challenger (raising or lowering any live limit) would be safe or economically optimal — that remains explicitly deferred to prospective monitoring and an eventual controlled-exposure test.
 
 ## 2. Diamond A x Capacity(F) Reconciliation
 
@@ -117,4 +118,58 @@ C3 asks:              "How much of that capacity should we expose ourselves to?"
 
 ## 5. What's Next
 
-Both "why" questions opened in this session (why does Diamond A's historical behavior corroborate the challenger; why is the challenger generally lower for ordinary borrowers) are now closed. The open question is no longer retrospective — it is whether the independently-estimated capacity (lower for most agents, higher for Diamond A) is better supported by **subsequent** performance and economics than the incumbent allocation. That is the role of continued prospective shadow-run monitoring and, eventually, a controlled-exposure (Tier B) test — not another historical cut of this same baseline run.
+All three "why" questions opened in this session (why does Diamond A's historical behavior corroborate the challenger; why is the challenger generally lower for ordinary borrowers; why does that general-population conservatism have the shape it does) are now closed. The open question is no longer retrospective — it is whether the independently-estimated capacity (lower for most agents, higher for Diamond A) is better supported by **subsequent** performance and economics than the incumbent allocation. That is the role of continued prospective shadow-run monitoring and, eventually, a controlled-exposure (Tier B) test — not another historical cut of this same baseline run.
+
+## 6. Scale Decomposition of Capacity(F) Conservatism
+
+### 6.1 Question
+
+Section 3 established that the general population's 85.18% `CAPACITY_BELOW_CURRENT` result is driven by raw `Capacity(F)` itself, not by the subsequent C3 adjustment. It left open *why* raw `Capacity(F)` comes in low for so much of the population: is the frozen `k=0.05` scale uniformly conservative across the whole population, or is the shortfall concentrated in a particular part of it?
+
+### 6.2 Method
+
+`R_capacity = capacity_shadow_k0_05 / l_current`, already defined in Section 3, examined two ways on the same frozen baseline:
+
+1. **Magnitude distribution** — 8 named bands (`<0.25` through `>2.00`, pivoting on the same 0.90/1.10 agreement convention used in Section 2) plus percentiles, to check whether the 85.18% BELOW figure reflects near-misses (R_capacity just under 1.0) or a wide spread including severe shortfalls.
+2. **Decile breakdown by business scale** — `float_activity_value_1m` and `commission` deciled independently (never combined), with median/p25/p75 `R_capacity` and the %BELOW/%AT/%ABOVE split reported per decile, to test whether `R_capacity` trends toward or above 1.0 as business scale increases.
+
+Implemented as `summarize_r_capacity_distribution()` and `r_capacity_by_scale_decile()` in the same reconciliation script (commit `6dfc80b`). This is explicitly a diagnostic of the already-frozen `k=0.05`, not a re-tuning exercise — no result here is grounds for changing `k`, `Capacity(F)`, or C3.
+
+### 6.3 Result
+
+**Magnitude distribution, non-Diamond-A disbursed:** median `R_capacity` = 0.423; 22.50% of agents are below 0.25x and a further 35.68% are between 0.25x and 0.50x. The 85.18% BELOW figure is emphatically not a population sitting just under the 1.0 boundary — most of it is well below.
+
+**Decile breakdown, non-Diamond-A disbursed, `float_activity_value_1m`:**
+
+| Decile | median R_capacity | % BELOW 0.90 | % ABOVE 1.10 |
+|---|---|---|---|
+| D1 | 0.168 | 100.00 | 0.00 |
+| D4 | 0.286 | 99.39 | 0.11 |
+| D7 | 0.535 | 93.58 | 1.02 |
+| D8 | 0.693 | 82.02 | 7.50 |
+| D9 | 0.936 | 43.03 | 24.45 |
+| D10 | 1.484 | 2.28 | 87.04 |
+
+`commission` deciles independently reproduce the same shape: D10 median `R_capacity` = 1.420, 7.03% BELOW, 77.97% ABOVE.
+
+**Cross-check within Diamond A, `float_activity_value_1m`:** D1 median `R_capacity` = 0.466, 96.63% BELOW; by D2 the median is already 1.164; from D5 onward the decile is essentially entirely ABOVE 1.10. The same scale effect holds inside Diamond A, which argues the effect is driven by business scale rather than by the Diamond A label itself.
+
+### 6.4 Frozen conclusion
+
+> **Capacity(F) conservatism is strongly scale-dependent rather than uniform.** Although 85.18% of evaluable non-Diamond-A disbursed agents have raw Capacity(F) below their current live limit, the disagreement is concentrated among smaller businesses. `R_capacity = Capacity(F) / l_current` increases strongly with both Float Activity and Commission when each fundamental is examined independently. In the highest Float Activity decile, median `R_capacity` is 1.484 and 87.04% of agents are above the 1.10 agreement boundary; in the highest Commission decile, median `R_capacity` is 1.420 and 77.97% are above 1.10. Conversely, the lower deciles are overwhelmingly below current limits.
+>
+> The result therefore does not support characterizing `k=0.05` Capacity(F) as uniformly conservative. Rather, Capacity(F) generates substantially lower capacity estimates for small/low-activity businesses, converges toward current limits as business scale increases, and frequently exceeds current limits for the largest businesses. This pattern is consistent with the incumbent mechanism containing a relatively high floor/base allocation that does not decline proportionally with business scale, although the analysis does not prove that mechanism or exclude omitted capacity factors correlated with scale — the decile analysis cannot distinguish an incumbent-floor effect from omitted capacity variables that happen to matter disproportionately for smaller agents.
+>
+> This also explains the Diamond A reconciliation (Section 2): Diamond A disproportionately identifies businesses for which independently measured economic scale supports current-or-higher capacity, while small Diamond A agents themselves remain below current limits. The Diamond A label is therefore not what mechanically causes the higher challenger recommendations; the underlying business fundamentals are.
+>
+> C3 is not the explanation for the general-population result either (Section 3): for non-Diamond-A disbursed agents, 85.18% are already below current before C3 versus 88.09% afterwards; only 2.91% occupy the specific `CAPACITY_ABOVE_RISK_REDUCED_BELOW_CURRENT` state.
+
+```
+Capacity(F) general conservatism:           EXPLAINED -- strongly scale-dependent
+Global k=0.05 failure:                      NOT SUPPORTED by this diagnostic
+Incumbent floor/base-allocation explanation: PLAUSIBLE / NOT PROVEN
+Omitted capacity variables:                  NOT RULED OUT
+C3 as primary cause:                         NOT SUPPORTED
+Change k, Capacity(F), or C3:                NO
+Further retrospective slicing:               STOP
+```
