@@ -136,10 +136,26 @@ def build_joined(eng_df: pd.DataFrame, dlog_df: pd.DataFrame) -> pd.DataFrame:
     """One row per agent in engine_output, left-joined onto the Decision
     Log by normalized msisdn. Reports the match rate explicitly rather
     than silently dropping unmatched agents."""
-    keep_dlog = dlog_df[["_key", "capacity_shadow_k0_05", "capacity_estimable",
-                          "float_activity_value_1m", "commission"]].drop_duplicates(subset="_key", keep="first")
+    dlog_cols = ["capacity_shadow_k0_05", "capacity_estimable", "float_activity_value_1m", "commission"]
+    keep_dlog = dlog_df[["_key"] + dlog_cols].drop_duplicates(subset="_key", keep="first")
+
+    # engine_output.csv (with --keep-intermediate) can ALSO carry a raw "commission"
+    # column of its own -- with suffixes=("", "_dlog") that would silently leave
+    # the engine's own value under the plain "commission" name (used below for the
+    # decile banding) instead of the Decision Log's, rather than raising -- found
+    # as a real KeyError in overlay_capacity_f_vs_observed_exposure_frontier.py's
+    # sibling join, which has no suffixes to mask it. Drop the overlap first so the
+    # Decision Log's own value -- what Capacity(F) was actually computed from -- is
+    # unambiguously the one used here too.
+    overlapping = [c for c in dlog_cols if c in eng_df.columns]
+    if overlapping:
+        print(f"NOTE: engine output also had column(s) {overlapping} -- dropped before the Decision "
+              f"Log merge so the Decision Log's own values (what Capacity(F) was actually computed "
+              f"from) are used unambiguously.")
+        eng_df = eng_df.drop(columns=overlapping)
+
     n_before = len(eng_df)
-    joined = eng_df.merge(keep_dlog, on="_key", how="left", suffixes=("", "_dlog"))
+    joined = eng_df.merge(keep_dlog, on="_key", how="left")
     n_matched = int(joined["_key"].isin(keep_dlog["_key"]).sum())
     print(f"Joined engine output ({n_before:,} agents) to Decision Log: "
           f"{n_matched:,} / {n_before:,} matched a Decision Log row.")

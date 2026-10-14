@@ -175,8 +175,24 @@ def load_decision_log(path) -> pd.DataFrame:
 
 
 def build_live_population(eng_df: pd.DataFrame, dlog_df: pd.DataFrame) -> pd.DataFrame:
-    keep_dlog = dlog_df[["_key", "capacity_shadow_k0_05", "capacity_estimable",
-                          "float_activity_value_1m", "commission"]].drop_duplicates(subset="_key", keep="first")
+    dlog_cols = ["capacity_shadow_k0_05", "capacity_estimable", "float_activity_value_1m", "commission"]
+    keep_dlog = dlog_df[["_key"] + dlog_cols].drop_duplicates(subset="_key", keep="first")
+
+    # engine_output.csv (with --keep-intermediate) can ALSO carry a raw "commission"
+    # column of its own (used elsewhere in live feature construction) -- if both
+    # sides of the merge have a same-named column, pandas silently renames BOTH to
+    # commission_x/commission_y rather than keeping a plain "commission", which
+    # breaks every downstream df["commission"] lookup with a KeyError (found on
+    # real data). Drop any such overlapping column from eng_df first so the
+    # Decision Log's own value -- what Capacity(F) was actually computed from --
+    # is unambiguously the one used, never silently shadowed or suffixed away.
+    overlapping = [c for c in dlog_cols if c in eng_df.columns]
+    if overlapping:
+        print(f"NOTE: engine output also had column(s) {overlapping} -- dropped before the Decision "
+              f"Log merge so the Decision Log's own values (what Capacity(F) was actually computed "
+              f"from) are used unambiguously.")
+        eng_df = eng_df.drop(columns=overlapping)
+
     n_before = len(eng_df)
     joined = eng_df.merge(keep_dlog, on="_key", how="left")
     n_matched = int(joined["_key"].isin(keep_dlog["_key"]).sum())
