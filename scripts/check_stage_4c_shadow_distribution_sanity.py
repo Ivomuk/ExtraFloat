@@ -233,11 +233,35 @@ def find_anomalies(df: pd.DataFrame) -> dict:
     return anomalies
 
 
+TOP_TAIL_COLUMNS = [
+    "agent_msisdn", "float_activity_value_1m", "commission",
+    "capacity_shadow_k0_05", "shadow_multiplier_base", "l_full_shadow_k0_05_base",
+    "l_current", "disagreement_ratio_shadow_base", "risk_tier",
+]
+
+
+def top_tail_rows(df: pd.DataFrame, by_col: str, n: int = 10) -> pd.DataFrame:
+    """Top n rows by by_col (descending, NaN last), restricted to
+    TOP_TAIL_COLUMNS. A deliberately narrow source-traceability check,
+    requested before freezing the first real shadow run as the Stage 4C
+    integration baseline: are the extreme outputs (the long right tail in
+    capacity_shadow_k0_05 and the resulting large disagreement ratios)
+    traceable to genuinely large float_activity_value_1m/commission
+    inputs, rather than a malformed source value? No new thresholds, no
+    additional segmentation, no recalibration -- purely a row dump
+    answering that one binary question."""
+    cols = [c for c in TOP_TAIL_COLUMNS if c in df.columns]
+    return df.sort_values(by_col, ascending=False, na_position="last").head(n)[cols]
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--decision-log-file", required=True)
     p.add_argument("--engine-output-file", required=True)
     p.add_argument("--out-prefix", default=None, help="If given, writes _distribution.csv/_direction.csv/_anomalies.csv")
+    p.add_argument("--top-n-tail", type=int, default=10,
+                    help="Print this many top rows by capacity_shadow_k0_05 and by "
+                         "disagreement_ratio_shadow_base (source-traceability check).")
     args = p.parse_args(argv)
 
     print("=" * 80)
@@ -276,11 +300,27 @@ def main(argv=None):
         flag = "  <-- NONZERO" if v else ""
         print(f"  {k:55s} {v}{flag}")
 
+    top_by_capacity = top_tail_rows(df, "capacity_shadow_k0_05", args.top_n_tail)
+    top_by_ratio = top_tail_rows(df, "disagreement_ratio_shadow_base", args.top_n_tail)
+
+    print("\n" + "=" * 80)
+    print(f"TOP {args.top_n_tail} BY capacity_shadow_k0_05 (source-traceability check)")
+    print("=" * 80)
+    print(top_by_capacity.to_string(index=False))
+
+    print("\n" + "=" * 80)
+    print(f"TOP {args.top_n_tail} BY disagreement_ratio_shadow_base (source-traceability check)")
+    print("=" * 80)
+    print(top_by_ratio.to_string(index=False))
+
     if args.out_prefix:
         dist_table.to_csv(f"{args.out_prefix}_distribution.csv", index=False)
         dir_table.to_csv(f"{args.out_prefix}_direction.csv", index=False)
         pd.DataFrame([anomalies]).to_csv(f"{args.out_prefix}_anomalies.csv", index=False)
-        print(f"\nWrote {args.out_prefix}_distribution.csv / _direction.csv / _anomalies.csv")
+        top_by_capacity.to_csv(f"{args.out_prefix}_top_by_capacity.csv", index=False)
+        top_by_ratio.to_csv(f"{args.out_prefix}_top_by_ratio.csv", index=False)
+        print(f"\nWrote {args.out_prefix}_distribution.csv / _direction.csv / _anomalies.csv / "
+              f"_top_by_capacity.csv / _top_by_ratio.csv")
 
     return 0
 
