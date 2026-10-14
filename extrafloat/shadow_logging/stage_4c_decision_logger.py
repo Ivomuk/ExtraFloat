@@ -72,6 +72,24 @@ CURRENT_POLICY_VERSION = "engine_policy_v1"
 RISK_SCORE_TYPE_THICK = "CALIBRATED_CHAMPION_PD"
 RISK_SCORE_TYPE_THIN = "THIN_SCORECARD_PD_LIKE"
 
+# Interpretability decomposition -- additive revision to the frozen schema
+# (never changes an existing field; adds two new ones). Answers, per row,
+# whether a BELOW-current result traces to Capacity(F) itself or to the
+# subsequent C3 risk adjustment -- R_full (disagreement_ratio_shadow_base)
+# alone hid this distinction. Scoped deliberately to the k=0.05/"base"
+# scenario only (matching the reviewer's own request) -- NOT extended to
+# the conservative scenario or the k-sensitivity variants.
+CHALLENGER_DECOMPOSITION_FULL_ABOVE = "FULL_ABOVE_CURRENT"
+CHALLENGER_DECOMPOSITION_CAPACITY_ABOVE_RISK_REDUCED = "CAPACITY_ABOVE_RISK_REDUCED_BELOW_CURRENT"
+CHALLENGER_DECOMPOSITION_CAPACITY_BELOW = "CAPACITY_BELOW_CURRENT"
+CHALLENGER_DECOMPOSITION_NOT_ESTIMABLE = "NOT_ESTIMABLE"
+# Reached only if shadow_multiplier_base > 1 somehow slipped past the
+# engine's own [m_min, m_max] policy bounds -- mechanically should never
+# occur (R_full = R_capacity * M_C3 <= R_capacity whenever M_C3 <= 1).
+# Never silently relabeled as one of the four real categories above;
+# verify_decision_log_invariants raises on it.
+CHALLENGER_DECOMPOSITION_INCONSISTENT = "INCONSISTENT_RISK_EXCEEDS_CAPACITY"
+
 AVAILABILITY_OK = "OK"
 AVAILABILITY_MISSING = "MISSING"
 AVAILABILITY_NONPOSITIVE = "NONPOSITIVE"
@@ -126,6 +144,10 @@ DECISION_LOG_COLUMNS = [
     "k_shadow_value", "k_sensitivity_low_value", "k_sensitivity_high_value",
     "champion_model_version", "pd_calibration_artifact_version",
     "c3_shadow_artifact_version", "c3_policy_version",
+    # 4.8 Interpretability decomposition (additive revision -- see module
+    # docstring; never changes an existing field above). Scoped to the
+    # k=0.05/"base" scenario only.
+    "r_capacity_shadow_k0_05_base", "challenger_decomposition",
 ]
 
 
@@ -423,6 +445,51 @@ def compute_disagreement(l_full_shadow_base: pd.Series, l_full_shadow_conservati
     return out
 
 
+def compute_challenger_decomposition(capacity_shadow_k0_05: pd.Series, l_full_shadow_k0_05_base: pd.Series,
+                                      l_current: pd.Series, capacity_estimable: pd.Series) -> pd.DataFrame:
+    """Additive interpretability decomposition (see module-level
+    constants). Returns a DataFrame with r_capacity_shadow_k0_05_base
+    (= capacity_shadow_k0_05 / l_current, same zero-guard as
+    disagreement_ratio_shadow_base) and challenger_decomposition.
+    r_full is read from l_full_shadow_k0_05_base / l_current directly
+    here (never from the already-computed disagreement_ratio_shadow_base
+    column) so this function has no ordering dependency on
+    compute_disagreement -- the two are algebraically identical by
+    construction, re-verified by invariant #12 below.
+
+    NOT_ESTIMABLE covers both capacity_estimable=False AND the
+    degenerate l_current<=0 case (current_decision_status already
+    carries ZERO_LIMIT_ELIGIBLE for the latter) -- in both, no
+    ratio-based categorization is meaningful, and neither is treated as
+    a 5th real category never requested by the schema addition."""
+    lc_valid = l_current.notna() & (l_current != 0)
+    r_capacity = pd.Series(np.where(lc_valid, capacity_shadow_k0_05 / l_current, np.nan), index=l_current.index)
+    r_full = pd.Series(np.where(lc_valid, l_full_shadow_k0_05_base / l_current, np.nan), index=l_current.index)
+
+    estimable_and_defined = (capacity_estimable == True) & r_capacity.notna() & r_full.notna()  # noqa: E712
+
+    decomposition = pd.Series(CHALLENGER_DECOMPOSITION_NOT_ESTIMABLE, index=l_current.index)
+    cap_above = r_capacity >= 1.0
+    full_above = r_full >= 1.0
+    decomposition = decomposition.mask(estimable_and_defined & cap_above & full_above,
+                                        CHALLENGER_DECOMPOSITION_FULL_ABOVE)
+    decomposition = decomposition.mask(estimable_and_defined & cap_above & ~full_above,
+                                        CHALLENGER_DECOMPOSITION_CAPACITY_ABOVE_RISK_REDUCED)
+    decomposition = decomposition.mask(estimable_and_defined & ~cap_above & ~full_above,
+                                        CHALLENGER_DECOMPOSITION_CAPACITY_BELOW)
+    # Mechanically impossible while shadow_multiplier_base <= 1 (R_full =
+    # R_capacity * M_C3 <= R_capacity) -- labeled, never silently folded
+    # into one of the 4 real categories; verify_decision_log_invariants
+    # raises on this (invariant #12).
+    decomposition = decomposition.mask(estimable_and_defined & ~cap_above & full_above,
+                                        CHALLENGER_DECOMPOSITION_INCONSISTENT)
+
+    out = pd.DataFrame(index=l_current.index)
+    out["r_capacity_shadow_k0_05_base"] = r_capacity  # already NaN wherever l_current is null/zero
+    out["challenger_decomposition"] = decomposition
+    return out
+
+
 def build_shadow_decision_id(run_id: str, agent_msisdn: pd.Series) -> pd.Series:
     """Deterministic surrogate key f(run_id, agent_msisdn). The REAL
     protection is a UNIQUE(run_id, agent_msisdn) constraint on the two
@@ -510,6 +577,11 @@ def build_decision_log_rows(df_agent_raw: pd.DataFrame, result_df: pd.DataFrame,
     )
     out = pd.concat([out, disagreement], axis=1)
 
+    decomposition = compute_challenger_decomposition(
+        out["capacity_shadow_k0_05"], out["l_full_shadow_k0_05_base"], out["l_current"], out["capacity_estimable"]
+    )
+    out = pd.concat([out, decomposition], axis=1)
+
     out["run_id"] = run_id
     out["scoring_run_timestamp"] = _to_naive_timestamp(scoring_run_timestamp)
     out["shadow_decision_id"] = build_shadow_decision_id(run_id, out["msisdn"])
@@ -555,8 +627,10 @@ def verify_decision_log_invariants(decision_log_df: pd.DataFrame, capacity_weigh
     """Enforces every Section 6 invariant applicable at Decision-Log-
     construction time (1, 2, 3 [partial -- see module docstring], 4, 5,
     8, 9, 10, 11 -- the renumbered set from the frozen schema; 6 and 7
-    are Execution/Outcome Log invariants, out of scope here). Raises on
-    ANY violation -- never silently drops or NULLs a violating row."""
+    are Execution/Outcome Log invariants, out of scope here), PLUS #12
+    (new -- the interpretability decomposition addendum, not part of the
+    original frozen numbered set). Raises on ANY violation -- never
+    silently drops or NULLs a violating row."""
     df = decision_log_df
 
     # #1: shadow_decision_id unique; (run_id, agent_msisdn) unique.
@@ -627,6 +701,28 @@ def verify_decision_log_invariants(decision_log_df: pd.DataFrame, capacity_weigh
     )
     if not (recomputed_estimable == df["capacity_estimable"]).all():
         raise ValueError("invariant #11 violated: capacity_estimable does not match its derivation rule.")
+
+    # #12 (new -- interpretability decomposition addendum, not part of the
+    # original frozen numbered set): challenger_decomposition must never be
+    # the mechanically-impossible INCONSISTENT_RISK_EXCEEDS_CAPACITY value
+    # (R_full = R_capacity * M_C3 <= R_capacity always, while
+    # shadow_multiplier_base stays within its policy bounds). A real
+    # occurrence means shadow_multiplier_base escaped [m_min, m_max] --
+    # raised here, never silently relabeled or dropped.
+    if (df["challenger_decomposition"] == CHALLENGER_DECOMPOSITION_INCONSISTENT).any():
+        raise ValueError(
+            "invariant #12 violated: challenger_decomposition == "
+            f"{CHALLENGER_DECOMPOSITION_INCONSISTENT!r} -- R_full exceeded R_capacity, which should be "
+            "mechanically impossible while shadow_multiplier_base <= 1."
+        )
+    # #12b: r_capacity_shadow_k0_05_base is NOT NULL iff capacity_estimable
+    # AND l_current is non-null/non-zero -- same nullability discipline as
+    # every other derived ratio in this module.
+    lc_valid = df["l_current"].notna() & (df["l_current"] != 0)
+    expected_r_capacity_defined = (df["capacity_estimable"] == True) & lc_valid  # noqa: E712
+    actual_r_capacity_defined = df["r_capacity_shadow_k0_05_base"].notna()
+    if not (expected_r_capacity_defined == actual_r_capacity_defined).all():
+        raise ValueError("invariant #12 violated: r_capacity_shadow_k0_05_base nullability mismatch.")
 
 
 def write_run_manifest(run_id: str, status: str, expected_agent_count: int, logged_agent_count: int,

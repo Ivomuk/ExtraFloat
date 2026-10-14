@@ -191,3 +191,20 @@ Neither item blocks freezing this schema. Both must be resolved before the loggi
 ## 8. What This Document Does Not Do
 
 No code has been written. No logging pipeline has been built or hooked into the live engine. No decision on Tier B (controlled exposure / pilot design) has been made — that remains a separate, later, and considerably heavier undertaking. This document specifies the schema and the Tier A/Tier B boundary only.
+
+## 9. Addendum (post-freeze, additive): Interpretability Decomposition Fields
+
+Added after the schema was frozen and implemented (Section 5), once the first real controlled shadow run's Diamond A reconciliation surfaced a real interpretability gap: `disagreement_ratio_shadow_base` (Section 4.6) alone hides *which stage* — `Capacity(F)` itself, or the subsequent C3 risk adjustment — produced a BELOW-current result. Two fields are added; nothing in Sections 1–8 above is changed, removed, or renumbered.
+
+| Field | Type | Null? | Notes |
+|---|---|---|---|
+| `r_capacity_shadow_k0_05_base` | numeric | NULLABLE | `capacity_shadow_k0_05 / l_current`. Same zero/null guard as `disagreement_ratio_shadow_base` (Section 4.6): NULL, never Inf, when `l_current` is NULL or 0. NOT NULL iff `capacity_estimable=TRUE` AND `l_current` is non-null/non-zero (invariant #12b below). |
+| `challenger_decomposition` | string enum | NOT NULL | One of `FULL_ABOVE_CURRENT` (`r_capacity_shadow_k0_05_base >= 1.0` and `disagreement_ratio_shadow_base >= 1.0`), `CAPACITY_ABOVE_RISK_REDUCED_BELOW_CURRENT` (`r_capacity >= 1.0` but `r_full < 1.0` — C3, not `Capacity(F)`, is the reason the final figure sits below `l_current`), `CAPACITY_BELOW_CURRENT` (`r_capacity < 1.0`, and therefore `r_full < 1.0` too), or `NOT_ESTIMABLE` (covers both `capacity_estimable=FALSE` and the degenerate `l_current<=0` case — no ratio-based categorization is meaningful either way). A 5th value, `INCONSISTENT_RISK_EXCEEDS_CAPACITY`, exists only as an invariant-violation sentinel (#12 below) for the mechanically-impossible case `r_capacity < 1.0` and `r_full >= 1.0` — a real occurrence means `shadow_multiplier_base` escaped its engine-enforced `[m_min, m_max]` policy bounds, and the run fails rather than logging it. |
+
+Scoped deliberately to the `k=0.05` / `base` scenario only, matching the Diamond A reconciliation that motivated it — not extended to `conservative` or the `k=0.04`/`k=0.06` sensitivity variants. If a future need arises for those, it is a separate, equally additive revision, not an implicit generalization of this one.
+
+**Added to Section 6 (cross-table invariants), out of the original 1–12 enumeration (new, not a renumbering):**
+
+12. `challenger_decomposition` is never `INCONSISTENT_RISK_EXCEEDS_CAPACITY` (hard-fail if it ever is — `disagreement_ratio_shadow_base = r_capacity_shadow_k0_05_base * shadow_multiplier_base <= r_capacity_shadow_k0_05_base` always holds while `shadow_multiplier_base <= 1`). 12b. `r_capacity_shadow_k0_05_base` NOT NULL iff `capacity_estimable=TRUE` AND `l_current` is non-null/non-zero — same nullability discipline as every other derived ratio in this schema.
+
+Implemented in `extrafloat/shadow_logging/stage_4c_decision_logger.py` (`compute_challenger_decomposition()`, wired into `build_decision_log_rows()` and `verify_decision_log_invariants()`), verified against a dedicated synthetic fixture covering all four real categories, the `R==1.0` boundary, the `capacity_estimable=FALSE` and `l_current=0` NULL paths, and a hand-injected reproduction of the invariant-#12 failure mode, plus the full existing Decision Log verification suite and pipeline test suite re-run clean. Logging/interpretability only — does not change `k=0.05`, `Capacity(F)`, C3, or any already-frozen field's value or meaning.
