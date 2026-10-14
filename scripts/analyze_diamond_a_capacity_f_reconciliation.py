@@ -220,6 +220,65 @@ def build_joined(decision_log_df: pd.DataFrame, diamond_a_df: pd.DataFrame) -> p
     return joined
 
 
+def compute_r_capacity(df: pd.DataFrame) -> pd.Series:
+    """R_capacity = capacity_shadow_k0_05 / l_current -- the SAME guard
+    convention already used for disagreement_ratio_shadow_base (l_current
+    must be non-null and non-zero, else NaN, never Inf). Never recomputes
+    capacity_shadow_k0_05 itself -- reads it straight from the Decision
+    Log, same discipline as R_full (disagreement_ratio_shadow_base)."""
+    cap = pd.to_numeric(df["capacity_shadow_k0_05"], errors="coerce")
+    lc = pd.to_numeric(df["l_current"], errors="coerce")
+    return pd.Series(np.where(lc.notna() & (lc != 0), cap / lc, np.nan), index=df.index)
+
+
+def decomposition_crosstab(df: pd.DataFrame, population_label: str) -> pd.DataFrame:
+    """Answers: is a population's BELOW-current result coming from
+    Capacity(F) itself, or from the subsequent C3 risk adjustment? Cross-
+    tabs R_capacity vs. R_full at the pivot of 1.0 (matching the
+    reviewer's literal 2x2 table -- NOT the 0.90/1.10 'agreement band'
+    used elsewhere in this script, a deliberately different, simpler
+    question). The capacity<1 & full>=1 cell is mechanically impossible
+    while shadow_multiplier_base <= 1 always holds (R_full = R_capacity *
+    M_C3 <= R_capacity) -- reported and flagged loudly if ever nonzero,
+    never silently dropped."""
+    estimable = df[df["capacity_estimable"] == True].copy()  # noqa: E712
+    not_estimable_n = int((df["capacity_estimable"] == False).sum())  # noqa: E712
+    r_cap = compute_r_capacity(estimable)
+    r_full = pd.to_numeric(estimable["disagreement_ratio_shadow_base"], errors="coerce")
+    valid = r_cap.notna() & r_full.notna()
+    r_cap, r_full = r_cap[valid], r_full[valid]
+    n = len(r_cap)
+
+    cap_below = r_cap < 1.0
+    full_below = r_full < 1.0
+
+    rows = [
+        {"population": population_label, "cell": "capacity>=1 & full>=1 (FULL_ABOVE_CURRENT)",
+         "n": int((~cap_below & ~full_below).sum())},
+        {"population": population_label,
+         "cell": "capacity>=1 & full<1 (CAPACITY_ABOVE_RISK_REDUCED_BELOW_CURRENT)",
+         "n": int((~cap_below & full_below).sum())},
+        {"population": population_label, "cell": "capacity<1 & full<1 (CAPACITY_BELOW_CURRENT)",
+         "n": int((cap_below & full_below).sum())},
+        {"population": population_label,
+         "cell": "capacity<1 & full>=1 (MECHANICALLY IMPOSSIBLE -- flag if nonzero)",
+         "n": int((cap_below & ~full_below).sum())},
+        {"population": population_label, "cell": "pct_capacity_below_1.0 (Capacity(F) itself, pre-C3)",
+         "n": np.nan, "pct": round(float(cap_below.mean() * 100), 2) if n else np.nan},
+        {"population": population_label, "cell": "pct_full_below_1.0 (after C3)",
+         "n": np.nan, "pct": round(float(full_below.mean() * 100), 2) if n else np.nan},
+        {"population": population_label, "cell": "(capacity_estimable=False, excluded)", "n": not_estimable_n},
+        {"population": population_label, "cell": "n_valid (capacity_estimable=True, both ratios defined)", "n": n},
+    ]
+    out = pd.DataFrame(rows)
+    if "pct" not in out.columns:
+        out["pct"] = np.nan
+    if n:
+        for i in range(4):
+            out.loc[i, "pct"] = round(out.loc[i, "n"] / n * 100, 2)
+    return out
+
+
 def summarize_r_band_distribution(df: pd.DataFrame, population_label: str) -> pd.DataFrame:
     """n / pct in each R-band, restricted to capacity_estimable rows (R is
     undefined otherwise) -- PLUS the capacity_estimable=False count
@@ -370,6 +429,18 @@ def main(argv=None):
     print("=" * 80)
     print(severity_summary.to_string(index=False))
 
+    print("\n" + "=" * 80)
+    print("DECOMPOSITION: is the BELOW-current result coming from Capacity(F) itself,")
+    print("or from the subsequent C3 risk adjustment? R_capacity = capacity_shadow_k0_05 /")
+    print("l_current vs. R_full = l_full_shadow_k0_05_base / l_current (pivot at 1.0,")
+    print("deliberately NOT the 0.90/1.10 agreement band used above -- a different question)")
+    print("=" * 80)
+    decomp_diamond_a = decomposition_crosstab(diamond_a_rows, "Diamond A")
+    decomp_non_diamond_a = decomposition_crosstab(non_diamond_a_disbursed_rows, "Non-Diamond-A disbursed")
+    decomp_overall = decomposition_crosstab(overall_rows, "OVERALL")
+    print(pd.concat([decomp_diamond_a, decomp_non_diamond_a, decomp_overall], ignore_index=True)
+          .to_string(index=False))
+
     if args.severity_detail_band:
         if not args.engine_output_file:
             print("\nERROR: --severity-detail-band requires --engine-output-file (for risk_tier).")
@@ -392,8 +463,10 @@ def main(argv=None):
             f"{args.out_prefix}_r_band_summary.csv", index=False)
         severity_summary.to_csv(f"{args.out_prefix}_severity_breakdown.csv", index=False)
         diamond_a_rows.to_csv(f"{args.out_prefix}_diamond_a_matched_rows.csv", index=False)
+        pd.concat([decomp_diamond_a, decomp_non_diamond_a, decomp_overall], ignore_index=True).to_csv(
+            f"{args.out_prefix}_decomposition_crosstab.csv", index=False)
         print(f"\nWrote {args.out_prefix}_r_band_summary.csv / _severity_breakdown.csv / "
-              f"_diamond_a_matched_rows.csv")
+              f"_diamond_a_matched_rows.csv / _decomposition_crosstab.csv")
 
     return 0
 
