@@ -184,10 +184,66 @@ def main(argv: list[str] | None = None) -> None:
         print(f"\n-- {name} --")
         print(tbl.round(4).to_string())
 
+    # -- Optional enrichment: raw Capacity(F) limit + Capacity(F) x C3 limit --
+    # from a frozen Stage 4C Decision Log, so all limit sources (live,
+    # shadow C3-only, capacity-only, capacity+C3) sit side by side in one
+    # file. Additive and independent of the monthly-summary enrichment
+    # below -- skipped gracefully (NOTE, not error) if not given, same
+    # discipline as that block and the persona-assignments block. Runs
+    # BEFORE the disbursement enrichment below so capacity_shadow_k0_05 /
+    # l_full_shadow_k0_05_base are already on `known` when reference_cols
+    # (used for the disbursed_amount-vs-reference agreement checks) is built.
+    capacity_cols: list[str] = []
+    decision_log_arg = args.decision_log_file
+    if not decision_log_arg:
+        print("\nNOTE: --decision-log-file not given -- skipping capacity-based-limit / Capacity(F) x C3 "
+              "enrichment (pass --decision-log-file to point at a frozen Stage 4C Decision Log CSV).")
+    else:
+        decision_log_path = Path(decision_log_arg)
+        if not decision_log_path.exists():
+            print(f"\nNOTE: {decision_log_path} not found -- skipping capacity-based-limit / Capacity(F) x C3 "
+                  f"enrichment.")
+        else:
+            dlog = pd.read_csv(decision_log_path)
+            required_dlog = {"agent_msisdn", "capacity_shadow_k0_05", "l_full_shadow_k0_05_base", "capacity_estimable"}
+            missing_dlog = required_dlog - set(dlog.columns)
+            if missing_dlog:
+                print(f"\nNOTE: {decision_log_path} is missing {missing_dlog} -- skipping capacity enrichment. "
+                      f"Columns present: {list(dlog.columns)}")
+            else:
+                dlog["_key"] = _normalize_msisdn(dlog["agent_msisdn"])
+                dup_keys = dlog["_key"].duplicated(keep=False) & dlog["_key"].notna()
+                if dup_keys.any():
+                    n_dup = int(dlog.loc[dup_keys, "_key"].nunique())
+                    print(f"WARNING: {n_dup} msisdn(s) have more than one row in {decision_log_path.name} "
+                          f"(multiple run_ids in one file?) -- keeping the FIRST occurrence of each for "
+                          f"this join; pass a single-run_id Decision Log to avoid this ambiguity.")
+                dlog_small = dlog[
+                    ["_key", "capacity_shadow_k0_05", "l_full_shadow_k0_05_base", "capacity_estimable"]
+                ].drop_duplicates(subset="_key", keep="first")
+
+                if "_key" not in known.columns:
+                    known["_key"] = _normalize_msisdn(known["msisdn"])
+                n_matched = int(known["_key"].isin(dlog_small["_key"]).sum())
+                known = known.merge(dlog_small, on="_key", how="left")
+                print(f"\nMerged {decision_log_path.name}: {n_matched:,} / {len(known):,} agent(s) matched a "
+                      f"Stage 4C Decision Log row. capacity_shadow_k0_05 = raw Capacity(F) at frozen k=0.05; "
+                      f"l_full_shadow_k0_05_base = Capacity(F) x C3 (base scenario). Both are NaN where "
+                      f"capacity_estimable=False or no Decision Log match was found -- capacity_estimable "
+                      f"is carried through to disambiguate the two.")
+                capacity_cols = ["capacity_shadow_k0_05", "l_full_shadow_k0_05_base", "capacity_estimable"]
+
     # -- Optional enrichment: what the agent ACTUALLY received -----------------
     monthly_path = Path(args.monthly_summary_file)
     disbursement_cols: list[str] = []
     reference_cols = {"category_limit": "category_limit", **present}
+    # "capacity" / "capacity_plus_c3" only added when the Decision Log merge
+    # above actually populated these columns -- same pattern as `present`
+    # only including live/shadow_base/shadow_conservative that exist.
+    if "capacity_shadow_k0_05" in known.columns:
+        reference_cols["capacity"] = "capacity_shadow_k0_05"
+    if "l_full_shadow_k0_05_base" in known.columns:
+        reference_cols["capacity_plus_c3"] = "l_full_shadow_k0_05_base"
     if not monthly_path.exists():
         print(f"\nNOTE: {monthly_path} not found -- skipping disbursement enrichment "
               f"(pass --monthly-summary-file, or run build_monthly_disbursement_summary.py first).")
@@ -222,7 +278,11 @@ def main(argv: list[str] | None = None) -> None:
                 excess_col = f"excess_over_{name}_disbursed"
                 pct_col = f"pct_of_{name}_disbursed"
                 valid = known["disbursed_amount"].notna() & known[ref_col].notna() & (known[ref_col] != 0)
-                if name != "category_limit" and name != "live" and "shadow_status" in known.columns:
+                # Only the two C3-shadow-multiplier columns depend on shadow_status=="ok";
+                # category_limit/live are always defined, and capacity/capacity_plus_c3's
+                # own validity is already fully captured by known[ref_col].notna() above
+                # (NaN exactly when capacity_estimable=False or no Decision Log match).
+                if name in ("shadow_base", "shadow_conservative") and "shadow_status" in known.columns:
                     valid &= known["shadow_status"] == "ok"
                 known[exceeds_col] = pd.NA
                 known[excess_col] = pd.NA
@@ -282,12 +342,17 @@ def main(argv: list[str] | None = None) -> None:
             print(pd.DataFrame(agr_table).round(1).to_string())
 
             print(f"\n{'=' * 78}")
-            print("Full distribution, live reference (finer bands)")
+            print("Full distribution (finer bands)")
             print("=" * 78)
-            if "live" in pct_cols:
-                vals = known[pct_cols["live"]].dropna().astype(float)
+            for name in ["live", "capacity", "capacity_plus_c3"]:
+                if name not in pct_cols:
+                    continue
+                vals = known[pct_cols[name]].dropna().astype(float)
+                if vals.empty:
+                    continue
                 band = pd.cut(vals, bins=BUCKET_EDGES, labels=BUCKET_LABELS)
                 counts = band.value_counts().reindex(BUCKET_LABELS)
+                print(f"\n-- {name} --")
                 print(pd.DataFrame({"n": counts, "pct": (counts / len(vals) * 100).round(1)}).to_string())
 
             # -- Who does the "over limit" (actual disbursement > 110% of the --
@@ -340,7 +405,9 @@ def main(argv: list[str] | None = None) -> None:
                         combined["share_of_all_over_live"] = share.reindex(combined.index).fillna(0.0)
                 return combined
 
-            for label, group_col in [("risk_tier", "risk_tier"), ("K=8 persona", persona_col)]:
+            for label, group_col in [
+                ("agent_category", "agent_category"), ("risk_tier", "risk_tier"), ("K=8 persona", persona_col),
+            ]:
                 if group_col is None or group_col not in known.columns:
                     continue
                 tbl = _group_concentration(group_col)
@@ -350,52 +417,6 @@ def main(argv: list[str] | None = None) -> None:
                 print(f"Over-limit (>110% of reference) concentration by {label}")
                 print("=" * 78)
                 print(tbl.to_string())
-
-    # -- Optional enrichment: raw Capacity(F) limit + Capacity(F) x C3 limit --
-    # from a frozen Stage 4C Decision Log, so all limit sources (live,
-    # shadow C3-only, capacity-only, capacity+C3) sit side by side in one
-    # file. Additive and independent of the monthly-summary enrichment
-    # above -- skipped gracefully (NOTE, not error) if not given, same
-    # discipline as that block and the persona-assignments block.
-    capacity_cols: list[str] = []
-    decision_log_arg = args.decision_log_file
-    if not decision_log_arg:
-        print("\nNOTE: --decision-log-file not given -- skipping capacity-based-limit / Capacity(F) x C3 "
-              "enrichment (pass --decision-log-file to point at a frozen Stage 4C Decision Log CSV).")
-    else:
-        decision_log_path = Path(decision_log_arg)
-        if not decision_log_path.exists():
-            print(f"\nNOTE: {decision_log_path} not found -- skipping capacity-based-limit / Capacity(F) x C3 "
-                  f"enrichment.")
-        else:
-            dlog = pd.read_csv(decision_log_path)
-            required_dlog = {"agent_msisdn", "capacity_shadow_k0_05", "l_full_shadow_k0_05_base", "capacity_estimable"}
-            missing_dlog = required_dlog - set(dlog.columns)
-            if missing_dlog:
-                print(f"\nNOTE: {decision_log_path} is missing {missing_dlog} -- skipping capacity enrichment. "
-                      f"Columns present: {list(dlog.columns)}")
-            else:
-                dlog["_key"] = _normalize_msisdn(dlog["agent_msisdn"])
-                dup_keys = dlog["_key"].duplicated(keep=False) & dlog["_key"].notna()
-                if dup_keys.any():
-                    n_dup = int(dlog.loc[dup_keys, "_key"].nunique())
-                    print(f"WARNING: {n_dup} msisdn(s) have more than one row in {decision_log_path.name} "
-                          f"(multiple run_ids in one file?) -- keeping the FIRST occurrence of each for "
-                          f"this join; pass a single-run_id Decision Log to avoid this ambiguity.")
-                dlog_small = dlog[
-                    ["_key", "capacity_shadow_k0_05", "l_full_shadow_k0_05_base", "capacity_estimable"]
-                ].drop_duplicates(subset="_key", keep="first")
-
-                if "_key" not in known.columns:
-                    known["_key"] = _normalize_msisdn(known["msisdn"])
-                n_matched = int(known["_key"].isin(dlog_small["_key"]).sum())
-                known = known.merge(dlog_small, on="_key", how="left")
-                print(f"\nMerged {decision_log_path.name}: {n_matched:,} / {len(known):,} agent(s) matched a "
-                      f"Stage 4C Decision Log row. capacity_shadow_k0_05 = raw Capacity(F) at frozen k=0.05; "
-                      f"l_full_shadow_k0_05_base = Capacity(F) x C3 (base scenario). Both are NaN where "
-                      f"capacity_estimable=False or no Decision Log match was found -- capacity_estimable "
-                      f"is carried through to disambiguate the two.")
-                capacity_cols = ["capacity_shadow_k0_05", "l_full_shadow_k0_05_base", "capacity_estimable"]
 
     detail_cols = ["msisdn", "agent_category", "category_limit"]
     for name, col in present.items():
