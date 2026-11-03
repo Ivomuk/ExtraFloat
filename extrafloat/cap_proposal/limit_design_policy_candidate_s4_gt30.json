@@ -50,7 +50,5 @@
   "_why_tier_pd_cutoffs": "Used only for borrowers with a calibrated PD. The engine's cut-offs (0.85 / 0.60 / 0.35) were built for the 7-signal score; the calibrated PD tops out near 16%, so on (1 - PD) every borrower is tier 1 or 2. The PD is calibrated, so it reads as an expected bad-loan rate: tier 1 at or below the 2% appetite, tier 2 to 5%, tier 3 to 10%, tier 4 above 10%. Set to null to use the engine's own cut-offs.",
   "_why_thin_file_definition": "The PD model's thin-file flag means no loan history at all and flags only 20 of 9,603 thin-file borrowers; using it would remove the thin-file weights for borrowers with 1-2 loans. 'engine' keeps the engine's own definition (fewer than 3 loans)."
  },
- "min_usable_loan": 300000,
- "_why_min_usable_loan": "Smallest loan ever disbursed is about 300,000 (0.02% of loans are smaller). Used only to flag limits below it; it does not change any limit. To be confirmed by Product.",
  "_candidate": "Same as limit_design_policy_candidate_s4.json but severe = more than 30 days past due (threshold 31): reproduces the earlier shadow run S4."
 }

@@ -248,7 +248,7 @@ if __name__ == "__main__":
                 result = limit_design.run_burden_design(features, design)
                 lim = result["assigned_limit"]
                 print(f"burden design: total limit {lim.sum() / 1e6:,.0f}M | limits above 1,000,000: {(lim > 1e6).sum():,} | highest {lim.max():,.0f} | "
-                      f"limit under {design['min_usable_loan']:,} but above 0: {int(result['design_positive_below_minimum'].sum()):,}")
+                      f"zero limits: {int((lim <= 0).sum()):,}")
             else:
                 result = run_extrafloat_limit_engine(features)
         finally:

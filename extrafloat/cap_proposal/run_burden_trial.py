@@ -80,7 +80,7 @@ AGENT_COLUMNS = [
     "design_stage", "design_k_applied", "design_arrears_rule", "design_binding_constraint",
     "design_monthly_commission", "design_ladder_cap", "design_limit_before_governor",
     "design_governor_cap", "design_limit_at_reference_ceiling", "max_prior_loan_size",
-    "design_usable_loan", "design_positive_below_minimum", "is_thin_file", "risk_tier",
+    "is_thin_file", "risk_tier",
     "design_agent_category", "design_agent_tier_max", "design_agent_tier_guard",
     "design_limit_before_tier_guard", "design_agent_tier_guard_binding",
 ]
@@ -217,7 +217,6 @@ def _group_table(df: pd.DataFrame, by: str) -> pd.DataFrame:
 
 def summarize(agents: pd.DataFrame, settings: dict, settings_name: str) -> dict:
     cur, prop = agents["limit_current"].fillna(0), agents["limit_proposed"]
-    min_usable = float(settings["min_usable_loan"])
 
     def pop(s: pd.Series) -> dict:
         return {
@@ -228,7 +227,6 @@ def summarize(agents: pd.DataFrame, settings: dict, settings_name: str) -> dict:
             "max": round(float(s.max()), 0),
             "zero": int((s <= 0).sum()),
             "above_1m": int((s > LIVE_CEILING).sum()),
-            "positive_below_min_usable": int(((s > 0) & (s < min_usable)).sum()),
         }
 
     total_cur = float(cur.sum())
@@ -374,8 +372,7 @@ def main(argv: list[str] | None = None) -> int:
         index.append({"settings": name, "agent_tier_guard": settings.get("agent_tier_guard", "enforce"), "agents": summary["agents"],
                       "total_current_m": summary["current"]["total_m"], "total_proposed_m": summary["proposed"]["total_m"],
                       "total_change_pct": summary["total_change_pct"], "above_1m": summary["proposed"]["above_1m"],
-                      "zero_proposed": summary["proposed"]["zero"], "above_category_max": summary["above_category_max"],
-                      "below_min_usable": summary["proposed"]["positive_below_min_usable"]})
+                      "zero_proposed": summary["proposed"]["zero"], "above_category_max": summary["above_category_max"]})
         logger.info("%s: total %.1fM -> %.1fM (%s%%), above 1M: %d", name, summary["current"]["total_m"],
                     summary["proposed"]["total_m"], summary["total_change_pct"], summary["proposed"]["above_1m"])
 

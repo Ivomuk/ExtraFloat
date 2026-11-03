@@ -63,7 +63,6 @@ DEFAULTS = {
     # repayment is recorded (the gap resets). A borrower with no repayment date at all is NOT treated as dormant. Credit policy only: no PD change, no block.
     "reactivation": {"enabled": False, "gap_days": 150, "cap_multiple": 2.0},
     "risk_tier_multipliers_apply_to_first_exposure": True,
-    "min_usable_loan": 300_000,
     # Agent-category guard. The design replaces the engine's commission-tier ceiling with k x monthly commission, which on its own
     # lets Below Threshold agents (no XtraFloat) get a limit, lets New Bronze / Bronze go above their category maximum, and lets
     # Diamond go above 1,000,000. The guard re-applies the category maximum (tier multiplier x 1,000,000) AFTER the design:
@@ -352,10 +351,5 @@ def run_burden_design(features, d):
     r["design_agent_tier_guard"] = guard_mode
     r["design_limit_before_tier_guard"] = before_guard
     r["design_agent_tier_guard_binding"] = tier_guard_binding.astype(int)
-    r["design_usable_loan"] = (final >= d["min_usable_loan"]).astype(int)
-    # the calculated credit limit is kept as it is (assigned_limit); what can actually be drawn is a separate product question. A limit under the minimum drawable
-    # loan is NOT lifted to the minimum: it stays a calculated limit with no drawable amount until a smaller product exists.
     r["design_calculated_credit_limit"] = final
-    r["design_available_product_amount"] = final.where(final >= d["min_usable_loan"], 0.0)
-    r["design_positive_below_minimum"] = ((final > 0) & (final < d["min_usable_loan"])).astype(int)
     return r
