@@ -76,7 +76,7 @@ _ARREARS_COLS = {
 }
 
 AGENT_COLUMNS = [
-    "msisdn", "limit_current", "limit_proposed", "limit_change", "change_direction",
+    "msisdn", "limit_frozen", "limit_current", "limit_proposed", "limit_change", "change_direction",
     "design_stage", "design_k_applied", "design_arrears_rule", "design_binding_constraint",
     "design_monthly_commission", "design_ladder_cap", "design_limit_before_governor",
     "design_governor_cap", "design_limit_at_reference_ceiling", "max_prior_loan_size",
@@ -271,13 +271,44 @@ def run_proposed(features: pd.DataFrame, settings: dict) -> pd.DataFrame:
             raise RuntimeError("limit_design left the live engine patched -- restored; results discarded.")
 
 
-def compare(current: pd.DataFrame, proposed: pd.DataFrame) -> pd.DataFrame:
+def _norm_msisdn(s: pd.Series) -> pd.Series:
+    return s.astype(str).str.replace(r"\.0$", "", regex=True).str.replace(r"[^0-9]", "", regex=True)
+
+
+def load_frozen_engine_output(path: str) -> pd.DataFrame:
+    """A previous engine run's output (e.g. output/engine_test_output.csv from run_credit_risk_pipeline.py):
+    returns msisdn, cal_pd (if present) and limit_frozen (its assigned_limit), one row per agent."""
+    f = pd.read_csv(path, dtype={"msisdn": str, "agent_msisdn": str}, low_memory=False)
+    key = "msisdn" if "msisdn" in f.columns else "agent_msisdn" if "agent_msisdn" in f.columns else None
+    if key is None:
+        raise ValueError(f"{path}: no msisdn / agent_msisdn column")
+    out = pd.DataFrame({"msisdn": _norm_msisdn(f[key])})
+    if "cal_pd" in f.columns:
+        out["cal_pd"] = pd.to_numeric(f["cal_pd"], errors="coerce")
+    if "assigned_limit" in f.columns:
+        out["limit_frozen"] = pd.to_numeric(f["assigned_limit"], errors="coerce")
+    return out.drop_duplicates("msisdn", keep="last")
+
+
+def attach_frozen_pd(features: pd.DataFrame, frozen: pd.DataFrame) -> pd.DataFrame:
+    """Join the frozen run's cal_pd by msisdn, replacing any cal_pd already in the features. With cal_pd the engine
+    uses 1 - PD for its risk cap (as run_credit_risk_pipeline.py does), and the design maps PD to its tier cut-offs."""
+    if "cal_pd" not in frozen.columns:
+        return features
+    f = features.drop(columns=["cal_pd"], errors="ignore").copy()
+    f["cal_pd"] = _norm_msisdn(f["msisdn"]).map(frozen.set_index("msisdn")["cal_pd"]).values
+    return f
+
+
+def compare(current: pd.DataFrame, proposed: pd.DataFrame, frozen: pd.DataFrame | None = None) -> pd.DataFrame:
     """One row per agent: current vs proposed limit plus the design's audit columns."""
     cur = current[["msisdn", "assigned_limit"]].rename(columns={"assigned_limit": "limit_current"})
     cur["msisdn"] = cur["msisdn"].astype(str)
     prop = proposed.rename(columns={"assigned_limit": "limit_proposed"}).copy()
     prop["msisdn"] = prop["msisdn"].astype(str)
     out = prop.merge(cur, on="msisdn", how="left", validate="one_to_one")
+    if frozen is not None and "limit_frozen" in frozen.columns:
+        out["limit_frozen"] = _norm_msisdn(out["msisdn"]).map(frozen.set_index("msisdn")["limit_frozen"]).values
     out["limit_change"] = out["limit_proposed"] - out["limit_current"]
     out["change_direction"] = np.select([out["limit_current"].isna(), out["limit_change"] > 0.5, out["limit_change"] < -0.5],
                                         ["not scored by current", "up", "down"], "same")
@@ -321,7 +352,8 @@ def guard_comparison(agents_by_mode: dict[str, pd.DataFrame]) -> tuple[pd.DataFr
     Returns (per-agent wide table, per-category totals)."""
     modes = [m for m in ("enforce", "off", "enforce_below_diamond") if m in agents_by_mode]
     first = agents_by_mode[modes[0]]
-    wide = first[["msisdn", "design_agent_category", "design_agent_tier_max", "design_stage", "limit_current"]].copy()
+    wide = first[[c for c in ("msisdn", "design_agent_category", "design_agent_tier_max", "design_stage", "limit_frozen",
+                              "limit_current") if c in first.columns]].copy()
     wide = wide.rename(columns={"design_agent_category": "agent_category", "design_agent_tier_max": "category_max",
                                 "design_stage": "experience_stage"})
     for m in modes:
@@ -333,8 +365,10 @@ def guard_comparison(agents_by_mode: dict[str, pd.DataFrame]) -> tuple[pd.DataFr
     order = [c for c in CATEGORY_ORDER if c in set(wide["agent_category"])]
     order += [c for c in wide["agent_category"].dropna().unique() if c not in order]
     g = wide.groupby("agent_category", dropna=False)
-    cat = pd.DataFrame({"agents": g.size(), "category_max": g["category_max"].max(),
-                        "current_total_m": g["limit_current"].sum() / 1e6})
+    cat = pd.DataFrame({"agents": g.size(), "category_max": g["category_max"].max()})
+    if "limit_frozen" in wide.columns:
+        cat["frozen_total_m"] = g["limit_frozen"].sum() / 1e6
+    cat["current_total_m"] = g["limit_current"].sum() / 1e6
     for m in modes:
         col = f"limit_{GUARD_LABELS[m]}"
         cat[f"{GUARD_LABELS[m]}_total_m"] = g[col].sum() / 1e6
@@ -390,7 +424,13 @@ def summarize(agents: pd.DataFrame, settings: dict, settings_name: str) -> dict:
         }
 
     total_cur = float(cur.sum())
+    frozen = agents["limit_frozen"] if "limit_frozen" in agents.columns else None
     return {
+        **({"frozen": pop(frozen.fillna(0)),
+            "frozen_matched": int(frozen.notna().sum()),
+            "total_change_vs_frozen_pct": round(100.0 * (float(prop.sum()) - float(frozen.fillna(0).sum()))
+                                                / float(frozen.fillna(0).sum()), 1) if frozen.fillna(0).sum() > 0 else None}
+           if frozen is not None else {}),
         "settings": settings_name,
         "agents": int(len(agents)),
         "current": pop(cur),
@@ -429,13 +469,16 @@ def _md_table(records: list[dict]) -> str:
 
 
 def render_markdown(s: dict, synthetic: bool) -> str:
-    rows = [{"metric": k, "current": s["current"][k], "proposed": s["proposed"][k]} for k in s["current"]]
+    rows = [{"metric": k, **({"frozen": s["frozen"][k]} if "frozen" in s else {}), "current": s["current"][k],
+             "proposed": s["proposed"][k]} for k in s["current"]]
     note = ("\n> **Synthetic data.** These figures check that the design runs and that its rules fire as written. "
             "They say nothing about the real population.\n") if synthetic else ""
     note += "".join(f"\n> **Input note.** {n}\n" for n in DATA_NOTES)
     return (
         f"# Burden design trial: `{s['settings']}`\n{note}\n"
-        f"Agents scored: **{s['agents']:,}**. Total limit change vs the live engine: **{s['total_change_pct']}%**.\n\n"
+        f"Agents scored: **{s['agents']:,}**. Total limit change vs the live engine: **{s['total_change_pct']}%**"
+        + (f"; vs the frozen engine output: **{s['total_change_vs_frozen_pct']}%** "
+           f"({s['frozen_matched']:,} agents matched)" if "frozen" in s else "") + ".\n\n"
         f"## Population\n\n{_md_table(rows)}\n"
         f"Direction of change: {s['direction']}\n\n"
         f"## By agent category (guard: `{s['key_settings']['agent_tier_guard']}`)\n\n"
@@ -471,6 +514,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--all-candidates", action="store_true", help="Run every limit_design_*.json in extrafloat/cap_proposal/.")
     ap.add_argument("--agent-tier-guard", nargs="+", choices=GUARD_MODES,
                     help="Override the settings' agent_tier_guard; several values run each settings file once per mode.")
+    ap.add_argument("--frozen-engine-output",
+                    help="A previous engine run's output CSV (e.g. output\\engine_test_output.csv from run.bat). Its cal_pd is "
+                         "joined into BOTH runs (PD-based risk cap and tiers, as in run_credit_risk_pipeline.py) and its "
+                         "assigned_limit is added as limit_frozen.")
     ap.add_argument("--align-loan-dates", action="store_true",
                     help="Join a loan summary / loan history from a DIFFERENT snapshot date on purpose: their snapshot_dt is "
                          "relabelled to the agent mart's date so the engine's exact-date join matches. The loan data itself "
@@ -513,6 +560,22 @@ def main(argv: list[str] | None = None) -> int:
     except SnapshotDateMismatch as exc:
         print(f"\nERROR: {exc}")
         return 2
+    frozen = None
+    if args.frozen_engine_output:
+        frozen = load_frozen_engine_output(args.frozen_engine_output)
+        production = attach_frozen_pd(production, frozen)
+        design_features = attach_frozen_pd(design_features, frozen)
+        if "cal_pd" in frozen.columns:
+            cov = design_features["cal_pd"].notna().mean()
+            DATA_NOTES.append(f"cal_pd joined from {args.frozen_engine_output} for {cov:.1%} of agents "
+                              "(the rest use the engine's 7-signal risk score).")
+        else:
+            DATA_NOTES.append(f"{args.frozen_engine_output} has no cal_pd column: risk stays on the 7-signal score.")
+        if "limit_frozen" in frozen.columns:
+            matched = _norm_msisdn(design_features["msisdn"]).isin(frozen["msisdn"]).mean()
+            DATA_NOTES.append(f"limit_frozen = assigned_limit from {args.frozen_engine_output} ({matched:.1%} of agents matched).")
+        for n in DATA_NOTES[-2:]:
+            logger.warning("DATA NOTE: %s", n)
     current = run_current(design_features if args.current_with_loan_history else production)
 
     index = []
@@ -536,7 +599,7 @@ def main(argv: list[str] | None = None) -> int:
             logger.error("%s: SKIPPED -- %s", name, exc)
             index.append({"settings": name, "skipped": str(exc)})
             continue
-        agents = compare(current, proposed)
+        agents = compare(current, proposed, frozen)
         by_settings.setdefault(stem, {})[settings.get("agent_tier_guard", "enforce")] = agents
         summary = summarize(agents, settings, name)
         run_dir = out_dir / name
@@ -545,6 +608,7 @@ def main(argv: list[str] | None = None) -> int:
         (run_dir / "summary.json").write_text(json.dumps(summary, indent=2, default=str))
         (run_dir / "summary.md").write_text(render_markdown(summary, synthetic=bool(args.synthetic)))
         index.append({"settings": name, "agent_tier_guard": settings.get("agent_tier_guard", "enforce"), "agents": summary["agents"],
+                      **({"total_frozen_m": summary["frozen"]["total_m"]} if "frozen" in summary else {}),
                       "total_current_m": summary["current"]["total_m"], "total_proposed_m": summary["proposed"]["total_m"],
                       "total_change_pct": summary["total_change_pct"], "above_1m": summary["proposed"]["above_1m"],
                       "zero_proposed": summary["proposed"]["zero"], "above_category_max": summary["above_category_max"]})

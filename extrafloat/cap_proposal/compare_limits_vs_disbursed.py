@@ -41,6 +41,7 @@ import numpy as np
 import pandas as pd
 
 LIMIT_COLUMNS = {
+    "limit_frozen": "frozen engine",
     "limit_current": "current engine",
     "limit_category_enforced": "category enforced",
     "limit_category_not_enforced": "category not enforced",

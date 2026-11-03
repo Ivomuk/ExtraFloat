@@ -92,6 +92,15 @@ join works. The loan data itself is unchanged, and an **Input note** saying so i
 If the loan data is later than the mart, any comparison with disbursements made between the two dates is biased
 towards agreement, because those loans are already in the inputs.
 
+### Using the PD model and the frozen engine output
+
+Add `--frozen-engine-output output\engine_test_output.csv`, the file `run.bat` writes through `run_credit_risk_pipeline.py`. Two things change:
+- **`cal_pd`** from that file is joined into **both** runs. The current engine then uses 1 − PD for its risk cap, as the
+  pipeline does, and the design maps PD to its risk tiers at 2% / 5% / 10%, as the proposal intends. Without it,
+  both runs use the engine's 7-signal risk score.
+- **`assigned_limit`** from that file is added as **`limit_frozen`**. It appears in `agents.csv`, the side-by-side
+  files, the summaries and `compare_limits_vs_disbursed` (as "frozen engine").
+
 ### Inputs the design needs
 
 | Column | Source |

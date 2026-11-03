@@ -355,3 +355,39 @@ def test_align_loan_dates_still_refuses_borrower_beyond_loan_date(tmp_path):
         paths[name] = str(tmp_path / f"{name}.csv")
     with pytest.raises(trial.SnapshotDateMismatch, match="borrower history"):
         trial.load_features(**paths, as_of_date="2026-07-31", align_loan_dates_to_mart=True)
+
+
+# -- 7. frozen engine output (cal_pd + assigned_limit) ----------------------------
+
+
+def test_frozen_engine_output_joins_pd_and_frozen_limit(tmp_path):
+    paths = _write_synthetic(tmp_path)
+    txn = pd.read_csv(paths["transaction"], dtype={"agent_msisdn": str})
+    rng = np.random.default_rng(0)
+    frozen = pd.DataFrame({"msisdn": txn["agent_msisdn"], "cal_pd": rng.uniform(0.005, 0.15, len(txn)),
+                           "assigned_limit": 120_000.0, "risk_tier": "tier_1"})
+    frozen.to_csv(tmp_path / "frozen.csv", index=False)
+    base = ["--transaction", paths["transaction"], "--borrower", paths["borrower"], "--loan-summary", paths["loan_summary"],
+            "--loan-history", paths["loan_history"], "--as-of-date", SNAPSHOT_DT,
+            "--agent-tier-guard", "enforce", "off", "enforce_below_diamond"]
+    assert trial.main([*base, "--out-dir", str(tmp_path / "no_pd")]) == 0
+    assert trial.main([*base, "--frozen-engine-output", str(tmp_path / "frozen.csv"), "--out-dir", str(tmp_path / "pd")]) == 0
+
+    a = pd.read_csv(tmp_path / "pd" / "limit_design_proposal__guard_enforce" / "agents.csv")
+    assert a["cal_pd"].notna().all()
+    assert (a["limit_frozen"] == 120_000).all()
+    no_pd = pd.read_csv(tmp_path / "no_pd" / "limit_design_proposal__guard_enforce" / "agents.csv")
+    assert "cal_pd" not in no_pd.columns or no_pd["cal_pd"].isna().all()
+    assert not a["risk_tier"].equals(no_pd["risk_tier"])                   # PD changes the tiers
+    wide = pd.read_csv(tmp_path / "pd" / "limit_design_proposal__guard_comparison_agents.csv")
+    assert "limit_frozen" in wide.columns
+    assert "frozen engine output" in (tmp_path / "pd" / "limit_design_proposal__guard_enforce" / "summary.md").read_text()
+
+    from extrafloat.cap_proposal import compare_limits_vs_disbursed as cmp
+
+    disb = wide[["msisdn"]].assign(profile="x", month="2026-08", disbursed_amount=100_000, n_transactions=1)
+    disb.to_csv(tmp_path / "disb.csv", index=False)
+    assert cmp.main(["--agents", str(tmp_path / "pd" / "limit_design_proposal__guard_comparison_agents.csv"),
+                     "--disbursed", str(tmp_path / "disb.csv"), "--out-dir", str(tmp_path / "vs")]) == 0
+    cat = pd.read_csv(tmp_path / "vs" / "limits_vs_disbursed_by_category.csv")
+    assert "frozen engine" in set(cat["limit"])
