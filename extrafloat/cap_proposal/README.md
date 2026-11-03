@@ -6,6 +6,33 @@ the limit is capped at **a multiple of the agent's monthly commission**
 Any increase beyond what the current 1,000,000 UGX engine would give is limited to
 **1.25 × the agent's largest past loan**. See the docstring at the top of `limit_design.py`.
 
+### Agent-category guard (`agent_tier_guard`)
+
+Agent categories come from the 6-month commission, and each category has a maximum limit:
+
+| Category | Below Threshold | New Bronze | Bronze | Silver | Gold | Platinum | Titanium | Diamond |
+|---|---|---|---|---|---|---|---|---|
+| Maximum (UGX) | 0 | 50,000 | 100,000 | 250,000 | 350,000 | 500,000 | 750,000 | 1,000,000 |
+
+The design overwrites the engine's tier ceiling with 4 × monthly commission. Without a guard, that breaks
+the category maximums:
+- Below Threshold agents would get a limit.
+- New Bronze could reach about 67k and Bronze about 167k.
+- Diamond could reach the 5M engine ceiling.
+
+`agent_tier_guard` re-applies the category maximum after the design. It only ever lowers a limit.
+
+| Setting | Effect |
+|---|---|
+| `enforce` (default) | Every agent is capped at its category maximum; Below Threshold agents get 0. Nobody goes above 1,000,000. |
+| `enforce_below_diamond` | Same as `enforce`, except Diamond agents can go above 1,000,000, limited by the governor and the 5M ceiling. |
+| `off` | The design as originally written, with no category guard. |
+
+Compare all three in one run with `--agent-tier-guard off enforce_below_diamond enforce`. Every `summary.md`
+has a by-category table: each category's maximum, how many proposed limits sit above it, and how many limits
+the guard capped. The audit columns are `design_agent_category`, `design_agent_tier_max`,
+`design_limit_before_tier_guard` and `design_agent_tier_guard_binding`.
+
 **Nothing here changes the live engine.** `limit_design.py` swaps two engine functions in only for the
 length of its own call and puts them back afterwards. The engine source (`extrafloat/engine/`) and
 `run_engine.py` are not modified.

@@ -81,7 +81,11 @@ AGENT_COLUMNS = [
     "design_monthly_commission", "design_ladder_cap", "design_limit_before_governor",
     "design_governor_cap", "design_limit_at_reference_ceiling", "max_prior_loan_size",
     "design_usable_loan", "design_positive_below_minimum", "is_thin_file", "risk_tier",
+    "design_agent_category", "design_agent_tier_max", "design_agent_tier_guard",
+    "design_limit_before_tier_guard", "design_agent_tier_guard_binding",
 ]
+CATEGORY_ORDER = ["Below Threshold", "new bronze", "bronze", "silver", "gold", "platinum", "titanium", "diamond"]
+GUARD_MODES = ("enforce", "enforce_below_diamond", "off")
 
 
 # -----------------------------------------------------------------------------
@@ -176,6 +180,26 @@ def compare(current: pd.DataFrame, proposed: pd.DataFrame) -> pd.DataFrame:
 # -----------------------------------------------------------------------------
 
 
+def category_table(agents: pd.DataFrame) -> pd.DataFrame:
+    """Per agent category: the category maximum and how many proposed limits sit above it."""
+    a = agents.assign(over=agents["limit_proposed"] > agents["design_agent_tier_max"] + 1,
+                      excess=(agents["limit_proposed"] - agents["design_agent_tier_max"]).clip(lower=0))
+    g = a.groupby("design_agent_category", dropna=False)
+    t = pd.DataFrame({
+        "agents": g.size(),
+        "category_max": g["design_agent_tier_max"].max(),
+        "max_current": g["limit_current"].max(),
+        "max_proposed": g["limit_proposed"].max(),
+        "total_current_m": g["limit_current"].sum() / 1e6,
+        "total_proposed_m": g["limit_proposed"].sum() / 1e6,
+        "above_category_max": g["over"].sum().astype(int),
+        "excess_above_max_m": g["excess"].sum() / 1e6,
+        "capped_by_guard": g["design_agent_tier_guard_binding"].sum().astype(int),
+    })
+    order = [c for c in CATEGORY_ORDER if c in t.index] + [c for c in t.index if c not in CATEGORY_ORDER]
+    return t.reindex(order)
+
+
 def _group_table(df: pd.DataFrame, by: str) -> pd.DataFrame:
     g = df.groupby(by, dropna=False)
     t = pd.DataFrame({
@@ -217,6 +241,8 @@ def summarize(agents: pd.DataFrame, settings: dict, settings_name: str) -> dict:
         "direction": agents["change_direction"].value_counts().to_dict(),
         "by_stage": _group_table(agents, "design_stage").round(3).reset_index().to_dict("records"),
         "by_binding_constraint": _group_table(agents, "design_binding_constraint").round(3).reset_index().to_dict("records"),
+        "by_agent_category": category_table(agents).round(3).reset_index().to_dict("records"),
+        "above_category_max": int((agents["limit_proposed"] > agents["design_agent_tier_max"] + 1).sum()),
         "key_settings": {
             "capacity_ceiling_multiple": settings["capacity_ceiling_multiple"],
             "engine_ceiling": settings["engine_ceiling"],
@@ -225,6 +251,7 @@ def summarize(agents: pd.DataFrame, settings: dict, settings_name: str) -> dict:
             "arrears_source": settings["arrears"].get("source", "legacy"),
             "reactivation_enabled": bool((settings.get("reactivation") or {}).get("enabled")),
             "pd_tier_cutoffs": (settings.get("pd") or {}).get("tier_pd_cutoffs"),
+            "agent_tier_guard": settings.get("agent_tier_guard", "enforce"),
         },
     }
 
@@ -252,6 +279,9 @@ def render_markdown(s: dict, synthetic: bool) -> str:
         f"Agents scored: **{s['agents']:,}**. Total limit change vs the live engine: **{s['total_change_pct']}%**.\n\n"
         f"## Population\n\n{_md_table(rows)}\n"
         f"Direction of change: {s['direction']}\n\n"
+        f"## By agent category (guard: `{s['key_settings']['agent_tier_guard']}`)\n\n"
+        f"Proposed limits above the agent's category maximum: **{s['above_category_max']:,}**.\n\n"
+        f"{_md_table(s['by_agent_category'])}\n"
         f"## By experience stage\n\n{_md_table(s['by_stage'])}\n"
         f"## By binding constraint\n\n{_md_table(s['by_binding_constraint'])}\n"
         f"## Settings used\n\n```json\n{json.dumps(s['key_settings'], indent=2)}\n```\n"
@@ -280,6 +310,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--as-of-date", help="As-of date for feature engineering (YYYY-MM-DD); default today.")
     ap.add_argument("--design-config", nargs="+", help=f"Settings JSON(s). Default {DEFAULT_SETTINGS.name}.")
     ap.add_argument("--all-candidates", action="store_true", help="Run every limit_design_*.json in extrafloat/cap_proposal/.")
+    ap.add_argument("--agent-tier-guard", nargs="+", choices=GUARD_MODES,
+                    help="Override the settings' agent_tier_guard; several values run each settings file once per mode.")
     ap.add_argument("--current-with-loan-history", action="store_true",
                     help="Feed the loan history to the CURRENT run too (activates the engine's unresolved-loan haircut). "
                          "Default off = the engine exactly as run_engine.py runs it in production.")
@@ -313,29 +345,38 @@ def main(argv: list[str] | None = None) -> int:
     current = run_current(design_features if args.current_with_loan_history else production)
 
     index = []
+    runs = []
     for path in _settings_files(args):
-        settings = ld.load_design_config(path)
+        base = ld.load_design_config(path)
         if not path.exists():
             logger.warning("settings file %s not found -- using limit_design.py DEFAULTS", path)
+        if args.agent_tier_guard:
+            for mode in args.agent_tier_guard:
+                runs.append((f"{path.stem}__guard_{mode}" if len(args.agent_tier_guard) > 1 else path.stem,
+                             {**base, "agent_tier_guard": mode}))
+        else:
+            runs.append((path.stem, base))
+
+    for name, settings in runs:
         try:
             proposed = run_proposed(design_features, settings)
         except ValueError as exc:
-            logger.error("%s: SKIPPED -- %s", path.stem, exc)
-            index.append({"settings": path.stem, "skipped": str(exc)})
+            logger.error("%s: SKIPPED -- %s", name, exc)
+            index.append({"settings": name, "skipped": str(exc)})
             continue
         agents = compare(current, proposed)
-        summary = summarize(agents, settings, path.stem)
-        run_dir = out_dir / path.stem
+        summary = summarize(agents, settings, name)
+        run_dir = out_dir / name
         run_dir.mkdir(exist_ok=True)
         agents.to_csv(run_dir / "agents.csv", index=False)
         (run_dir / "summary.json").write_text(json.dumps(summary, indent=2, default=str))
         (run_dir / "summary.md").write_text(render_markdown(summary, synthetic=bool(args.synthetic)))
-        index.append({"settings": path.stem, "agents": summary["agents"],
+        index.append({"settings": name, "agent_tier_guard": settings.get("agent_tier_guard", "enforce"), "agents": summary["agents"],
                       "total_current_m": summary["current"]["total_m"], "total_proposed_m": summary["proposed"]["total_m"],
                       "total_change_pct": summary["total_change_pct"], "above_1m": summary["proposed"]["above_1m"],
-                      "zero_proposed": summary["proposed"]["zero"],
+                      "zero_proposed": summary["proposed"]["zero"], "above_category_max": summary["above_category_max"],
                       "below_min_usable": summary["proposed"]["positive_below_min_usable"]})
-        logger.info("%s: total %.1fM -> %.1fM (%s%%), above 1M: %d", path.stem, summary["current"]["total_m"],
+        logger.info("%s: total %.1fM -> %.1fM (%s%%), above 1M: %d", name, summary["current"]["total_m"],
                     summary["proposed"]["total_m"], summary["total_change_pct"], summary["proposed"]["above_1m"])
 
     idx = pd.DataFrame(index)

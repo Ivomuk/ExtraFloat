@@ -64,6 +64,13 @@ DEFAULTS = {
     "reactivation": {"enabled": False, "gap_days": 150, "cap_multiple": 2.0},
     "risk_tier_multipliers_apply_to_first_exposure": True,
     "min_usable_loan": 300_000,
+    # Agent-category guard. The design replaces the engine's commission-tier ceiling with k x monthly commission, which on its own
+    # lets Below Threshold agents (no XtraFloat) get a limit, lets New Bronze / Bronze go above their category maximum, and lets
+    # Diamond go above 1,000,000. The guard re-applies the category maximum (tier multiplier x 1,000,000) AFTER the design:
+    #   "enforce"               every agent capped at its category maximum; Below Threshold gets 0.
+    #   "enforce_below_diamond" as enforce, except Diamond, which may go above 1,000,000 under the design's own caps and governor.
+    #   "off"                   the design as originally written (no category guard).
+    "agent_tier_guard": "enforce",
     # When a calibrated PD (cal_pd) is present: how the PD is turned into the engine's risk tiers, and which thin-file definition applies.
     "pd": {
         "tier_pd_cutoffs": [0.02, 0.05, 0.10],      # PD at or below 2% = tier 1, to 5% = tier 2, to 10% = tier 3, above 10% = tier 4. None = engine's 0.85/0.60/0.35 on (1 - PD)
@@ -233,6 +240,16 @@ def apply_thin_file_definition(features, d):
 def run_burden_design(features, d):
     """Run the burden design and return the engine result frame with assigned_limit replaced and design_* audit columns added."""
     ceil = float(d["engine_ceiling"])
+    guard_mode = d.get("agent_tier_guard", "enforce")
+    if guard_mode not in ("enforce", "enforce_below_diamond", "off"):
+        raise ValueError(f"agent_tier_guard must be enforce, enforce_below_diamond or off, not {guard_mode!r}")
+    # The category maximum must be read BEFORE the engine pass: _engine_pass overwrites agent_tier_ceiling_multiplier.
+    from extrafloat.engine.extrafloat_limit_engine_caps import DEFAULT_CAP_CONFIG as _CFG
+    _key = features["msisdn"].astype(str)
+    tier_max_by_agent = pd.Series(
+        (features["agent_tier_ceiling_multiplier"].fillna(_CFG["agent_tier"]["default_multiplier"]).clip(0, 1)
+         * float(_CFG["global_ceiling_limit"])).values, index=_key.values)
+    category_by_agent = pd.Series(features["agent_category"].values, index=_key.values) if "agent_category" in features.columns else None
     features = apply_thin_file_definition(features, d)
     with pd_tier_scale(d):
         r = _engine_pass(features, d, ceil, d["risk_base_limit"]).copy()
@@ -274,13 +291,31 @@ def run_burden_design(features, d):
         react_reduces = (final_alt > final + 0.5)
     else:
         final_alt, react_reduces = final, pd.Series(False, index=r.index)
+    agents_ = r["msisdn"].astype(str)
+    tier_max = pd.Series(agents_.map(tier_max_by_agent).values, index=r.index)
+    category = pd.Series(agents_.map(category_by_agent).values, index=r.index) if category_by_agent is not None else pd.Series("", index=r.index)
+    if guard_mode == "off":
+        guard_applies = pd.Series(False, index=r.index)
+    else:
+        guard_applies = tier_max.notna()
+        if guard_mode == "enforce_below_diamond":
+            guard_applies &= category.astype(str).str.lower() != "diamond"
+    before_guard = final.copy()
+    final = pd.Series(np.where(guard_applies, np.minimum(final, tier_max.fillna(np.inf)), final), index=r.index)
+    tier_guard_binding = guard_applies & (final < before_guard - 1)
+    if RA.get("enabled"):
+        final_alt = pd.Series(np.where(guard_applies, np.minimum(final_alt, tier_max.fillna(np.inf)), final_alt), index=r.index)
+        react_reduces = (final_alt > final + 0.5)
+    else:
+        final_alt = final
     before_block = final.copy()
     if d["arrears"]["block_lending_when_severe_overdue"]:
         final = final.where(~severe, 0.0)
 
     kmult = float(d["capacity_ceiling_multiple"])
-    binding = np.select([final <= 0, final < limit_ladder - 1, (ladder_cap < engine_limit) & (k < kmult), ladder_cap < engine_limit],
-                        ["zero (no commission, arrears block, or engine caps)", "demonstrated-exposure governor", "experience ladder", "commission ceiling"],
+    binding = np.select([tier_guard_binding & (final <= 0), tier_guard_binding, final <= 0, before_guard < limit_ladder - 1, (ladder_cap < engine_limit) & (k < kmult), ladder_cap < engine_limit],
+                        ["zero (Below Threshold agent category)", "agent category maximum",
+                         "zero (no commission, arrears block, or engine caps)", "demonstrated-exposure governor", "experience ladder", "commission ceiling"],
                         "engine caps (usage, exposure, risk, tier)")
     r["assigned_limit_before_design"] = r["assigned_limit"]
     r["assigned_limit"] = final
@@ -309,9 +344,14 @@ def run_burden_design(features, d):
     r["design_reactivation_binding"] = react_reduces.astype(int)
     r["design_limit_without_reactivation"] = final_alt
     r["design_ladder_binding"] = (ladder_cap < engine_limit - 1).astype(int)
-    r["design_governor_binding"] = (final < limit_ladder - 1).astype(int)
+    r["design_governor_binding"] = (before_guard < limit_ladder - 1).astype(int)
     r["design_engine_risk_guardrail_binding"] = r["risk_cap_binding"].fillna(0).astype(int) if "risk_cap_binding" in r.columns else 0
     r["design_prior_limit_smoothing_applied"] = r["prior_limit_smoothing_applied"].fillna(0).astype(int) if "prior_limit_smoothing_applied" in r.columns else 0
+    r["design_agent_category"] = category
+    r["design_agent_tier_max"] = tier_max
+    r["design_agent_tier_guard"] = guard_mode
+    r["design_limit_before_tier_guard"] = before_guard
+    r["design_agent_tier_guard_binding"] = tier_guard_binding.astype(int)
     r["design_usable_loan"] = (final >= d["min_usable_loan"]).astype(int)
     # the calculated credit limit is kept as it is (assigned_limit); what can actually be drawn is a separate product question. A limit under the minimum drawable
     # loan is NOT lifted to the minimum: it stays a calculated limit with no drawable amount until a smaller product exists.

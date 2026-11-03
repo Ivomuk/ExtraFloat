@@ -161,3 +161,60 @@ def test_cli_synthetic_all_candidates(tmp_path):
     assert len(idx) == len(list(trial.HERE.glob("limit_design_*.json")))
     assert "skipped" not in idx.columns or idx["skipped"].isna().all()
     assert (tmp_path / "limit_design_proposal" / "summary.md").exists()
+
+
+# -- 4. agent-category guard ----------------------------------------------------
+
+
+def _with_guard(settings, mode):
+    return {**settings, "agent_tier_guard": mode}
+
+
+def test_default_guard_is_enforce(settings):
+    assert settings["agent_tier_guard"] == "enforce"
+    assert ld.DEFAULTS["agent_tier_guard"] == "enforce"
+
+
+def test_enforce_keeps_every_limit_within_category_max(proposed):
+    assert (proposed["assigned_limit"] <= proposed["design_agent_tier_max"] + 1).all()
+    below = proposed["design_agent_category"] == "Below Threshold"
+    assert below.any()
+    assert (proposed.loc[below, "assigned_limit"] == 0).all()
+
+
+def test_category_max_matches_engine_tier_table(proposed):
+    from extrafloat.engine.extrafloat_limit_engine_caps import DEFAULT_CAP_CONFIG
+
+    tiers = DEFAULT_CAP_CONFIG["agent_tier"]["tiers"]
+    for cat, grp in proposed.groupby("design_agent_category"):
+        expected = 0.0 if cat == "Below Threshold" else tiers[cat] * DEFAULT_CAP_CONFIG["global_ceiling_limit"]
+        assert (grp["design_agent_tier_max"] == expected).all(), cat
+
+
+def test_enforce_below_diamond_only_diamond_may_exceed(features, settings):
+    r = trial.run_proposed(features[1], _with_guard(settings, "enforce_below_diamond"))
+    over = r["assigned_limit"] > r["design_agent_tier_max"] + 1
+    assert set(r.loc[over, "design_agent_category"]) <= {"diamond"}
+
+
+def test_off_reproduces_design_without_guard(features, settings):
+    r = trial.run_proposed(features[1], _with_guard(settings, "off"))
+    pdt.assert_series_equal(r["assigned_limit"], r["design_limit_before_tier_guard"], check_names=False)
+    assert r["design_agent_tier_guard_binding"].sum() == 0
+
+
+def test_guard_never_raises_a_limit(features, settings, proposed):
+    off = trial.run_proposed(features[1], _with_guard(settings, "off"))
+    assert (proposed["assigned_limit"].values <= off["assigned_limit"].values + 1).all()
+
+
+def test_invalid_guard_mode_raises(features, settings):
+    with pytest.raises(ValueError, match="agent_tier_guard"):
+        trial.run_proposed(features[1], _with_guard(settings, "sometimes"))
+
+
+def test_cli_guard_modes_one_run_each(tmp_path):
+    assert trial.main(["--synthetic", "300", "--agent-tier-guard", *trial.GUARD_MODES, "--out-dir", str(tmp_path)]) == 0
+    idx = pd.read_csv(tmp_path / "index.csv").set_index("agent_tier_guard")
+    assert set(idx.index) == set(trial.GUARD_MODES)
+    assert idx.loc["enforce", "above_category_max"] == 0

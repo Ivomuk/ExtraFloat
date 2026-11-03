@@ -53,6 +53,9 @@
     "_why_thin_file_definition": "The PD model's thin-file flag means no loan history at all and flags only 20 of 9,603 thin-file borrowers; using it would remove the thin-file weights for borrowers with 1-2 loans. 'engine' keeps the engine's own definition (fewer than 3 loans)."
   },
 
+  "agent_tier_guard": "enforce",
+  "_why_agent_tier_guard": "Agent categories (commission tiers) cap what an agent can get: Below Threshold 0, New Bronze 50,000, Bronze 100,000, Silver 250,000, Gold 350,000, Platinum 500,000, Titanium 750,000, Diamond 1,000,000. The commission-multiple ceiling alone breaks these caps for Below Threshold, New Bronze, Bronze and Diamond. 'enforce' keeps every category cap; 'enforce_below_diamond' keeps them except for Diamond, which can then go above 1,000,000 under the governor; 'off' = the design as first written.",
+
   "min_usable_loan": 300000,
   "_why_min_usable_loan": "Smallest loan ever disbursed is about 300,000 (0.02% of loans are smaller). Used only to flag limits below it; it does not change any limit. To be confirmed by Product."
 }
