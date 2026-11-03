@@ -1,0 +1,2611 @@
+{
+  "training_completed_at": "2026-09-14T05:01:23.512925Z",
+  "git_commit": "unknown",
+  "feature_schema_version": 1,
+  "preprocessor_version": 1,
+  "label_coverage_ratio_threshold": 0.8,
+  "label_near_horizon_max_lag_days": 5,
+  "train_rows": 4616409,
+  "val_rows": 1038995,
+  "val_select_rows": 516028,
+  "val_cal_rows": 516028,
+  "candidate_features": 184,
+  "selected_features": 80,
+  "bad_rate_train": 0.11913740745241594,
+  "bad_rate_val": 0.12149144124851419,
+  "train_cutoff": "2026-06-14",
+  "thin_file_train": 126556,
+  "thin_file_val": 6939,
+  "thin_file_lr_val_auc": 0.714459841771051,
+  "champion": "xgb",
+  "xgb_val_auc": 0.9064557779074865,
+  "xgb_val_auc_thick_only": 0.9064557779074865,
+  "lgb_val_auc": 0.9104440677390092,
+  "iv_table": [
+    {
+      "feature": "all_prior_loans_gross_repayment_ratio",
+      "iv_before": 0.8257338883290636,
+      "iv_after": 0.8257338883290636,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "active_loan_days_aging_at_scoring",
+      "iv_before": 0.42810479271071494,
+      "iv_after": 0.42810479271071494,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "consecutive_on_time_loans",
+      "iv_before": 0.3972039704572171,
+      "iv_after": 0.3972039704572171,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "max_tenure_days_last_5_closed_loans",
+      "iv_before": 0.38516974445193436,
+      "iv_after": 0.38516974445193436,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "last_closed_loan_tenure_days",
+      "iv_before": 0.3654743136480447,
+      "iv_after": 0.3654743136480447,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "avg_tenure_days_closed_loans",
+      "iv_before": 0.3145000617821961,
+      "iv_after": 0.3145000617821961,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "scoring_state_repayment_to_disbursement_event_ratio",
+      "iv_before": 0.30512742521242125,
+      "iv_after": 0.30512742521242125,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "scoring_state_loan_gross_repayment_ratio",
+      "iv_before": 0.26861206394289244,
+      "iv_after": 0.26861206394289244,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "most_recent_prior_days_past_due_within_30d",
+      "iv_before": 0.22369031821654753,
+      "iv_after": 0.22369031821654753,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "scoring_state_loan_principal_repayment_ratio",
+      "iv_before": 0.22120352365698073,
+      "iv_after": 0.22120352365698073,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "all_prior_loans_principal_repayment_ratio",
+      "iv_before": 0.16850268393499745,
+      "iv_after": 0.16850268393499745,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "avg_prior_loan_principal_repayment_ratio",
+      "iv_before": 0.16220016659413,
+      "iv_after": 0.16220016659413,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "scoring_state_loan_repaid_ugx",
+      "iv_before": 0.12104951815039505,
+      "iv_after": 0.12104951815039505,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "prior_disbursement_count_30d",
+      "iv_before": 0.11086761778945665,
+      "iv_after": 0.11086761778945665,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "days_since_last_repayment",
+      "iv_before": 0.10403136227178708,
+      "iv_after": 0.10403136227178708,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "scoring_state_loan_disbursed_ugx",
+      "iv_before": 0.07648564272517647,
+      "iv_after": 0.07648564272517647,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "disbursement_hour",
+      "iv_before": 0.07385476633150771,
+      "iv_after": 0.07385476633150771,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "scoring_state_loan_gross_repaid_ugx",
+      "iv_before": 0.07064512318591491,
+      "iv_after": 0.07064512318591491,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "prior_loans_per_observed_month",
+      "iv_before": 0.06952977907387779,
+      "iv_after": 0.06952977907387779,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "prior_avg_repayment_ratio",
+      "iv_before": 0.06233509616980178,
+      "iv_after": 0.06233509616980178,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "avg_prior_loan_amount_180d",
+      "iv_before": 0.05652237025942222,
+      "iv_after": 0.05652237025942222,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "avg_prior_loan_amount_90d",
+      "iv_before": 0.056117805030038034,
+      "iv_after": 0.056117805030038034,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "prior_disbursed_ugx_30d",
+      "iv_before": 0.04899591061813467,
+      "iv_after": 0.04899591061813467,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "cash_in_comm_3m",
+      "iv_before": 0.04759591077251882,
+      "iv_after": 0.04759591077251882,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "cash_in_comm_6m",
+      "iv_before": 0.04752476100920804,
+      "iv_after": 0.04752476100920804,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "cash_in_value_3m",
+      "iv_before": 0.04727076946796464,
+      "iv_after": 0.04727078825980134,
+      "iv_uplift": 1.8791836697840125e-08
+    },
+    {
+      "feature": "commission",
+      "iv_before": 0.0465416466008255,
+      "iv_after": 0.04654127918613735,
+      "iv_uplift": -3.674146881460505e-07
+    },
+    {
+      "feature": "avg_prior_loan_amount_30d",
+      "iv_before": 0.04651703085305655,
+      "iv_after": 0.04651703085305655,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "cash_in_value_6m",
+      "iv_before": 0.04591643488714081,
+      "iv_after": 0.04591643488714081,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "last_closed_loan_disbursed_ugx",
+      "iv_before": 0.04583716581351479,
+      "iv_after": 0.04583716581351479,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "last_closed_loan_repaid_ugx",
+      "iv_before": 0.04583716581351479,
+      "iv_after": 0.04583716581351479,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "cash_out_value_3m",
+      "iv_before": 0.04443829518565238,
+      "iv_after": 0.04443829518565238,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "cash_out_value_6m",
+      "iv_before": 0.04367186804362532,
+      "iv_after": 0.04367186804362532,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "cash_out_comm_6m",
+      "iv_before": 0.043557208920725385,
+      "iv_after": 0.043557208920725385,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "cash_out_comm_3m",
+      "iv_before": 0.042859255424686826,
+      "iv_after": 0.042859255424686826,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "cash_in_value_1m",
+      "iv_before": 0.041247111717063564,
+      "iv_after": 0.041247111717063564,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "cash_in_peers_3m",
+      "iv_before": 0.04056498734999994,
+      "iv_after": 0.04056498734999994,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "disbursement_amount_ugx",
+      "iv_before": 0.039528610443847166,
+      "iv_after": 0.039528610443847166,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "cash_in_comm_1m",
+      "iv_before": 0.039424477764689284,
+      "iv_after": 0.039424477764689284,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "cash_in_peers_6m",
+      "iv_before": 0.03866352566069318,
+      "iv_after": 0.03866352566069318,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "cash_out_value_1m",
+      "iv_before": 0.03817929346344858,
+      "iv_after": 0.03817929346344858,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "cash_out_peers_3m",
+      "iv_before": 0.037306880721714356,
+      "iv_after": 0.037306880721714356,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "cash_out_comm_1m",
+      "iv_before": 0.036658936925877385,
+      "iv_after": 0.036658936925877385,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "cash_out_peers_6m",
+      "iv_before": 0.03637673474864433,
+      "iv_after": 0.03637673474864433,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "cash_in_vol_3m",
+      "iv_before": 0.03635515318836536,
+      "iv_after": 0.03635515318836536,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "cash_in_cust_3m",
+      "iv_before": 0.03635515318836536,
+      "iv_after": 0.03635515318836536,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "cash_in_vol_avg_monthly_3m",
+      "iv_before": 0.03635515318836536,
+      "iv_after": 0.03635515318836536,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "vol_3m_if_active",
+      "iv_before": 0.036350526988862576,
+      "iv_after": 0.036350526988862576,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "average_balance",
+      "iv_before": 0.03632061795164512,
+      "iv_after": 0.03632061795164512,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "current_to_avg_prior_loan_amount_180d",
+      "iv_before": 0.03513829542755847,
+      "iv_after": 0.03513829542755847,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "cash_out_vol_avg_monthly_3m",
+      "iv_before": 0.03471129516002588,
+      "iv_after": 0.03471129516002588,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "cash_out_cust_3m",
+      "iv_before": 0.03471129516002588,
+      "iv_after": 0.03471129516002588,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "cash_out_vol_3m",
+      "iv_before": 0.03471129516002588,
+      "iv_after": 0.03471129516002588,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "cash_in_peers_1m",
+      "iv_before": 0.03467263386104838,
+      "iv_after": 0.03467263386104838,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "cash_in_cust_6m",
+      "iv_before": 0.03382716044960536,
+      "iv_after": 0.03382716044960536,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "cash_in_vol_avg_monthly_6m",
+      "iv_before": 0.03382716044960536,
+      "iv_after": 0.03382716044960536,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "cash_in_vol_6m",
+      "iv_before": 0.03382716044960536,
+      "iv_after": 0.03382716044960536,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "cash_out_cust_6m",
+      "iv_before": 0.03372973384819985,
+      "iv_after": 0.03372973384819985,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "cash_out_vol_avg_monthly_6m",
+      "iv_before": 0.03372973384819985,
+      "iv_after": 0.03372973384819985,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "cash_out_vol_6m",
+      "iv_before": 0.03372973384819985,
+      "iv_after": 0.03372973384819985,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "current_to_avg_prior_loan_amount_90d",
+      "iv_before": 0.0326861177271639,
+      "iv_after": 0.0326861177271639,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "last_closed_loan_gross_repaid_ugx",
+      "iv_before": 0.032635126719675556,
+      "iv_after": 0.032635126719675556,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "cash_out_peers_1m",
+      "iv_before": 0.0321472058424058,
+      "iv_after": 0.0321472058424058,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "cash_in_vol_1m",
+      "iv_before": 0.032024217937338145,
+      "iv_after": 0.032024217937338145,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "cash_in_cust_1m",
+      "iv_before": 0.032024217937338145,
+      "iv_after": 0.032024217937338145,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "cust_3m",
+      "iv_before": 0.030702674673792424,
+      "iv_after": 0.030702674673792424,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "vol_3m",
+      "iv_before": 0.030691385121260982,
+      "iv_after": 0.030691385121260982,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "vol_avg_monthly_3m",
+      "iv_before": 0.030691385121260982,
+      "iv_after": 0.030691385121260982,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "cash_out_cust_1m",
+      "iv_before": 0.03050017603161098,
+      "iv_after": 0.03050017603161098,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "cash_out_vol_1m",
+      "iv_before": 0.03050017603161098,
+      "iv_after": 0.03050017603161098,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "current_to_avg_prior_loan_amount_30d",
+      "iv_before": 0.02927686779949017,
+      "iv_after": 0.02927686779949017,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "cust_6m",
+      "iv_before": 0.0274583769458742,
+      "iv_after": 0.0274583769458742,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "cust_1m",
+      "iv_before": 0.02740108217644585,
+      "iv_after": 0.02740108217644585,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "vol_1m",
+      "iv_before": 0.027399521903342952,
+      "iv_after": 0.027399521903342952,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "vol_avg_monthly_6m",
+      "iv_before": 0.027350512663927722,
+      "iv_after": 0.027350512663927722,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "vol_6m",
+      "iv_before": 0.027350512663927722,
+      "iv_after": 0.027350512663927722,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "net_cash_flow_3m",
+      "iv_before": 0.02680983832632902,
+      "iv_after": 0.02680983832632902,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "months_since_first_observed_loan",
+      "iv_before": 0.025696402517089656,
+      "iv_after": 0.025696402517089656,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "historical_anomaly_open_loan_count",
+      "iv_before": 0.024994995962673856,
+      "iv_after": 0.024963695679972923,
+      "iv_uplift": -3.1300282700933574e-05
+    },
+    {
+      "feature": "account_balance",
+      "iv_before": 0.02440976838144826,
+      "iv_after": 0.02440976838144826,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "payment_value_3m",
+      "iv_before": 0.017936578954452182,
+      "iv_after": 0.017936578954452182,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "payment_comm_3m",
+      "iv_before": 0.017870408643595796,
+      "iv_after": 0.017870408643595796,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "payment_value_1m",
+      "iv_before": 0.016733268077541268,
+      "iv_after": 0.016733268077541268,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "payment_comm_1m",
+      "iv_before": 0.01670985937594779,
+      "iv_after": 0.01670985937594779,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "cash_in_vol_monthly_volatility_cv",
+      "iv_before": 0.01659697782819849,
+      "iv_after": 0.01659697782819849,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "vol_monthly_volatility_cv",
+      "iv_before": 0.016215215296563504,
+      "iv_after": 0.016215215296563504,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "payment_peers_3m",
+      "iv_before": 0.015736462313514693,
+      "iv_after": 0.015736462313514693,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "payment_value_6m",
+      "iv_before": 0.01562838043389863,
+      "iv_after": 0.01562845740126762,
+      "iv_uplift": 7.6967368992098e-08
+    },
+    {
+      "feature": "payment_comm_6m",
+      "iv_before": 0.015602639681265022,
+      "iv_after": 0.015602639681265022,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "disbursement_day_of_week",
+      "iv_before": 0.015587216935789065,
+      "iv_after": 0.015587216935789065,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "prior_disbursed_ugx_90d",
+      "iv_before": 0.015068203073143941,
+      "iv_after": 0.015068784977006318,
+      "iv_uplift": 5.819038623768036e-07
+    },
+    {
+      "feature": "balance_to_vol_3m_ratio",
+      "iv_before": 0.014696740066524189,
+      "iv_after": 0.014696740066524189,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "payment_peers_6m",
+      "iv_before": 0.01464044240203351,
+      "iv_after": 0.01464044240203351,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "loan_seq_at_scoring",
+      "iv_before": 0.014026046544085503,
+      "iv_after": 0.014026046544085503,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "payment_peers_1m",
+      "iv_before": 0.013992036133568735,
+      "iv_after": 0.013992036133568735,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "payment_vol_3m",
+      "iv_before": 0.013336881568865363,
+      "iv_after": 0.013336881568865363,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "payment_vol_avg_monthly_3m",
+      "iv_before": 0.013336881568865363,
+      "iv_after": 0.013336881568865363,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "payment_cust_3m",
+      "iv_before": 0.013283682407587403,
+      "iv_after": 0.013283682407587403,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "prior_disbursement_count_90d",
+      "iv_before": 0.013085300224075173,
+      "iv_after": 0.013085300224075173,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "cash_in_vol_share_3m_of_6m",
+      "iv_before": 0.013046811239019329,
+      "iv_after": 0.013046811239019329,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "cash_in_vol_growth_3m_vs_prev3m",
+      "iv_before": 0.013046811239019329,
+      "iv_after": 0.013046811239019329,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "payment_cust_1m",
+      "iv_before": 0.01290928270308392,
+      "iv_after": 0.01290928270308392,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "payment_vol_1m",
+      "iv_before": 0.012882079001545154,
+      "iv_after": 0.012882079001545154,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "payment_vol_monthly_volatility_cv",
+      "iv_before": 0.012775396354037958,
+      "iv_after": 0.012775396354037958,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "vol_share_3m_of_6m",
+      "iv_before": 0.012378129068202157,
+      "iv_after": 0.012378129068202157,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "vol_growth_3m_vs_prev3m",
+      "iv_before": 0.012378129068202157,
+      "iv_after": 0.012378129068202157,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "cash_out_vol_monthly_volatility_cv",
+      "iv_before": 0.012080952507319078,
+      "iv_after": 0.012080952507319078,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "cash_in_vol_share_1m_of_6m",
+      "iv_before": 0.011694214711264755,
+      "iv_after": 0.011694214711264755,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "cash_in_vol_growth_1m_vs_prev2m",
+      "iv_before": 0.011254718096491038,
+      "iv_after": 0.011254718096491038,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "cash_in_vol_share_1m_of_3m",
+      "iv_before": 0.011254718096491038,
+      "iv_after": 0.011254718096491038,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "vol_share_1m_of_6m",
+      "iv_before": 0.011005357633503016,
+      "iv_after": 0.011005357633503016,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "cash_out_vol_share_3m_of_6m",
+      "iv_before": 0.01095883072133968,
+      "iv_after": 0.01095883072133968,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "cash_out_vol_growth_3m_vs_prev3m",
+      "iv_before": 0.01095883072133968,
+      "iv_after": 0.01095883072133968,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "payment_vol_avg_monthly_6m",
+      "iv_before": 0.01087555576453113,
+      "iv_after": 0.01087555576453113,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "payment_vol_6m",
+      "iv_before": 0.01087555576453113,
+      "iv_after": 0.01087555576453113,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "payment_cust_6m",
+      "iv_before": 0.01084988628875503,
+      "iv_after": 0.01084988628875503,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "vol_share_1m_of_3m",
+      "iv_before": 0.010432301190814602,
+      "iv_after": 0.010432301190814602,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "vol_growth_1m_vs_prev2m",
+      "iv_before": 0.010432301190814602,
+      "iv_after": 0.010432301190814602,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "cash_out_vol_share_1m_of_6m",
+      "iv_before": 0.010289818421653135,
+      "iv_after": 0.010289818421653135,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "all_prior_loans_disbursed_ugx",
+      "iv_before": 0.009574906233171166,
+      "iv_after": 0.009574915137388219,
+      "iv_uplift": 8.904217052921326e-09
+    },
+    {
+      "feature": "prior_disbursed_ugx_180d",
+      "iv_before": 0.009574906233171166,
+      "iv_after": 0.009574915137388219,
+      "iv_uplift": 8.904217052921326e-09
+    },
+    {
+      "feature": "cash_out_vol_share_1m_of_3m",
+      "iv_before": 0.009068350200402683,
+      "iv_after": 0.009068350200402683,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "cash_out_vol_growth_1m_vs_prev2m",
+      "iv_before": 0.009068350200402683,
+      "iv_after": 0.009068350200402683,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "prior_late_fee_2_count",
+      "iv_before": 0.008916111311301005,
+      "iv_after": 0.008916111311301005,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "cash_out_vol_monthly_volatility_proxy",
+      "iv_before": 0.008736387930084834,
+      "iv_after": 0.008736387930084834,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "payment_vol_share_3m_of_6m",
+      "iv_before": 0.008613322264440473,
+      "iv_after": 0.008613322264440473,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "payment_vol_growth_3m_vs_prev3m",
+      "iv_before": 0.008613322264440473,
+      "iv_after": 0.008613322264440473,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "payment_vol_share_1m_of_6m",
+      "iv_before": 0.008120630005831542,
+      "iv_after": 0.008120630005831542,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "all_prior_loans_repaid_ugx",
+      "iv_before": 0.008100244629480387,
+      "iv_after": 0.008100196790050418,
+      "iv_uplift": -4.783942996952617e-08
+    },
+    {
+      "feature": "payment_vol_share_1m_of_3m",
+      "iv_before": 0.008034435547264594,
+      "iv_after": 0.008034435547264594,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "payment_vol_growth_1m_vs_prev2m",
+      "iv_before": 0.008026759665723025,
+      "iv_after": 0.008026759665723025,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "all_prior_loans_gross_repaid_ugx",
+      "iv_before": 0.007151232372101912,
+      "iv_after": 0.007151288405876841,
+      "iv_uplift": 5.6033774929048485e-08
+    },
+    {
+      "feature": "prior_late_fee_1_count",
+      "iv_before": 0.005878668858114744,
+      "iv_after": 0.005878668858114744,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "cash_in_vol_monthly_volatility_proxy",
+      "iv_before": 0.005231490898707562,
+      "iv_after": 0.005231490898707562,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "prior_total_late_fee_owed_ugx",
+      "iv_before": 0.003589303786134925,
+      "iv_after": 0.003589303786134925,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "observed_prior_loan_count",
+      "iv_before": 0.003561226934771622,
+      "iv_after": 0.003561226934771622,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "payment_intensity_ratio",
+      "iv_before": 0.0033024478921719887,
+      "iv_after": 0.0033024478921719887,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "prior_max_loan_seq",
+      "iv_before": 0.0031351743861765674,
+      "iv_after": 0.0031351743861765674,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "prior_disbursement_count_180d",
+      "iv_before": 0.0030191850892606663,
+      "iv_after": 0.0030191850892606663,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "prior_disbursement_count",
+      "iv_before": 0.0030191850892606663,
+      "iv_after": 0.0030191850892606663,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "prior_closed_loan_count",
+      "iv_before": 0.0029859902666273253,
+      "iv_after": 0.0029859902666273253,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "vol_monthly_volatility_proxy",
+      "iv_before": 0.0026204619384255492,
+      "iv_after": 0.0026204619384255492,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "active_loan_outstanding_ugx_at_scoring",
+      "iv_before": 0.0023225117482294647,
+      "iv_after": 0.0023225117482294647,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "commission_per_vol_3m",
+      "iv_before": 0.0017581567040788034,
+      "iv_after": 0.0017581567040788034,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "historical_anomaly_open_loan_rate",
+      "iv_before": 0.0013179870930955105,
+      "iv_after": 0.0013179870930955105,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "peer_dependency_ratio",
+      "iv_before": 0.0012784139474124687,
+      "iv_after": 0.0012784139474124687,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "avg_balance_to_vol_3m_ratio",
+      "iv_before": 0.0012547862189841578,
+      "iv_after": 0.0012547862189841578,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "payment_vol_monthly_volatility_proxy",
+      "iv_before": 0.0008211674906473234,
+      "iv_after": 0.0008211674906473234,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "is_inactive_1m",
+      "iv_before": 0.0,
+      "iv_after": 0.0,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "num_inactive_horizons",
+      "iv_before": 0.0,
+      "iv_after": 0.0,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "is_inactive_3m",
+      "iv_before": 0.0,
+      "iv_after": 0.0,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "is_inactive_6m",
+      "iv_before": 0.0,
+      "iv_after": 0.0,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "is_fully_inactive_6m",
+      "iv_before": 0.0,
+      "iv_after": 0.0,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "late_afternoon_disbursement",
+      "iv_before": 0.0,
+      "iv_after": 0.0,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "voucher_value_6m",
+      "iv_before": 0.0,
+      "iv_after": 0.0,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "prior_loan_censored_flag",
+      "iv_before": 0.0,
+      "iv_after": 0.0,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "prior_loan_confirmed_no_lateness_flag",
+      "iv_before": 0.0,
+      "iv_after": 0.0,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "prior_loan_has_no_history_flag",
+      "iv_before": 0.0,
+      "iv_after": 0.0,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "prior_principal_unsettled_count",
+      "iv_before": 0.0,
+      "iv_after": 0.0,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "prior_max_total_outstanding_ugx",
+      "iv_before": 0.0017564126032094522,
+      "iv_after": 0.0,
+      "iv_uplift": -0.0017564126032094522
+    },
+    {
+      "feature": "prior_max_principal_outstanding_ugx",
+      "iv_before": 0.0,
+      "iv_after": 0.0,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "anomaly_open_at_scoring",
+      "iv_before": 0.0,
+      "iv_after": 0.0,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "has_unresolved_loan_at_scoring",
+      "iv_before": 0.0,
+      "iv_after": 0.0,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "voucher_vol_1m",
+      "iv_before": 0.0,
+      "iv_after": 0.0,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "voucher_vol_3m",
+      "iv_before": 0.0,
+      "iv_after": 0.0,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "voucher_vol_6m",
+      "iv_before": 0.0,
+      "iv_after": 0.0,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "voucher_value_1m",
+      "iv_before": 0.0,
+      "iv_after": 0.0,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "voucher_value_3m",
+      "iv_before": 0.0,
+      "iv_after": 0.0,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "voucher_comm_3m",
+      "iv_before": 0.0,
+      "iv_after": 0.0,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "has_observed_prior_state",
+      "iv_before": 0.0,
+      "iv_after": 0.0,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "voucher_comm_6m",
+      "iv_before": 0.0,
+      "iv_after": 0.0,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "is_consecutively_inactive",
+      "iv_before": 0.0,
+      "iv_after": 0.0,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "activity_restart_flag",
+      "iv_before": 0.0,
+      "iv_after": 0.0,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "has_pre_window_history",
+      "iv_before": 0.0,
+      "iv_after": 0.0,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "commission_without_activity_flag",
+      "iv_before": 0.0,
+      "iv_after": 0.0,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "consistent_volume_decline_flag",
+      "iv_before": 0.0,
+      "iv_after": 0.0,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "consistent_volume_growth_flag",
+      "iv_before": 0.0,
+      "iv_after": 0.0,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "low_balance_flag",
+      "iv_before": 0.0,
+      "iv_after": 0.0,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "balance_drawdown_flag",
+      "iv_before": 0.0,
+      "iv_after": 0.0,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "cust_concentration_flag",
+      "iv_before": 0.0,
+      "iv_after": 0.0,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "high_peer_dependency_flag",
+      "iv_before": 0.0,
+      "iv_after": 0.0,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "net_cash_flow_negative_flag",
+      "iv_before": 0.0,
+      "iv_after": 0.0,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "sharp_volume_drop_flag",
+      "iv_before": 0.0,
+      "iv_after": 0.0,
+      "iv_uplift": 0.0
+    },
+    {
+      "feature": "max_inactivity_horizon_flag",
+      "iv_before": 0.0,
+      "iv_after": 0.0,
+      "iv_uplift": 0.0
+    }
+  ],
+  "transform_report": [
+    {
+      "feature": "net_cash_flow_3m",
+      "action": "forced_signed_log_ok",
+      "neg_frac": 0.6062961492363437,
+      "lo": -18.82252311706543,
+      "hi": 19.706317901611328,
+      "reason": NaN
+    },
+    {
+      "feature": "account_balance",
+      "action": "log_cap_ok",
+      "neg_frac": 0.0,
+      "lo": 0.0,
+      "hi": 15.262243270874023,
+      "reason": NaN
+    },
+    {
+      "feature": "active_loan_outstanding_ugx_at_scoring",
+      "action": "log_cap_ok",
+      "neg_frac": 0.0,
+      "lo": 0.0,
+      "hi": 13.527830123901367,
+      "reason": NaN
+    },
+    {
+      "feature": "all_prior_loans_disbursed_ugx",
+      "action": "log_cap_ok",
+      "neg_frac": 0.0,
+      "lo": 0.0,
+      "hi": 18.286786117553703,
+      "reason": NaN
+    },
+    {
+      "feature": "all_prior_loans_fees_paid_ugx",
+      "action": "log_cap_reverted_raw_cap",
+      "neg_frac": 0.0,
+      "lo": 0.0,
+      "hi": 0.0,
+      "reason": "nunique=1"
+    },
+    {
+      "feature": "all_prior_loans_gross_repaid_ugx",
+      "action": "log_cap_ok",
+      "neg_frac": 0.0,
+      "lo": 0.0,
+      "hi": 18.28224540710449,
+      "reason": NaN
+    },
+    {
+      "feature": "all_prior_loans_interest_paid_ugx",
+      "action": "log_cap_reverted_raw_cap",
+      "neg_frac": 0.0,
+      "lo": 0.0,
+      "hi": 0.0,
+      "reason": "nunique=1"
+    },
+    {
+      "feature": "all_prior_loans_repaid_ugx",
+      "action": "log_cap_ok",
+      "neg_frac": 0.0,
+      "lo": 0.0,
+      "hi": 18.27565574645996,
+      "reason": NaN
+    },
+    {
+      "feature": "average_balance",
+      "action": "log_cap_ok",
+      "neg_frac": 0.0,
+      "lo": 0.0,
+      "hi": 14.976698875427246,
+      "reason": NaN
+    },
+    {
+      "feature": "avg_prior_loan_amount_180d",
+      "action": "log_cap_reverted_raw_cap",
+      "neg_frac": 0.0,
+      "lo": 43019.98046875,
+      "hi": 1000000.0,
+      "reason": "low_finite_frac=0.973"
+    },
+    {
+      "feature": "avg_prior_loan_amount_30d",
+      "action": "log_cap_reverted_raw_cap",
+      "neg_frac": 0.0,
+      "lo": 43287.29296875,
+      "hi": 1000000.0,
+      "reason": "low_finite_frac=0.963"
+    },
+    {
+      "feature": "avg_prior_loan_amount_90d",
+      "action": "log_cap_reverted_raw_cap",
+      "neg_frac": 0.0,
+      "lo": 43326.609375,
+      "hi": 1000000.0,
+      "reason": "low_finite_frac=0.972"
+    },
+    {
+      "feature": "cash_in_revenue_1m",
+      "action": "log_cap_reverted_raw_cap",
+      "neg_frac": 0.0,
+      "lo": 0.0,
+      "hi": 0.0,
+      "reason": "nunique=1"
+    },
+    {
+      "feature": "cash_in_revenue_3m",
+      "action": "log_cap_reverted_raw_cap",
+      "neg_frac": 0.0,
+      "lo": 0.0,
+      "hi": 0.0,
+      "reason": "nunique=1"
+    },
+    {
+      "feature": "cash_in_revenue_6m",
+      "action": "log_cap_reverted_raw_cap",
+      "neg_frac": 0.0,
+      "lo": 0.0,
+      "hi": 0.0,
+      "reason": "nunique=1"
+    },
+    {
+      "feature": "cash_in_value_1m",
+      "action": "log_cap_ok",
+      "neg_frac": 0.0,
+      "lo": 0.0,
+      "hi": 19.135385513305664,
+      "reason": NaN
+    },
+    {
+      "feature": "cash_in_value_3m",
+      "action": "log_cap_ok",
+      "neg_frac": 0.0,
+      "lo": 0.0,
+      "hi": 20.15508460998535,
+      "reason": NaN
+    },
+    {
+      "feature": "cash_in_value_6m",
+      "action": "log_cap_ok",
+      "neg_frac": 0.0,
+      "lo": 0.0,
+      "hi": 20.81650733947754,
+      "reason": NaN
+    },
+    {
+      "feature": "cash_out_revenue_1m",
+      "action": "log_cap_reverted_raw_cap",
+      "neg_frac": 0.0,
+      "lo": 0.0,
+      "hi": 0.0,
+      "reason": "nunique=1"
+    },
+    {
+      "feature": "cash_out_revenue_3m",
+      "action": "log_cap_reverted_raw_cap",
+      "neg_frac": 0.0,
+      "lo": 0.0,
+      "hi": 0.0,
+      "reason": "nunique=1"
+    },
+    {
+      "feature": "cash_out_revenue_6m",
+      "action": "log_cap_reverted_raw_cap",
+      "neg_frac": 0.0,
+      "lo": 0.0,
+      "hi": 0.0,
+      "reason": "nunique=1"
+    },
+    {
+      "feature": "cash_out_value_1m",
+      "action": "log_cap_ok",
+      "neg_frac": 0.0,
+      "lo": 0.0,
+      "hi": 18.725139617919922,
+      "reason": NaN
+    },
+    {
+      "feature": "cash_out_value_3m",
+      "action": "log_cap_ok",
+      "neg_frac": 0.0,
+      "lo": 0.0,
+      "hi": 19.747997283935547,
+      "reason": NaN
+    },
+    {
+      "feature": "cash_out_value_6m",
+      "action": "log_cap_ok",
+      "neg_frac": 0.0,
+      "lo": 0.0,
+      "hi": 20.403703689575195,
+      "reason": NaN
+    },
+    {
+      "feature": "commission",
+      "action": "log_cap_ok",
+      "neg_frac": 0.0,
+      "lo": 0.0,
+      "hi": 15.678467750549316,
+      "reason": NaN
+    },
+    {
+      "feature": "disbursement_amount_ugx",
+      "action": "log_cap_ok",
+      "neg_frac": 0.0,
+      "lo": 10.308985710144043,
+      "hi": 13.815511703491211,
+      "reason": NaN
+    },
+    {
+      "feature": "last_closed_loan_disbursed_ugx",
+      "action": "log_cap_reverted_raw_cap",
+      "neg_frac": 0.0,
+      "lo": 30000.0,
+      "hi": 1500000.0,
+      "reason": "low_finite_frac=0.964"
+    },
+    {
+      "feature": "last_closed_loan_gross_repaid_ugx",
+      "action": "log_cap_reverted_raw_cap",
+      "neg_frac": 0.0,
+      "lo": 30900.0,
+      "hi": 1500000.0,
+      "reason": "low_finite_frac=0.964"
+    },
+    {
+      "feature": "last_closed_loan_repaid_ugx",
+      "action": "log_cap_reverted_raw_cap",
+      "neg_frac": 0.0,
+      "lo": 30000.0,
+      "hi": 1500000.0,
+      "reason": "low_finite_frac=0.964"
+    },
+    {
+      "feature": "payment_comm_1m",
+      "action": "log_cap_ok",
+      "neg_frac": 0.0,
+      "lo": 0.0,
+      "hi": 11.754972457885742,
+      "reason": NaN
+    },
+    {
+      "feature": "payment_comm_3m",
+      "action": "log_cap_ok",
+      "neg_frac": 0.0,
+      "lo": 0.0,
+      "hi": 12.812231063842773,
+      "reason": NaN
+    },
+    {
+      "feature": "payment_comm_6m",
+      "action": "log_cap_ok",
+      "neg_frac": 0.0,
+      "lo": 0.0,
+      "hi": 13.505635261535645,
+      "reason": NaN
+    },
+    {
+      "feature": "payment_revenue_1m",
+      "action": "log_cap_reverted_raw_cap",
+      "neg_frac": 0.0,
+      "lo": 0.0,
+      "hi": 0.0,
+      "reason": "nunique=1"
+    },
+    {
+      "feature": "payment_revenue_3m",
+      "action": "log_cap_reverted_raw_cap",
+      "neg_frac": 0.0,
+      "lo": 0.0,
+      "hi": 0.0,
+      "reason": "nunique=1"
+    },
+    {
+      "feature": "payment_revenue_6m",
+      "action": "log_cap_reverted_raw_cap",
+      "neg_frac": 0.0,
+      "lo": 0.0,
+      "hi": 0.0,
+      "reason": "nunique=1"
+    },
+    {
+      "feature": "payment_value_1m",
+      "action": "log_cap_ok",
+      "neg_frac": 0.0,
+      "lo": 0.0,
+      "hi": 14.908676147460938,
+      "reason": NaN
+    },
+    {
+      "feature": "payment_value_3m",
+      "action": "log_cap_ok",
+      "neg_frac": 0.0,
+      "lo": 0.0,
+      "hi": 15.957903861999512,
+      "reason": NaN
+    },
+    {
+      "feature": "payment_value_6m",
+      "action": "log_cap_ok",
+      "neg_frac": 0.0,
+      "lo": 0.0,
+      "hi": 16.644756317138672,
+      "reason": NaN
+    },
+    {
+      "feature": "prior_disbursed_ugx_180d",
+      "action": "log_cap_ok",
+      "neg_frac": 0.0,
+      "lo": 0.0,
+      "hi": 18.286786117553703,
+      "reason": NaN
+    },
+    {
+      "feature": "prior_disbursed_ugx_30d",
+      "action": "log_cap_ok",
+      "neg_frac": 0.0,
+      "lo": 0.0,
+      "hi": 17.111347198486328,
+      "reason": NaN
+    },
+    {
+      "feature": "prior_disbursed_ugx_90d",
+      "action": "log_cap_ok",
+      "neg_frac": 0.0,
+      "lo": 0.0,
+      "hi": 17.954660415649414,
+      "reason": NaN
+    },
+    {
+      "feature": "prior_max_principal_outstanding_ugx",
+      "action": "log_cap_reverted_raw_cap",
+      "neg_frac": 0.0,
+      "lo": 0.0,
+      "hi": 0.0,
+      "reason": "low_finite_frac=0.973"
+    },
+    {
+      "feature": "prior_max_total_outstanding_ugx",
+      "action": "log_cap_reverted_raw_cap",
+      "neg_frac": 0.0,
+      "lo": 0.0,
+      "hi": 500.0,
+      "reason": "low_finite_frac=0.973"
+    },
+    {
+      "feature": "prior_total_late_fee_owed_ugx",
+      "action": "log_cap_ok",
+      "neg_frac": 0.0,
+      "lo": 0.0,
+      "hi": 14.27293586730957,
+      "reason": NaN
+    },
+    {
+      "feature": "rev_1m",
+      "action": "log_cap_skip_all_nan",
+      "neg_frac": NaN,
+      "lo": NaN,
+      "hi": NaN,
+      "reason": NaN
+    },
+    {
+      "feature": "rev_3m",
+      "action": "log_cap_skip_all_nan",
+      "neg_frac": NaN,
+      "lo": NaN,
+      "hi": NaN,
+      "reason": NaN
+    },
+    {
+      "feature": "rev_6m",
+      "action": "log_cap_skip_all_nan",
+      "neg_frac": NaN,
+      "lo": NaN,
+      "hi": NaN,
+      "reason": NaN
+    },
+    {
+      "feature": "revenue_1m",
+      "action": "log_cap_reverted_raw_cap",
+      "neg_frac": 0.0,
+      "lo": 0.0,
+      "hi": 0.0,
+      "reason": "nunique=1"
+    },
+    {
+      "feature": "revenue_3m",
+      "action": "log_cap_reverted_raw_cap",
+      "neg_frac": 0.0,
+      "lo": 0.0,
+      "hi": 0.0,
+      "reason": "nunique=1"
+    },
+    {
+      "feature": "revenue_6m",
+      "action": "log_cap_reverted_raw_cap",
+      "neg_frac": 0.0,
+      "lo": 0.0,
+      "hi": 0.0,
+      "reason": "nunique=1"
+    },
+    {
+      "feature": "scoring_state_loan_disbursed_ugx",
+      "action": "log_cap_reverted_raw_cap",
+      "neg_frac": 0.0,
+      "lo": 0.0,
+      "hi": 1500000.0,
+      "reason": "low_finite_frac=0.976"
+    },
+    {
+      "feature": "scoring_state_loan_fees_paid_ugx",
+      "action": "log_cap_reverted_raw_cap",
+      "neg_frac": 0.0,
+      "lo": 0.0,
+      "hi": 0.0,
+      "reason": "low_finite_frac=0.976"
+    },
+    {
+      "feature": "scoring_state_loan_gross_repaid_ugx",
+      "action": "log_cap_reverted_raw_cap",
+      "neg_frac": 0.0,
+      "lo": 0.0,
+      "hi": 1010000.0,
+      "reason": "low_finite_frac=0.976"
+    },
+    {
+      "feature": "scoring_state_loan_interest_paid_ugx",
+      "action": "log_cap_reverted_raw_cap",
+      "neg_frac": 0.0,
+      "lo": 0.0,
+      "hi": 0.0,
+      "reason": "low_finite_frac=0.976"
+    },
+    {
+      "feature": "scoring_state_loan_repaid_ugx",
+      "action": "log_cap_reverted_raw_cap",
+      "neg_frac": 0.0,
+      "lo": 0.0,
+      "hi": 1000000.0,
+      "reason": "low_finite_frac=0.976"
+    },
+    {
+      "feature": "voucher_comm_1m",
+      "action": "log_cap_reverted_raw_cap",
+      "neg_frac": 0.0,
+      "lo": 0.0,
+      "hi": 0.0,
+      "reason": "nunique=1"
+    },
+    {
+      "feature": "voucher_comm_3m",
+      "action": "log_cap_ok",
+      "neg_frac": 0.0,
+      "lo": 0.0,
+      "hi": 0.0,
+      "reason": NaN
+    },
+    {
+      "feature": "voucher_comm_6m",
+      "action": "log_cap_ok",
+      "neg_frac": 0.0,
+      "lo": 0.0,
+      "hi": 0.0,
+      "reason": NaN
+    },
+    {
+      "feature": "voucher_revenue_1m",
+      "action": "log_cap_reverted_raw_cap",
+      "neg_frac": 0.0,
+      "lo": 0.0,
+      "hi": 0.0,
+      "reason": "nunique=1"
+    },
+    {
+      "feature": "voucher_revenue_3m",
+      "action": "log_cap_reverted_raw_cap",
+      "neg_frac": 0.0,
+      "lo": 0.0,
+      "hi": 0.0,
+      "reason": "nunique=1"
+    },
+    {
+      "feature": "voucher_revenue_6m",
+      "action": "log_cap_reverted_raw_cap",
+      "neg_frac": 0.0,
+      "lo": 0.0,
+      "hi": 0.0,
+      "reason": "nunique=1"
+    },
+    {
+      "feature": "voucher_value_1m",
+      "action": "log_cap_ok",
+      "neg_frac": 0.0,
+      "lo": 0.0,
+      "hi": 0.0,
+      "reason": NaN
+    },
+    {
+      "feature": "voucher_value_3m",
+      "action": "log_cap_ok",
+      "neg_frac": 0.0,
+      "lo": 0.0,
+      "hi": 0.0,
+      "reason": NaN
+    },
+    {
+      "feature": "voucher_value_6m",
+      "action": "log_cap_ok",
+      "neg_frac": 0.0,
+      "lo": 0.0,
+      "hi": 0.0,
+      "reason": NaN
+    },
+    {
+      "feature": "all_prior_loans_gross_repayment_ratio",
+      "action": "cap_reverted_raw",
+      "neg_frac": NaN,
+      "lo": NaN,
+      "hi": NaN,
+      "reason": "low_finite_frac=0.973"
+    },
+    {
+      "feature": "all_prior_loans_principal_repayment_ratio",
+      "action": "cap_reverted_raw",
+      "neg_frac": NaN,
+      "lo": NaN,
+      "hi": NaN,
+      "reason": "low_finite_frac=0.973"
+    },
+    {
+      "feature": "avg_balance_to_vol_3m_ratio",
+      "action": "cap_ok",
+      "neg_frac": NaN,
+      "lo": 0.0,
+      "hi": 42607.852656249925,
+      "reason": NaN
+    },
+    {
+      "feature": "avg_prior_loan_principal_repayment_ratio",
+      "action": "cap_reverted_raw",
+      "neg_frac": NaN,
+      "lo": NaN,
+      "hi": NaN,
+      "reason": "low_finite_frac=0.973"
+    },
+    {
+      "feature": "balance_to_vol_3m_ratio",
+      "action": "cap_ok",
+      "neg_frac": NaN,
+      "lo": 0.0,
+      "hi": 3530.79736328125,
+      "reason": NaN
+    },
+    {
+      "feature": "cash_in_comm_1m",
+      "action": "cap_ok",
+      "neg_frac": NaN,
+      "lo": 0.0,
+      "hi": 567950.0,
+      "reason": NaN
+    },
+    {
+      "feature": "cash_in_comm_3m",
+      "action": "cap_ok",
+      "neg_frac": NaN,
+      "lo": 0.0,
+      "hi": 1771139.0,
+      "reason": NaN
+    },
+    {
+      "feature": "cash_in_comm_6m",
+      "action": "cap_ok",
+      "neg_frac": NaN,
+      "lo": 0.0,
+      "hi": 3677785.0,
+      "reason": NaN
+    },
+    {
+      "feature": "cash_in_cust_1m",
+      "action": "cap_ok",
+      "neg_frac": NaN,
+      "lo": 0.0,
+      "hi": 2220.0,
+      "reason": NaN
+    },
+    {
+      "feature": "cash_in_cust_3m",
+      "action": "cap_ok",
+      "neg_frac": NaN,
+      "lo": 0.0,
+      "hi": 6240.0,
+      "reason": NaN
+    },
+    {
+      "feature": "cash_in_cust_6m",
+      "action": "cap_ok",
+      "neg_frac": NaN,
+      "lo": 0.0,
+      "hi": 11792.0,
+      "reason": NaN
+    },
+    {
+      "feature": "cash_in_peers_1m",
+      "action": "cap_ok",
+      "neg_frac": NaN,
+      "lo": 0.0,
+      "hi": 1026.0,
+      "reason": NaN
+    },
+    {
+      "feature": "cash_in_peers_3m",
+      "action": "cap_ok",
+      "neg_frac": NaN,
+      "lo": 0.0,
+      "hi": 2299.0,
+      "reason": NaN
+    },
+    {
+      "feature": "cash_in_peers_6m",
+      "action": "cap_ok",
+      "neg_frac": NaN,
+      "lo": 0.0,
+      "hi": 3835.0,
+      "reason": NaN
+    },
+    {
+      "feature": "cash_in_vol_1m",
+      "action": "cap_ok",
+      "neg_frac": NaN,
+      "lo": 0.0,
+      "hi": 2220.0,
+      "reason": NaN
+    },
+    {
+      "feature": "cash_in_vol_3m",
+      "action": "cap_ok",
+      "neg_frac": NaN,
+      "lo": 0.0,
+      "hi": 6240.0,
+      "reason": NaN
+    },
+    {
+      "feature": "cash_in_vol_6m",
+      "action": "cap_ok",
+      "neg_frac": NaN,
+      "lo": 0.0,
+      "hi": 11792.0,
+      "reason": NaN
+    },
+    {
+      "feature": "cash_in_vol_avg_monthly_3m",
+      "action": "cap_ok",
+      "neg_frac": NaN,
+      "lo": 0.0,
+      "hi": 2080.0,
+      "reason": NaN
+    },
+    {
+      "feature": "cash_in_vol_avg_monthly_6m",
+      "action": "cap_ok",
+      "neg_frac": NaN,
+      "lo": 0.0,
+      "hi": 1965.3333740234375,
+      "reason": NaN
+    },
+    {
+      "feature": "cash_in_vol_growth_1m_vs_prev2m",
+      "action": "cap_ok",
+      "neg_frac": NaN,
+      "lo": 0.0,
+      "hi": 8.391752243041992,
+      "reason": NaN
+    },
+    {
+      "feature": "cash_in_vol_growth_3m_vs_prev3m",
+      "action": "cap_ok",
+      "neg_frac": NaN,
+      "lo": 0.0,
+      "hi": 20.42727279663086,
+      "reason": NaN
+    },
+    {
+      "feature": "cash_in_vol_monthly_volatility_cv",
+      "action": "cap_ok",
+      "neg_frac": NaN,
+      "lo": 0.0,
+      "hi": 1.2478848695755005,
+      "reason": NaN
+    },
+    {
+      "feature": "cash_in_vol_monthly_volatility_proxy",
+      "action": "cap_ok",
+      "neg_frac": NaN,
+      "lo": 0.0,
+      "hi": 483.60382080078125,
+      "reason": NaN
+    },
+    {
+      "feature": "cash_in_vol_share_1m_of_3m",
+      "action": "cap_ok",
+      "neg_frac": NaN,
+      "lo": 0.0,
+      "hi": 0.807539701461792,
+      "reason": NaN
+    },
+    {
+      "feature": "cash_in_vol_share_1m_of_6m",
+      "action": "cap_ok",
+      "neg_frac": NaN,
+      "lo": 0.0,
+      "hi": 0.44507846236228943,
+      "reason": NaN
+    },
+    {
+      "feature": "cash_in_vol_share_3m_of_6m",
+      "action": "cap_ok",
+      "neg_frac": NaN,
+      "lo": 0.0,
+      "hi": 0.8719441294670105,
+      "reason": NaN
+    },
+    {
+      "feature": "cash_out_comm_1m",
+      "action": "cap_ok",
+      "neg_frac": NaN,
+      "lo": 0.0,
+      "hi": 741770.0,
+      "reason": NaN
+    },
+    {
+      "feature": "cash_out_comm_3m",
+      "action": "cap_ok",
+      "neg_frac": NaN,
+      "lo": 0.0,
+      "hi": 1827527.0,
+      "reason": NaN
+    },
+    {
+      "feature": "cash_out_comm_6m",
+      "action": "cap_ok",
+      "neg_frac": NaN,
+      "lo": 0.0,
+      "hi": 3212276.0,
+      "reason": NaN
+    },
+    {
+      "feature": "cash_out_cust_1m",
+      "action": "cap_ok",
+      "neg_frac": NaN,
+      "lo": 0.0,
+      "hi": 1289.0,
+      "reason": NaN
+    },
+    {
+      "feature": "cash_out_cust_3m",
+      "action": "cap_ok",
+      "neg_frac": NaN,
+      "lo": 0.0,
+      "hi": 3585.0,
+      "reason": NaN
+    },
+    {
+      "feature": "cash_out_cust_6m",
+      "action": "cap_ok",
+      "neg_frac": NaN,
+      "lo": 0.0,
+      "hi": 6554.0,
+      "reason": NaN
+    },
+    {
+      "feature": "cash_out_peers_1m",
+      "action": "cap_ok",
+      "neg_frac": NaN,
+      "lo": 0.0,
+      "hi": 886.0,
+      "reason": NaN
+    },
+    {
+      "feature": "cash_out_peers_3m",
+      "action": "cap_ok",
+      "neg_frac": NaN,
+      "lo": 0.0,
+      "hi": 2088.0,
+      "reason": NaN
+    },
+    {
+      "feature": "cash_out_peers_6m",
+      "action": "cap_ok",
+      "neg_frac": NaN,
+      "lo": 0.0,
+      "hi": 3505.0,
+      "reason": NaN
+    },
+    {
+      "feature": "cash_out_vol_1m",
+      "action": "cap_ok",
+      "neg_frac": NaN,
+      "lo": 0.0,
+      "hi": 1289.0,
+      "reason": NaN
+    },
+    {
+      "feature": "cash_out_vol_3m",
+      "action": "cap_ok",
+      "neg_frac": NaN,
+      "lo": 0.0,
+      "hi": 3585.0,
+      "reason": NaN
+    },
+    {
+      "feature": "cash_out_vol_6m",
+      "action": "cap_ok",
+      "neg_frac": NaN,
+      "lo": 0.0,
+      "hi": 6554.0,
+      "reason": NaN
+    },
+    {
+      "feature": "cash_out_vol_avg_monthly_3m",
+      "action": "cap_ok",
+      "neg_frac": NaN,
+      "lo": 0.0,
+      "hi": 1195.0,
+      "reason": NaN
+    },
+    {
+      "feature": "cash_out_vol_avg_monthly_6m",
+      "action": "cap_ok",
+      "neg_frac": NaN,
+      "lo": 0.0,
+      "hi": 1092.3333740234375,
+      "reason": NaN
+    },
+    {
+      "feature": "cash_out_vol_growth_1m_vs_prev2m",
+      "action": "cap_ok",
+      "neg_frac": NaN,
+      "lo": 0.0,
+      "hi": 9.169230461120605,
+      "reason": NaN
+    },
+    {
+      "feature": "cash_out_vol_growth_3m_vs_prev3m",
+      "action": "cap_ok",
+      "neg_frac": NaN,
+      "lo": 0.0,
+      "hi": 23.249996185302734,
+      "reason": NaN
+    },
+    {
+      "feature": "cash_out_vol_monthly_volatility_cv",
+      "action": "cap_ok",
+      "neg_frac": NaN,
+      "lo": 0.0,
+      "hi": 1.2749756574630737,
+      "reason": NaN
+    },
+    {
+      "feature": "cash_out_vol_monthly_volatility_proxy",
+      "action": "cap_ok",
+      "neg_frac": NaN,
+      "lo": 0.0,
+      "hi": 291.8535119628889,
+      "reason": NaN
+    },
+    {
+      "feature": "cash_out_vol_share_1m_of_3m",
+      "action": "cap_ok",
+      "neg_frac": NaN,
+      "lo": 0.0,
+      "hi": 0.8209366202354431,
+      "reason": NaN
+    },
+    {
+      "feature": "cash_out_vol_share_1m_of_6m",
+      "action": "cap_ok",
+      "neg_frac": NaN,
+      "lo": 0.0,
+      "hi": 0.45186135172843933,
+      "reason": NaN
+    },
+    {
+      "feature": "cash_out_vol_share_3m_of_6m",
+      "action": "cap_ok",
+      "neg_frac": NaN,
+      "lo": 0.0,
+      "hi": 0.8857142925262451,
+      "reason": NaN
+    },
+    {
+      "feature": "closed_prior_loans_principal_repayment_ratio",
+      "action": "cap_reverted_raw",
+      "neg_frac": NaN,
+      "lo": NaN,
+      "hi": NaN,
+      "reason": "low_finite_frac=0.964"
+    },
+    {
+      "feature": "commission_per_vol_3m",
+      "action": "cap_ok",
+      "neg_frac": NaN,
+      "lo": 0.0,
+      "hi": 6805.578125,
+      "reason": NaN
+    },
+    {
+      "feature": "current_to_avg_prior_loan_amount_180d",
+      "action": "cap_reverted_raw",
+      "neg_frac": NaN,
+      "lo": NaN,
+      "hi": NaN,
+      "reason": "low_finite_frac=0.973"
+    },
+    {
+      "feature": "current_to_avg_prior_loan_amount_30d",
+      "action": "cap_reverted_raw",
+      "neg_frac": NaN,
+      "lo": NaN,
+      "hi": NaN,
+      "reason": "low_finite_frac=0.963"
+    },
+    {
+      "feature": "current_to_avg_prior_loan_amount_90d",
+      "action": "cap_reverted_raw",
+      "neg_frac": NaN,
+      "lo": NaN,
+      "hi": NaN,
+      "reason": "low_finite_frac=0.972"
+    },
+    {
+      "feature": "cust_1m",
+      "action": "cap_ok",
+      "neg_frac": NaN,
+      "lo": 0.0,
+      "hi": 5498.0,
+      "reason": NaN
+    },
+    {
+      "feature": "cust_3m",
+      "action": "cap_ok",
+      "neg_frac": NaN,
+      "lo": 0.0,
+      "hi": 15712.0,
+      "reason": NaN
+    },
+    {
+      "feature": "cust_6m",
+      "action": "cap_ok",
+      "neg_frac": NaN,
+      "lo": 0.0,
+      "hi": 30676.0,
+      "reason": NaN
+    },
+    {
+      "feature": "historical_anomaly_open_loan_count",
+      "action": "cap_ok",
+      "neg_frac": NaN,
+      "lo": 0.0,
+      "hi": 4.0,
+      "reason": NaN
+    },
+    {
+      "feature": "last_closed_loan_principal_repayment_ratio",
+      "action": "cap_reverted_raw",
+      "neg_frac": NaN,
+      "lo": NaN,
+      "hi": NaN,
+      "reason": "low_finite_frac=0.964"
+    },
+    {
+      "feature": "observed_prior_loan_count",
+      "action": "cap_ok",
+      "neg_frac": NaN,
+      "lo": 0.0,
+      "hi": 126.0,
+      "reason": NaN
+    },
+    {
+      "feature": "payment_cust_1m",
+      "action": "cap_ok",
+      "neg_frac": NaN,
+      "lo": 0.0,
+      "hi": 2562.0,
+      "reason": NaN
+    },
+    {
+      "feature": "payment_cust_3m",
+      "action": "cap_ok",
+      "neg_frac": NaN,
+      "lo": 0.0,
+      "hi": 7367.0,
+      "reason": NaN
+    },
+    {
+      "feature": "payment_cust_6m",
+      "action": "cap_ok",
+      "neg_frac": NaN,
+      "lo": 0.0,
+      "hi": 14969.0,
+      "reason": NaN
+    },
+    {
+      "feature": "payment_intensity_ratio",
+      "action": "cap_ok",
+      "neg_frac": NaN,
+      "lo": 0.0,
+      "hi": 1418.4676513671875,
+      "reason": NaN
+    },
+    {
+      "feature": "payment_peers_1m",
+      "action": "cap_ok",
+      "neg_frac": NaN,
+      "lo": 0.0,
+      "hi": 1141.0,
+      "reason": NaN
+    },
+    {
+      "feature": "payment_peers_3m",
+      "action": "cap_ok",
+      "neg_frac": NaN,
+      "lo": 0.0,
+      "hi": 2462.0,
+      "reason": NaN
+    },
+    {
+      "feature": "payment_peers_6m",
+      "action": "cap_ok",
+      "neg_frac": NaN,
+      "lo": 0.0,
+      "hi": 4317.0,
+      "reason": NaN
+    },
+    {
+      "feature": "payment_vol_1m",
+      "action": "cap_ok",
+      "neg_frac": NaN,
+      "lo": 0.0,
+      "hi": 2569.0,
+      "reason": NaN
+    },
+    {
+      "feature": "payment_vol_3m",
+      "action": "cap_ok",
+      "neg_frac": NaN,
+      "lo": 0.0,
+      "hi": 7372.0,
+      "reason": NaN
+    },
+    {
+      "feature": "payment_vol_6m",
+      "action": "cap_ok",
+      "neg_frac": NaN,
+      "lo": 0.0,
+      "hi": 14970.0,
+      "reason": NaN
+    },
+    {
+      "feature": "payment_vol_avg_monthly_3m",
+      "action": "cap_ok",
+      "neg_frac": NaN,
+      "lo": 0.0,
+      "hi": 2457.333251953125,
+      "reason": NaN
+    },
+    {
+      "feature": "payment_vol_avg_monthly_6m",
+      "action": "cap_ok",
+      "neg_frac": NaN,
+      "lo": 0.0,
+      "hi": 2495.0,
+      "reason": NaN
+    },
+    {
+      "feature": "payment_vol_growth_1m_vs_prev2m",
+      "action": "cap_ok",
+      "neg_frac": NaN,
+      "lo": 0.0,
+      "hi": 16.666656494140625,
+      "reason": NaN
+    },
+    {
+      "feature": "payment_vol_growth_3m_vs_prev3m",
+      "action": "cap_ok",
+      "neg_frac": NaN,
+      "lo": 0.0,
+      "hi": 38.08695602416992,
+      "reason": NaN
+    },
+    {
+      "feature": "payment_vol_monthly_volatility_cv",
+      "action": "cap_ok",
+      "neg_frac": NaN,
+      "lo": 0.0,
+      "hi": 1.370855689048767,
+      "reason": NaN
+    },
+    {
+      "feature": "payment_vol_monthly_volatility_proxy",
+      "action": "cap_ok",
+      "neg_frac": NaN,
+      "lo": 0.0,
+      "hi": 591.6002197265625,
+      "reason": NaN
+    },
+    {
+      "feature": "payment_vol_share_1m_of_3m",
+      "action": "cap_ok",
+      "neg_frac": NaN,
+      "lo": 0.0,
+      "hi": 0.8928571343421936,
+      "reason": NaN
+    },
+    {
+      "feature": "payment_vol_share_1m_of_6m",
+      "action": "cap_ok",
+      "neg_frac": NaN,
+      "lo": 0.0,
+      "hi": 0.5141700506210327,
+      "reason": NaN
+    },
+    {
+      "feature": "payment_vol_share_3m_of_6m",
+      "action": "cap_ok",
+      "neg_frac": NaN,
+      "lo": 0.0,
+      "hi": 0.9269841313362122,
+      "reason": NaN
+    },
+    {
+      "feature": "peer_dependency_ratio",
+      "action": "cap_ok",
+      "neg_frac": NaN,
+      "lo": 0.0,
+      "hi": 0.8571428060531616,
+      "reason": NaN
+    },
+    {
+      "feature": "prior_avg_repayment_ratio",
+      "action": "cap_reverted_raw",
+      "neg_frac": NaN,
+      "lo": NaN,
+      "hi": NaN,
+      "reason": "low_finite_frac=0.973"
+    },
+    {
+      "feature": "prior_closed_loan_count",
+      "action": "cap_ok",
+      "neg_frac": NaN,
+      "lo": 0.0,
+      "hi": 124.0,
+      "reason": NaN
+    },
+    {
+      "feature": "prior_disbursement_count",
+      "action": "cap_ok",
+      "neg_frac": NaN,
+      "lo": 0.0,
+      "hi": 132.0,
+      "reason": NaN
+    },
+    {
+      "feature": "prior_disbursement_count_180d",
+      "action": "cap_ok",
+      "neg_frac": NaN,
+      "lo": 0.0,
+      "hi": 132.0,
+      "reason": NaN
+    },
+    {
+      "feature": "prior_disbursement_count_30d",
+      "action": "cap_ok",
+      "neg_frac": NaN,
+      "lo": 0.0,
+      "hi": 34.0,
+      "reason": NaN
+    },
+    {
+      "feature": "prior_disbursement_count_90d",
+      "action": "cap_ok",
+      "neg_frac": NaN,
+      "lo": 0.0,
+      "hi": 84.0,
+      "reason": NaN
+    },
+    {
+      "feature": "prior_late_fee_1_count",
+      "action": "cap_ok",
+      "neg_frac": NaN,
+      "lo": 0.0,
+      "hi": 119.0,
+      "reason": NaN
+    },
+    {
+      "feature": "prior_late_fee_2_count",
+      "action": "cap_ok",
+      "neg_frac": NaN,
+      "lo": 0.0,
+      "hi": 115.0,
+      "reason": NaN
+    },
+    {
+      "feature": "prior_loans_per_observed_month",
+      "action": "cap_reverted_raw",
+      "neg_frac": NaN,
+      "lo": NaN,
+      "hi": NaN,
+      "reason": "low_finite_frac=0.973"
+    },
+    {
+      "feature": "prior_principal_unsettled_count",
+      "action": "cap_ok",
+      "neg_frac": NaN,
+      "lo": 0.0,
+      "hi": 0.0,
+      "reason": NaN
+    },
+    {
+      "feature": "scoring_state_loan_gross_repayment_ratio",
+      "action": "cap_reverted_raw",
+      "neg_frac": NaN,
+      "lo": NaN,
+      "hi": NaN,
+      "reason": "low_finite_frac=0.925"
+    },
+    {
+      "feature": "scoring_state_loan_principal_repayment_ratio",
+      "action": "cap_reverted_raw",
+      "neg_frac": NaN,
+      "lo": NaN,
+      "hi": NaN,
+      "reason": "low_finite_frac=0.925"
+    },
+    {
+      "feature": "scoring_state_repayment_to_disbursement_event_ratio",
+      "action": "cap_reverted_raw",
+      "neg_frac": NaN,
+      "lo": NaN,
+      "hi": NaN,
+      "reason": "low_finite_frac=0.925"
+    },
+    {
+      "feature": "vol_1m",
+      "action": "cap_ok",
+      "neg_frac": NaN,
+      "lo": 0.0,
+      "hi": 5516.0,
+      "reason": NaN
+    },
+    {
+      "feature": "vol_3m",
+      "action": "cap_ok",
+      "neg_frac": NaN,
+      "lo": 0.0,
+      "hi": 15714.0,
+      "reason": NaN
+    },
+    {
+      "feature": "vol_3m_if_active",
+      "action": "cap_reverted_raw",
+      "neg_frac": NaN,
+      "lo": NaN,
+      "hi": NaN,
+      "reason": "low_finite_frac=0.977"
+    },
+    {
+      "feature": "vol_6m",
+      "action": "cap_ok",
+      "neg_frac": NaN,
+      "lo": 0.0,
+      "hi": 30684.0,
+      "reason": NaN
+    },
+    {
+      "feature": "vol_avg_monthly_3m",
+      "action": "cap_ok",
+      "neg_frac": NaN,
+      "lo": 0.0,
+      "hi": 5238.0,
+      "reason": NaN
+    },
+    {
+      "feature": "vol_avg_monthly_6m",
+      "action": "cap_ok",
+      "neg_frac": NaN,
+      "lo": 0.0,
+      "hi": 5114.0,
+      "reason": NaN
+    },
+    {
+      "feature": "vol_growth_1m_vs_prev2m",
+      "action": "cap_ok",
+      "neg_frac": NaN,
+      "lo": 0.0,
+      "hi": 8.377850532531738,
+      "reason": NaN
+    },
+    {
+      "feature": "vol_growth_3m_vs_prev3m",
+      "action": "cap_ok",
+      "neg_frac": NaN,
+      "lo": 0.0,
+      "hi": 19.202531814575195,
+      "reason": NaN
+    },
+    {
+      "feature": "vol_monthly_volatility_cv",
+      "action": "cap_ok",
+      "neg_frac": NaN,
+      "lo": 0.0,
+      "hi": 1.2542043924331665,
+      "reason": NaN
+    },
+    {
+      "feature": "vol_monthly_volatility_proxy",
+      "action": "cap_ok",
+      "neg_frac": NaN,
+      "lo": 0.0,
+      "hi": 1238.16650390625,
+      "reason": NaN
+    },
+    {
+      "feature": "vol_share_1m_of_3m",
+      "action": "cap_ok",
+      "neg_frac": NaN,
+      "lo": 0.0,
+      "hi": 0.8072818517684937,
+      "reason": NaN
+    },
+    {
+      "feature": "vol_share_1m_of_6m",
+      "action": "cap_ok",
+      "neg_frac": NaN,
+      "lo": 0.0,
+      "hi": 0.43549907207489014,
+      "reason": NaN
+    },
+    {
+      "feature": "vol_share_3m_of_6m",
+      "action": "cap_ok",
+      "neg_frac": NaN,
+      "lo": 0.0,
+      "hi": 0.8648802638053894,
+      "reason": NaN
+    },
+    {
+      "feature": "voucher_cust_1m",
+      "action": "cap_reverted_raw",
+      "neg_frac": NaN,
+      "lo": NaN,
+      "hi": NaN,
+      "reason": "nunique=1"
+    },
+    {
+      "feature": "voucher_cust_3m",
+      "action": "cap_reverted_raw",
+      "neg_frac": NaN,
+      "lo": NaN,
+      "hi": NaN,
+      "reason": "nunique=1"
+    },
+    {
+      "feature": "voucher_cust_6m",
+      "action": "cap_reverted_raw",
+      "neg_frac": NaN,
+      "lo": NaN,
+      "hi": NaN,
+      "reason": "nunique=1"
+    },
+    {
+      "feature": "voucher_peers_1m",
+      "action": "cap_reverted_raw",
+      "neg_frac": NaN,
+      "lo": NaN,
+      "hi": NaN,
+      "reason": "nunique=1"
+    },
+    {
+      "feature": "voucher_peers_3m",
+      "action": "cap_reverted_raw",
+      "neg_frac": NaN,
+      "lo": NaN,
+      "hi": NaN,
+      "reason": "nunique=1"
+    },
+    {
+      "feature": "voucher_peers_6m",
+      "action": "cap_reverted_raw",
+      "neg_frac": NaN,
+      "lo": NaN,
+      "hi": NaN,
+      "reason": "nunique=1"
+    },
+    {
+      "feature": "voucher_vol_1m",
+      "action": "cap_ok",
+      "neg_frac": NaN,
+      "lo": 0.0,
+      "hi": 0.0,
+      "reason": NaN
+    },
+    {
+      "feature": "voucher_vol_3m",
+      "action": "cap_ok",
+      "neg_frac": NaN,
+      "lo": 0.0,
+      "hi": 0.0,
+      "reason": NaN
+    },
+    {
+      "feature": "voucher_vol_6m",
+      "action": "cap_ok",
+      "neg_frac": NaN,
+      "lo": 0.0,
+      "hi": 0.0,
+      "reason": NaN
+    }
+  ],
+  "bootstrap": [
+    {
+      "metric": "align_mode",
+      "value": "index_intersection"
+    },
+    {
+      "metric": "n_rows_aligned",
+      "value": 516028.0
+    },
+    {
+      "metric": "y_mismatch",
+      "value": 0.0
+    },
+    {
+      "metric": "xgb_point_auc",
+      "value": 0.9064557779074865
+    },
+    {
+      "metric": "xgb_ci95_lo",
+      "value": 0.9055059530373938
+    },
+    {
+      "metric": "xgb_ci95_hi",
+      "value": 0.9073698573933251
+    },
+    {
+      "metric": "lgb_point_auc",
+      "value": 0.9104440677390092
+    },
+    {
+      "metric": "diff_point_lgb_minus_xgb",
+      "value": 0.003988289831522662
+    },
+    {
+      "metric": "diff_ci95_lo",
+      "value": 0.0038156059593312556
+    },
+    {
+      "metric": "diff_ci95_hi",
+      "value": 0.004151254188333814
+    },
+    {
+      "metric": "p_lgb_better",
+      "value": 1.0
+    }
+  ],
+  "artifact_sha256": {
+    "feature_importance_report.csv": "df30804173344f3c3de21f08174f38ac71748fb4ca2f34e889aea4ad5364ce2d",
+    "feature_order.json": "5c001962e81e50051ea39cab4ee9470dca37c0ac6200e842316620d652a18105",
+    "lgb_policy_band_deciles.csv": "0ade08223365cae1e9f1788ab6ee120f83e87e107261f7c42d4509b049364af5",
+    "lgb_policy_thresholds.csv": "36f0709eb91e582339f3128c51a156a2a18fb4d2121b6a8b1368e6578b23670f",
+    "lgbm_model.joblib": "d66572d8c0bd96e05b830a4a51aaaede0c3cdb7e8e75b732814a0bf491a19e38",
+    "loan_label_observability_audit.csv": "7aa4a92304826b21267b40278a4d3741a90a07713b528e133f2e9423ff221cf7",
+    "loan_label_observability_audit_summary.csv": "8805d1ae84cd539ce09f9d23e93dc3700f9cccc830031f862531733d98f29ac8",
+    "ops_scored.csv": "84f7e3a6151cc8f68e289861b9c666f94b661b59163a37e38053a8aaa72cb4cb",
+    "pd_calibration_map.csv": "3b9f2f497263894e3465aa669bd189e5f52d1d4c5b120c033c0ea1e06e671f0f",
+    "thin_file_lr.joblib": "10d73a9333c67cd30b61b4e655a4dea0dadb8943c2e2607817d6b1e87d2b72a0",
+    "thin_file_lr_features.json": "88a1446cf85c8432b2ef6dcbd29c4e1f991bff8a5fca23735af3cf45b84183c2",
+    "transform_report.csv": "f4331c2ddfd267ec95602e2d56dabbbe30e415def37627f898a659dcc8770f0b",
+    "xgb_model.joblib": "a485f9609575db2240d9c56d0d0d7ffff5e1d35ed40a04901749717c471f1bdb",
+    "xgb_policy_band_deciles.csv": "4ba5a5e90dad4c4cfed825615dec191cd1287b2f0e164e8ae120d2de6e2805dd",
+    "xgb_policy_thresholds.csv": "fccbf7b01f61654ea2d531a4a7f760eb212b9ca5627d1b5e5e5b91457338e13b"
+  }
+}
