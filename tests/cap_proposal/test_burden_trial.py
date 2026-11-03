@@ -277,3 +277,32 @@ def test_limits_vs_disbursed(tmp_path):
                      "--month", "2026-08", "--out-dir", str(tmp_path / "out8")]) == 0
     m8 = pd.read_csv(tmp_path / "out8" / "limits_vs_disbursed_agents.csv")
     assert len(m8) == 1
+
+
+# -- 6. snapshot date alignment ---------------------------------------------------
+
+
+def _write_synthetic(tmp_path, loan_summary_date=None):
+    paths = {}
+    for name, frame in make_synthetic_inputs(100, seed=3).items():
+        if name == "loan_summary" and loan_summary_date:
+            frame = frame.assign(snapshot_dt=loan_summary_date)
+        frame.to_csv(tmp_path / f"{name}.csv", index=False)
+        paths[name] = str(tmp_path / f"{name}.csv")
+    return paths
+
+
+def test_mismatched_loan_summary_date_is_refused(tmp_path):
+    paths = _write_synthetic(tmp_path, loan_summary_date="20260817")
+    with pytest.raises(trial.SnapshotDateMismatch, match="2026-08-17"):
+        trial.load_features(**paths, as_of_date=SNAPSHOT_DT)
+    args = ["--transaction", paths["transaction"], "--borrower", paths["borrower"], "--loan-summary", paths["loan_summary"],
+            "--loan-history", paths["loan_history"], "--as-of-date", SNAPSHOT_DT, "--out-dir", str(tmp_path / "out")]
+    assert trial.main(args) == 2
+    assert trial.main([*args, "--allow-date-mismatch"]) == 0
+
+
+def test_matching_dates_with_yyyymmdd_format_accepted(tmp_path):
+    paths = _write_synthetic(tmp_path, loan_summary_date="20260831")   # same day, different text format
+    production, _ = trial.load_features(**paths, as_of_date=SNAPSHOT_DT)
+    assert len(production) > 0

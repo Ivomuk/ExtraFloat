@@ -97,8 +97,42 @@ GUARD_MODES = ("enforce", "enforce_below_diamond", "off")
 # -----------------------------------------------------------------------------
 
 
+class SnapshotDateMismatch(ValueError):
+    """The extracts are not all from the same snapshot date."""
+
+
+def _dates(df: pd.DataFrame) -> list[str]:
+    if df is None or "snapshot_dt" not in df.columns:
+        return []
+    return sorted(pd.to_datetime(df["snapshot_dt"], errors="coerce").dropna().dt.strftime("%Y-%m-%d").unique())
+
+
+def check_snapshot_dates(txn: pd.DataFrame, loan_summary: pd.DataFrame, loan_history: pd.DataFrame | None) -> None:
+    """Fail loudly when the extracts are from different snapshots.
+
+    The engine joins the loan summary on (msisdn, snapshot_dt) with an EXACT date match and silently zero-fills
+    every loan feature for unmatched agents (recent_usage_cap = 0, weaker risk score) -- a mismatched file does
+    not error, it just produces wrong limits. The loan history is joined on msisdn only, so a stale file would be
+    used without any warning at all."""
+    t = _dates(txn)
+    problems = []
+    ls = _dates(loan_summary)
+    if ls != t:
+        problems.append(f"loan summary snapshot_dt {ls} != agent mart snapshot_dt {t}")
+    lh = _dates(loan_history)
+    if loan_history is not None and lh and lh != t:
+        problems.append(f"loan history snapshot_dt {lh} != agent mart snapshot_dt {t}")
+    if problems:
+        raise SnapshotDateMismatch(
+            "Input files are from different snapshot dates: " + "; ".join(problems) + ". "
+            "Every loan feature would be zero-filled (recent usage cap = 0 for every agent). Regenerate the "
+            "loan summary / loan history for the agent mart's date (data/loan_summary_query.txt, "
+            "data/loan_history_snapshot_query.txt), or pass --allow-date-mismatch to run anyway."
+        )
+
+
 def load_features(transaction: str, borrower: str, loan_summary: str, loan_history: str | None,
-                  as_of_date: str | None = None) -> tuple[pd.DataFrame, pd.DataFrame]:
+                  as_of_date: str | None = None, allow_date_mismatch: bool = False) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Build engine features twice from the same extracts, with the live engine's own builder:
     (production_features, design_features). Production is what run_engine.py builds today
     (no loan history); the design needs the loan history snapshot for its ladder and arrears rules."""
@@ -106,6 +140,12 @@ def load_features(transaction: str, borrower: str, loan_summary: str, loan_histo
     bor = load_borrower_limit_features(borrower)
     ls = load_loan_summary_recent_features(loan_summary)
     lh = load_loan_history_snapshot_features(loan_history) if loan_history else None
+    try:
+        check_snapshot_dates(txn, ls, lh)
+    except SnapshotDateMismatch as exc:
+        if not allow_date_mismatch:
+            raise
+        logger.warning("RUNNING DESPITE DATE MISMATCH (--allow-date-mismatch): %s", exc)
     asof = pd.Timestamp(as_of_date) if as_of_date else None
     production = build_extrafloat_limit_engine_features(bor, txn, ls, None, as_of_date=asof)
     design = build_extrafloat_limit_engine_features(bor, txn, ls, lh, as_of_date=asof)
@@ -364,6 +404,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--all-candidates", action="store_true", help="Run every limit_design_*.json in extrafloat/cap_proposal/.")
     ap.add_argument("--agent-tier-guard", nargs="+", choices=GUARD_MODES,
                     help="Override the settings' agent_tier_guard; several values run each settings file once per mode.")
+    ap.add_argument("--allow-date-mismatch", action="store_true",
+                    help="Run even if the loan summary / loan history snapshot_dt differs from the agent mart's. "
+                         "Not recommended: unmatched agents get every loan feature zero-filled.")
     ap.add_argument("--current-with-loan-history", action="store_true",
                     help="Feed the loan history to the CURRENT run too (activates the engine's unresolved-loan haircut). "
                          "Default off = the engine exactly as run_engine.py runs it in production.")
@@ -393,7 +436,11 @@ def main(argv: list[str] | None = None) -> int:
                  "loan_summary": args.loan_summary, "loan_history": args.loan_history}
         as_of = args.as_of_date
 
-    production, design_features = load_features(**paths, as_of_date=as_of)
+    try:
+        production, design_features = load_features(**paths, as_of_date=as_of, allow_date_mismatch=args.allow_date_mismatch)
+    except SnapshotDateMismatch as exc:
+        print(f"\nERROR: {exc}")
+        return 2
     current = run_current(design_features if args.current_with_loan_history else production)
 
     index = []
