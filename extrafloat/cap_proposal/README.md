@@ -97,6 +97,29 @@ the overdue-only haircut scope. The wrapper's `--capacity-scaling` option has no
 design, because the design replaces `capacity_cap` entirely. So the absolute limits can differ from a wrapper
 run, but the design logic is the same code.
 
+## Comparing the limits with what was actually disbursed
+
+Once the trial has been run with `--agent-tier-guard enforce off enforce_below_diamond`, compare its four limit
+columns with `monthly_disbursement_summary.csv`. That file is built by `scripts/build_monthly_disbursement_summary.py`
+and has one row per agent per month, only for months where every disbursement was the same amount.
+
+```bat
+compare_limits_vs_disbursed.bat --disbursed monthly_disbursement_summary.csv
+```
+
+- If you give a bare file name, the script also looks for it in `data\`.
+- By default each agent is compared on their latest month in the file. Use `--month 2026-09` to choose one month.
+- `--agents` defaults to `output/burden_trial/limit_design_proposal__guard_comparison_agents.csv`.
+
+For each limit, overall and by category, it reports:
+- **covered**: the agent took no more than this limit would allow;
+- **cut**: the agent took more than this limit, with the UGX shortfall;
+- the median ratio of limit to disbursed amount;
+- the share of agents in each band of disbursed ÷ limit.
+
+Everything is written to `output/burden_trial/vs_disbursed/`: `limits_vs_disbursed.md`, plus CSV files by agent,
+by category and by band.
+
 ## Tests
 
 ```bash

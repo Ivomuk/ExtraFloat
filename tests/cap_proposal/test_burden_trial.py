@@ -235,3 +235,45 @@ def test_cli_guard_comparison_side_by_side(tmp_path):
     cat = pd.read_csv(tmp_path / "limit_design_proposal__guard_comparison_by_category.csv").set_index("agent_category")
     assert cat.loc["ALL AGENTS", "agents"] == len(wide)
     assert (tmp_path / "limit_design_proposal__guard_comparison.md").exists()
+
+
+# -- 5. limits vs actual disbursements ------------------------------------------
+
+
+def test_limits_vs_disbursed(tmp_path):
+    from extrafloat.cap_proposal import compare_limits_vs_disbursed as cmp
+
+    limits = pd.DataFrame({
+        "msisdn": ["256700000001", "256700000002", "256700000003"],
+        "agent_category": ["bronze", "diamond", "Below Threshold"],
+        "category_max": [100_000, 1_000_000, 0],
+        "limit_current": [100_000, 800_000, 0],
+        "limit_category_enforced": [100_000, 1_000_000, 0],
+        "limit_category_not_enforced": [150_000, 1_200_000, 20_000],
+        "limit_enforce_below_diamond": [100_000, 1_200_000, 0],
+    })
+    disb = pd.DataFrame({
+        "msisdn": ["256700000001", "256700000001", "256700000002", "256700000003", "256799999999"],
+        "profile": "x", "month": ["2026-08", "2026-09", "2026-09", "2026-09", "2026-09"],
+        "disbursed_amount": [50_000, 120_000, 900_000, 30_000, 10_000], "n_transactions": 1,
+    })
+    limits.to_csv(tmp_path / "agents.csv", index=False)
+    disb.to_csv(tmp_path / "disb.csv", index=False)
+    assert cmp.main(["--agents", str(tmp_path / "agents.csv"), "--disbursed", str(tmp_path / "disb.csv"),
+                     "--out-dir", str(tmp_path / "out")]) == 0
+    m = pd.read_csv(tmp_path / "out" / "limits_vs_disbursed_agents.csv", dtype={"msisdn": str}).set_index("msisdn")
+    assert len(m) == 3                                                      # unmatched agent dropped
+    assert m.loc["256700000001", "disbursed_amount"] == 120_000            # latest month used
+    assert m.loc["256700000001", "limit_category_enforced__cut"] == 1      # took 120k, enforced limit 100k
+    assert m.loc["256700000001", "limit_category_enforced__shortfall"] == 20_000
+    assert m.loc["256700000001", "limit_category_not_enforced__cut"] == 0
+    assert m.loc["256700000002", "limit_current__cut"] == 1
+    assert m.loc["256700000003", "limit_category_not_enforced__cut"] == 1
+    cat = pd.read_csv(tmp_path / "out" / "limits_vs_disbursed_by_category.csv")
+    allrow = cat[(cat.agent_category == "ALL AGENTS") & (cat.limit == "category enforced")].iloc[0]
+    assert allrow["cut_agents"] == 2 and allrow["agents_matched"] == 3
+
+    assert cmp.main(["--agents", str(tmp_path / "agents.csv"), "--disbursed", str(tmp_path / "disb.csv"),
+                     "--month", "2026-08", "--out-dir", str(tmp_path / "out8")]) == 0
+    m8 = pd.read_csv(tmp_path / "out8" / "limits_vs_disbursed_agents.csv")
+    assert len(m8) == 1
