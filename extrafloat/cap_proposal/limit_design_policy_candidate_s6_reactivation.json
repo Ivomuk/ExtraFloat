@@ -1,0 +1,61 @@
+{
+ "_readme": "Settings for run_engine_wrapper.py --limit-design burden. Every value is a PROPOSAL for Credit Risk to set. Keys starting with an underscore are comments and are ignored. Anything omitted falls back to the default in limit_design.py. The reasoning for each value is in the Credit Risk document.",
+ "capacity_ceiling_multiple": 4.0,
+ "_why_capacity_ceiling_multiple": "Limit may not exceed this many months of the agent's commission (6-month commission / 6). Measured bad-loan rate is about 1.9% at 3-4x for borrowers with a clean streak and about 2.5% at 4-6x; 3x would cut total limits about 8%.",
+ "keep_peak_season_haircut": true,
+ "_why_keep_peak_season_haircut": "Keeps the engine's 15% capacity cut in January, August, September and December. Not yet validated against outcomes; removing it adds about 2 points to the mean limit.",
+ "engine_ceiling": 5000000,
+ "_why_engine_ceiling": "Outer bound; matches the Bank of Uganda cap the engine already enforces. The product maximum is a separate decision for Product and Credit Risk.",
+ "risk_base_limit": 2000000,
+ "_why_risk_base_limit": "The risk cap is risk score x this value, so it must be raised with the ceiling or no limit can exceed 1,000,000. Raised alone it is NOT safe: see the governor.",
+ "governor": {
+  "enabled": true,
+  "multiple_of_largest_past_loan": 1.25,
+  "reference_ceiling": 1000000,
+  "reference_risk_base": 1000000,
+  "_why": "Any increase over what the 1,000,000-ceiling engine would give is limited to this multiple of the borrower's largest past loan. Without it, 23% of borrowers would be above 1,000,000 and the median limit would be 1.96x their largest past loan. 1.0x gives +11.8% total limits, 1.25x +19.3%, 1.5x +26.5% (versus the 1,000,000-ceiling version)."
+ },
+ "ladder": {
+  "no_completed_loan": 2.0,
+  "early_clean": 3.0,
+  "early_not_clean": 2.0,
+  "established_streak": 4.0,
+  "established_short_streak": 3.0,
+  "established_severe_history": 2.0,
+  "early_max_completed_loans": 2,
+  "streak_required": 3,
+  "severe_overdue_days": 30,
+  "_why": "Multiples of monthly commission by experience. First loans: 0.29% bad at or below 2x versus 3.19% at 2-3x. One or two clean loans: thin evidence (61 bad loans in 4,190), set at 3x. Established with an on-time streak: 4x. Unknown outcome counts as not clean (conservative). Severe overdue = 30+ days past a loan's due date, the definition already used in the loan-state query.",
+  "clean_on_time_source": "lifetime"
+ },
+ "arrears": {
+  "minor_max_days": 30,
+  "minor_cap_multiple": 3.0,
+  "severe_cap_multiple": 2.0,
+  "block_lending_when_severe_overdue": true,
+  "_why": "1-30 days overdue holds the borrower at 3x or below (no graduation); over 30 days or an open rollover drops to 2x. Blocking lending outright at 30+ days (963 borrowers holding 183M) is left OFF as a policy choice for Credit Risk.",
+  "source": "any_loan",
+  "severe_current_dpd_threshold": 30
+ },
+ "risk_tier_multipliers_apply_to_first_exposure": true,
+ "_why_risk_tier_multipliers_apply_to_first_exposure": "Borrowers with no history get a default risk score of 0.63, so every first-exposure borrower is tier 2 or 3 (multiplier 0.85 or 0.65) on top of the 2x cap. Kept ON (conservative). Switching OFF adds about 4.7% to total limits.",
+ "pd": {
+  "tier_pd_cutoffs": [
+   0.02,
+   0.05,
+   0.1
+  ],
+  "thin_file_definition": "engine",
+  "thin_file_loans_threshold": 3,
+  "_why_tier_pd_cutoffs": "Used only for borrowers with a calibrated PD. The engine's cut-offs (0.85 / 0.60 / 0.35) were built for the 7-signal score; the calibrated PD tops out near 16%, so on (1 - PD) every borrower is tier 1 or 2. The PD is calibrated, so it reads as an expected bad-loan rate: tier 1 at or below the 2% appetite, tier 2 to 5%, tier 3 to 10%, tier 4 above 10%. Set to null to use the engine's own cut-offs.",
+  "_why_thin_file_definition": "The PD model's thin-file flag means no loan history at all and flags only 20 of 9,603 thin-file borrowers; using it would remove the thin-file weights for borrowers with 1-2 loans. 'engine' keeps the engine's own definition (fewer than 3 loans)."
+ },
+ "min_usable_loan": 300000,
+ "_why_min_usable_loan": "Smallest loan ever disbursed is about 300,000 (0.02% of loans are smaller). Used only to flag limits below it; it does not change any limit. To be confirmed by Product.",
+ "_candidate": "Policy candidate S6 for discussion with Credit Risk (NOT the frozen baseline): S5 plus a temporary reactivation cap. A borrower whose last repayment on any loan was more than 150 days ago has an effective multiple of min(experience multiple, 2x) until a repayment is recorded; the experience stage is kept for audit; no block, no PD change. Run: py\\python.exe run_engine_wrapper.py --snapshot 20260831 --design-config limit_design_policy_candidate_s6_reactivation.json --output output\\engine_output_policy_candidate_s6.csv",
+ "reactivation": {
+  "enabled": true,
+  "gap_days": 150,
+  "cap_multiple": 2.0
+ }
+}
