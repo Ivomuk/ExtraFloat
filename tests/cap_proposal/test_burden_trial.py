@@ -218,3 +218,20 @@ def test_cli_guard_modes_one_run_each(tmp_path):
     idx = pd.read_csv(tmp_path / "index.csv").set_index("agent_tier_guard")
     assert set(idx.index) == set(trial.GUARD_MODES)
     assert idx.loc["enforce", "above_category_max"] == 0
+
+
+def test_cli_guard_comparison_side_by_side(tmp_path):
+    assert trial.main(["--synthetic", "300", "--agent-tier-guard", "enforce", "off", "enforce_below_diamond",
+                       "--out-dir", str(tmp_path)]) == 0
+    wide = pd.read_csv(tmp_path / "limit_design_proposal__guard_comparison_agents.csv")
+    for col in ("limit_current", "limit_category_enforced", "limit_category_not_enforced", "limit_enforce_below_diamond"):
+        assert col in wide.columns
+    assert wide["msisdn"].is_unique
+    assert (wide["limit_category_enforced"] <= wide["limit_category_not_enforced"] + 1).all()
+    assert (wide["limit_category_enforced"] <= wide["category_max"] + 1).all()
+    non_diamond = wide["agent_category"] != "diamond"
+    pdt.assert_series_equal(wide.loc[non_diamond, "limit_enforce_below_diamond"],
+                            wide.loc[non_diamond, "limit_category_enforced"], check_names=False)
+    cat = pd.read_csv(tmp_path / "limit_design_proposal__guard_comparison_by_category.csv").set_index("agent_category")
+    assert cat.loc["ALL AGENTS", "agents"] == len(wide)
+    assert (tmp_path / "limit_design_proposal__guard_comparison.md").exists()

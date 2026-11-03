@@ -28,7 +28,9 @@ the category maximums:
 | `enforce_below_diamond` | Same as `enforce`, except Diamond agents can go above 1,000,000, limited by the governor and the 5M ceiling. |
 | `off` | The design as originally written, with no category guard. |
 
-Compare all three in one run with `--agent-tier-guard off enforce_below_diamond enforce`. Every `summary.md`
+Compare all three in one run with `--agent-tier-guard enforce off enforce_below_diamond`. Besides one folder per setting, this writes side-by-side files to `<out-dir>`:
+- `<settings>__guard_comparison_agents.csv`: one row per agent, with the columns `limit_current`, `limit_category_enforced`, `limit_category_not_enforced` and `limit_enforce_below_diamond`
+- `<settings>__guard_comparison_by_category.csv` and `.md`: totals and maximums per category for each setting, plus an ALL AGENTS row Every `summary.md`
 has a by-category table: each category's maximum, how many proposed limits sit above it, and how many limits
 the guard capped. The audit columns are `design_agent_category`, `design_agent_tier_max`,
 `design_limit_before_tier_guard` and `design_agent_tier_guard_binding`.

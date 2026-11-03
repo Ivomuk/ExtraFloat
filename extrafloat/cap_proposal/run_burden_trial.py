@@ -200,6 +200,56 @@ def category_table(agents: pd.DataFrame) -> pd.DataFrame:
     return t.reindex(order)
 
 
+GUARD_LABELS = {
+    "enforce": "category_enforced",
+    "off": "category_not_enforced",
+    "enforce_below_diamond": "enforce_below_diamond",
+}
+
+
+def guard_comparison(agents_by_mode: dict[str, pd.DataFrame]) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Side by side for several agent_tier_guard modes of ONE settings file.
+    Returns (per-agent wide table, per-category totals)."""
+    modes = [m for m in ("enforce", "off", "enforce_below_diamond") if m in agents_by_mode]
+    first = agents_by_mode[modes[0]]
+    wide = first[["msisdn", "design_agent_category", "design_agent_tier_max", "design_stage", "limit_current"]].copy()
+    wide = wide.rename(columns={"design_agent_category": "agent_category", "design_agent_tier_max": "category_max",
+                                "design_stage": "experience_stage"})
+    for m in modes:
+        lim = agents_by_mode[m].set_index("msisdn")["limit_proposed"]
+        wide[f"limit_{GUARD_LABELS[m]}"] = wide["msisdn"].map(lim).values
+    if "off" in modes:
+        wide["above_category_max_if_not_enforced"] = (wide["limit_category_not_enforced"] > wide["category_max"] + 1).astype(int)
+
+    order = [c for c in CATEGORY_ORDER if c in set(wide["agent_category"])]
+    order += [c for c in wide["agent_category"].dropna().unique() if c not in order]
+    g = wide.groupby("agent_category", dropna=False)
+    cat = pd.DataFrame({"agents": g.size(), "category_max": g["category_max"].max(),
+                        "current_total_m": g["limit_current"].sum() / 1e6})
+    for m in modes:
+        col = f"limit_{GUARD_LABELS[m]}"
+        cat[f"{GUARD_LABELS[m]}_total_m"] = g[col].sum() / 1e6
+        cat[f"{GUARD_LABELS[m]}_max"] = g[col].max()
+    if "off" in modes:
+        cat["above_max_if_not_enforced"] = g["above_category_max_if_not_enforced"].sum()
+    cat = cat.reindex(order)
+    total = cat.sum(numeric_only=True)
+    for c in cat.columns:
+        if c.endswith("_max") or c == "category_max":
+            total[c] = cat[c].max()
+    cat.loc["ALL AGENTS"] = total
+    return wide, cat
+
+
+def render_guard_markdown(cat: pd.DataFrame, settings_name: str, synthetic: bool) -> str:
+    note = ("\n> **Synthetic data.** Checks the mechanics only; says nothing about the real population.\n"
+            if synthetic else "")
+    t = cat.reset_index().rename(columns={"index": "agent_category"})
+    return (f"# Agent-category guard comparison: `{settings_name}`\n{note}\n"
+            "Same agents, same design; only the agent-category guard differs. Totals in UGX millions.\n\n"
+            + _md_table(t.round(1).to_dict("records")))
+
+
 def _group_table(df: pd.DataFrame, by: str) -> pd.DataFrame:
     g = df.groupby(by, dropna=False)
     t = pd.DataFrame({
@@ -351,11 +401,12 @@ def main(argv: list[str] | None = None) -> int:
         if args.agent_tier_guard:
             for mode in args.agent_tier_guard:
                 runs.append((f"{path.stem}__guard_{mode}" if len(args.agent_tier_guard) > 1 else path.stem,
-                             {**base, "agent_tier_guard": mode}))
+                             path.stem, {**base, "agent_tier_guard": mode}))
         else:
-            runs.append((path.stem, base))
+            runs.append((path.stem, path.stem, base))
 
-    for name, settings in runs:
+    by_settings: dict[str, dict[str, pd.DataFrame]] = {}
+    for name, stem, settings in runs:
         try:
             proposed = run_proposed(design_features, settings)
         except ValueError as exc:
@@ -363,6 +414,7 @@ def main(argv: list[str] | None = None) -> int:
             index.append({"settings": name, "skipped": str(exc)})
             continue
         agents = compare(current, proposed)
+        by_settings.setdefault(stem, {})[settings.get("agent_tier_guard", "enforce")] = agents
         summary = summarize(agents, settings, name)
         run_dir = out_dir / name
         run_dir.mkdir(exist_ok=True)
@@ -375,6 +427,17 @@ def main(argv: list[str] | None = None) -> int:
                       "zero_proposed": summary["proposed"]["zero"], "above_category_max": summary["above_category_max"]})
         logger.info("%s: total %.1fM -> %.1fM (%s%%), above 1M: %d", name, summary["current"]["total_m"],
                     summary["proposed"]["total_m"], summary["total_change_pct"], summary["proposed"]["above_1m"])
+
+    for stem, agents_by_mode in by_settings.items():
+        if len(agents_by_mode) < 2:
+            continue
+        wide, cat = guard_comparison(agents_by_mode)
+        wide.to_csv(out_dir / f"{stem}__guard_comparison_agents.csv", index=False)
+        cat.reset_index().rename(columns={"index": "agent_category"}).to_csv(
+            out_dir / f"{stem}__guard_comparison_by_category.csv", index=False)
+        (out_dir / f"{stem}__guard_comparison.md").write_text(render_guard_markdown(cat, stem, bool(args.synthetic)))
+        print(f"\n== {stem}: agent-category guard comparison (UGX millions) ==")
+        print(cat.round(1).to_string())
 
     idx = pd.DataFrame(index)
     idx.to_csv(out_dir / "index.csv", index=False)
