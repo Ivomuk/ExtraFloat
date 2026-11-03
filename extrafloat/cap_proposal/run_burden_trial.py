@@ -117,8 +117,46 @@ def borrower_latest_loan(borrower: pd.DataFrame) -> pd.Timestamp | None:
     return max(ts) if ts else None
 
 
+# Caveats about the inputs of the current run, printed and written into every summary (reset per load).
+DATA_NOTES: list[str] = []
+
+
+def align_loan_dates(txn: pd.DataFrame, loan_summary: pd.DataFrame, loan_history: pd.DataFrame | None):
+    """--align-loan-dates: relabel the loan summary / loan history snapshot_dt to the agent mart's date so the
+    engine's exact-date join matches. The loan DATA is not changed -- it stays as of its own date. Returns
+    (loan_summary, loan_history, latest original loan-data date or None)."""
+    t = _dates(txn)
+    if len(t) != 1:
+        raise SnapshotDateMismatch(f"--align-loan-dates needs a single agent mart snapshot date; found {t}")
+    target = pd.Timestamp(t[0])
+    originals = []
+    out = []
+    for name, df in (("loan summary", loan_summary), ("loan history", loan_history)):
+        if df is None:
+            out.append(None)
+            continue
+        d = _dates(df)
+        if len(d) != 1:
+            raise SnapshotDateMismatch(f"--align-loan-dates needs a single {name} snapshot date; found {d}")
+        if d[0] != t[0]:
+            originals.append(pd.Timestamp(d[0]))
+            gap = (pd.Timestamp(d[0]) - target).days
+            when = "AFTER" if gap > 0 else "BEFORE"
+            DATA_NOTES.append(f"{name} is as of {d[0]}, {abs(gap)} days {when} the agent mart ({t[0]}); its snapshot "
+                              f"date was relabelled to {t[0]} so it joins (--align-loan-dates).")
+            df = df.assign(snapshot_dt=target)
+        out.append(df)
+    if any(o > target for o in originals):
+        DATA_NOTES.append("Loan features include activity after the agent mart date. Comparing these limits with "
+                          f"disbursements made between {t[0]} and {max(originals):%Y-%m-%d} is biased towards agreement: "
+                          "those loans are already in the inputs.")
+    for n in DATA_NOTES:
+        logger.warning("DATA NOTE: %s", n)
+    return out[0], out[1], (max(originals) if originals else None)
+
+
 def check_snapshot_dates(txn: pd.DataFrame, loan_summary: pd.DataFrame, loan_history: pd.DataFrame | None,
-                         borrower: pd.DataFrame | None = None) -> None:
+                         borrower: pd.DataFrame | None = None, borrower_max_date: pd.Timestamp | None = None) -> None:
     """Fail loudly when the extracts are from different snapshots.
 
     The engine joins the loan summary on (msisdn, snapshot_dt) with an EXACT date match and silently zero-fills
@@ -135,7 +173,8 @@ def check_snapshot_dates(txn: pd.DataFrame, loan_summary: pd.DataFrame, loan_his
         problems.append(f"loan history snapshot_dt {lh} != agent mart snapshot_dt {t}")
     if borrower is not None and len(t) == 1:
         latest = borrower_latest_loan(borrower)
-        if latest is not None and latest.normalize() > pd.Timestamp(t[0]):
+        limit = max(pd.Timestamp(t[0]), borrower_max_date) if borrower_max_date is not None else pd.Timestamp(t[0])
+        if latest is not None and latest.normalize() > limit:
             problems.append(f"borrower history contains loans up to {latest:%Y-%m-%d}, after the agent mart's "
                             f"snapshot {t[0]} (it was built for a later date; regenerate data/borrower_history.txt "
                             f"with snapshot_dt = {t[0].replace('-', '')})")
@@ -146,12 +185,14 @@ def check_snapshot_dates(txn: pd.DataFrame, loan_summary: pd.DataFrame, loan_his
             "Input files are from different snapshot dates: " + "; ".join(problems) + ". "
             "Every loan feature would be zero-filled (recent usage cap = 0 for every agent). Regenerate the "
             "loan summary / loan history for the agent mart's date (data/loan_summary_query.txt, "
-            "data/loan_history_snapshot_query.txt), or pass --allow-date-mismatch to run anyway."
+            "data/loan_history_snapshot_query.txt), or pass --align-loan-dates to join loan data from another "
+            "date on purpose (recorded in the outputs)."
         )
 
 
 def load_features(transaction: str, borrower: str, loan_summary: str, loan_history: str | None,
-                  as_of_date: str | None = None, allow_date_mismatch: bool = False) -> tuple[pd.DataFrame, pd.DataFrame]:
+                  as_of_date: str | None = None, allow_date_mismatch: bool = False,
+                  align_loan_dates_to_mart: bool = False) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Build engine features twice from the same extracts, with the live engine's own builder:
     (production_features, design_features). Production is what run_engine.py builds today
     (no loan history); the design needs the loan history snapshot for its ladder and arrears rules."""
@@ -159,12 +200,17 @@ def load_features(transaction: str, borrower: str, loan_summary: str, loan_histo
     bor = load_borrower_limit_features(borrower)
     ls = load_loan_summary_recent_features(loan_summary)
     lh = load_loan_history_snapshot_features(loan_history) if loan_history else None
+    DATA_NOTES.clear()
+    loan_date = None
+    if align_loan_dates_to_mart:
+        ls, lh, loan_date = align_loan_dates(txn, ls, lh)
     try:
-        check_snapshot_dates(txn, ls, lh, bor)
+        check_snapshot_dates(txn, ls, lh, bor, borrower_max_date=loan_date)
     except SnapshotDateMismatch as exc:
         if not allow_date_mismatch:
             raise
         logger.warning("RUNNING DESPITE DATE MISMATCH (--allow-date-mismatch): %s", exc)
+        DATA_NOTES.append(f"Run with --allow-date-mismatch: {exc}")
     asof = pd.Timestamp(as_of_date) if as_of_date else None
     production = build_extrafloat_limit_engine_features(bor, txn, ls, None, as_of_date=asof)
     design = build_extrafloat_limit_engine_features(bor, txn, ls, lh, as_of_date=asof)
@@ -307,6 +353,7 @@ def guard_comparison(agents_by_mode: dict[str, pd.DataFrame]) -> tuple[pd.DataFr
 def render_guard_markdown(cat: pd.DataFrame, settings_name: str, synthetic: bool) -> str:
     note = ("\n> **Synthetic data.** Checks the mechanics only; says nothing about the real population.\n"
             if synthetic else "")
+    note += "".join(f"\n> **Input note.** {n}\n" for n in DATA_NOTES)
     t = cat.reset_index().rename(columns={"index": "agent_category"})
     return (f"# Agent-category guard comparison: `{settings_name}`\n{note}\n"
             "Same agents, same design; only the agent-category guard differs. Totals in UGX millions.\n\n"
@@ -385,6 +432,7 @@ def render_markdown(s: dict, synthetic: bool) -> str:
     rows = [{"metric": k, "current": s["current"][k], "proposed": s["proposed"][k]} for k in s["current"]]
     note = ("\n> **Synthetic data.** These figures check that the design runs and that its rules fire as written. "
             "They say nothing about the real population.\n") if synthetic else ""
+    note += "".join(f"\n> **Input note.** {n}\n" for n in DATA_NOTES)
     return (
         f"# Burden design trial: `{s['settings']}`\n{note}\n"
         f"Agents scored: **{s['agents']:,}**. Total limit change vs the live engine: **{s['total_change_pct']}%**.\n\n"
@@ -423,6 +471,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--all-candidates", action="store_true", help="Run every limit_design_*.json in extrafloat/cap_proposal/.")
     ap.add_argument("--agent-tier-guard", nargs="+", choices=GUARD_MODES,
                     help="Override the settings' agent_tier_guard; several values run each settings file once per mode.")
+    ap.add_argument("--align-loan-dates", action="store_true",
+                    help="Join a loan summary / loan history from a DIFFERENT snapshot date on purpose: their snapshot_dt is "
+                         "relabelled to the agent mart's date so the engine's exact-date join matches. The loan data itself "
+                         "is unchanged. Recorded as an input note in every summary.")
     ap.add_argument("--allow-date-mismatch", action="store_true",
                     help="Run even if the loan summary / loan history snapshot_dt differs from the agent mart's. "
                          "Not recommended: unmatched agents get every loan feature zero-filled.")
@@ -456,7 +508,8 @@ def main(argv: list[str] | None = None) -> int:
         as_of = args.as_of_date
 
     try:
-        production, design_features = load_features(**paths, as_of_date=as_of, allow_date_mismatch=args.allow_date_mismatch)
+        production, design_features = load_features(**paths, as_of_date=as_of, allow_date_mismatch=args.allow_date_mismatch,
+                                                    align_loan_dates_to_mart=args.align_loan_dates)
     except SnapshotDateMismatch as exc:
         print(f"\nERROR: {exc}")
         return 2
@@ -516,6 +569,8 @@ def main(argv: list[str] | None = None) -> int:
     if "skipped" in idx:
         for _, row in idx[idx["skipped"].notna()].iterrows():
             print(f"SKIPPED {row['settings']}: {row['skipped']}")
+    for n in DATA_NOTES:
+        print(f"INPUT NOTE: {n}")
     print(f"\nWritten to {out_dir.resolve()}")
     return 0
 

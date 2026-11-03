@@ -77,6 +77,21 @@ python -m extrafloat.cap_proposal.run_burden_trial --synthetic 5000 --all-candid
   - `summary.md` and `summary.json`: totals, direction of change, and tables by stage and by binding constraint
   - `<out-dir>/index.csv`: one line per settings file
 
+### Snapshot dates
+
+The trial checks that the inputs are from the same snapshot date before it runs:
+- the loan summary's and the loan history's `snapshot_dt` must equal the agent mart's;
+- the borrower history must have no loans after the agent mart's date.
+
+If they don't match, the run stops. The engine joins the loan summary on an exact date, and when the dates
+differ every agent's loan features silently become 0.
+
+To use loan files from another date on purpose (for example a 2026-08-17 loan summary and loan history with a
+2026-07-31 mart), add `--align-loan-dates`. This relabels the loan files' `snapshot_dt` to the mart's date so the
+join works. The loan data itself is unchanged, and an **Input note** saying so is written into every summary.
+If the loan data is later than the mart, any comparison with disbursements made between the two dates is biased
+towards agreement, because those loans are already in the inputs.
+
 ### Inputs the design needs
 
 | Column | Source |

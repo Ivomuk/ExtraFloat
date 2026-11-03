@@ -315,3 +315,43 @@ def test_borrower_history_with_later_loans_is_refused(tmp_path):
     bor.to_csv(paths["borrower"], index=False)
     with pytest.raises(trial.SnapshotDateMismatch, match="borrower history contains loans up to 2026-09-05"):
         trial.load_features(**paths, as_of_date=SNAPSHOT_DT)
+
+
+def test_align_loan_dates_joins_later_loan_data(tmp_path):
+    # mart 2026-07-31, loan summary + loan history 2026-08-17 (the real-data case)
+    paths = {}
+    for name, frame in make_synthetic_inputs(200, seed=5).items():
+        if name == "transaction":
+            frame = frame.assign(snapshot_dt="2026-07-31")
+        elif name in ("loan_summary", "loan_history"):
+            frame = frame.assign(snapshot_dt="20260817")
+        elif name == "borrower":
+            frame = frame.assign(latest_loan_ts="2026-08-15", latest_disbursement_ts="2026-08-15")
+        frame.to_csv(tmp_path / f"{name}.csv", index=False)
+        paths[name] = str(tmp_path / f"{name}.csv")
+    with pytest.raises(trial.SnapshotDateMismatch):
+        trial.load_features(**paths, as_of_date="2026-07-31")
+    production, design = trial.load_features(**paths, as_of_date="2026-07-31", align_loan_dates_to_mart=True)
+    assert (production["recent_disbursement_amount_1m"] > 0).any()        # loan summary actually joined
+    assert "closed_loan_count" in design.columns
+    assert any("17 days AFTER" in n for n in trial.DATA_NOTES)
+    out = tmp_path / "out"
+    args = ["--transaction", paths["transaction"], "--borrower", paths["borrower"], "--loan-summary", paths["loan_summary"],
+            "--loan-history", paths["loan_history"], "--as-of-date", "2026-07-31", "--align-loan-dates", "--out-dir", str(out)]
+    assert trial.main(args) == 0
+    assert "Input note" in (out / "limit_design_proposal" / "summary.md").read_text()
+
+
+def test_align_loan_dates_still_refuses_borrower_beyond_loan_date(tmp_path):
+    paths = {}
+    for name, frame in make_synthetic_inputs(100, seed=6).items():
+        if name == "transaction":
+            frame = frame.assign(snapshot_dt="2026-07-31")
+        elif name in ("loan_summary", "loan_history"):
+            frame = frame.assign(snapshot_dt="20260817")
+        elif name == "borrower":
+            frame = frame.assign(latest_loan_ts="2026-09-20")
+        frame.to_csv(tmp_path / f"{name}.csv", index=False)
+        paths[name] = str(tmp_path / f"{name}.csv")
+    with pytest.raises(trial.SnapshotDateMismatch, match="borrower history"):
+        trial.load_features(**paths, as_of_date="2026-07-31", align_loan_dates_to_mart=True)
