@@ -306,3 +306,12 @@ def test_matching_dates_with_yyyymmdd_format_accepted(tmp_path):
     paths = _write_synthetic(tmp_path, loan_summary_date="20260831")   # same day, different text format
     production, _ = trial.load_features(**paths, as_of_date=SNAPSHOT_DT)
     assert len(production) > 0
+
+
+def test_borrower_history_with_later_loans_is_refused(tmp_path):
+    paths = _write_synthetic(tmp_path)
+    bor = pd.read_csv(paths["borrower"])
+    bor.loc[0, "latest_loan_ts"] = "2026-09-05"            # a loan after the 2026-08-31 snapshot
+    bor.to_csv(paths["borrower"], index=False)
+    with pytest.raises(trial.SnapshotDateMismatch, match="borrower history contains loans up to 2026-09-05"):
+        trial.load_features(**paths, as_of_date=SNAPSHOT_DT)

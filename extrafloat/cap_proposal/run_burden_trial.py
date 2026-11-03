@@ -107,7 +107,18 @@ def _dates(df: pd.DataFrame) -> list[str]:
     return sorted(pd.to_datetime(df["snapshot_dt"], errors="coerce").dropna().dt.strftime("%Y-%m-%d").unique())
 
 
-def check_snapshot_dates(txn: pd.DataFrame, loan_summary: pd.DataFrame, loan_history: pd.DataFrame | None) -> None:
+BORROWER_TS_COLUMNS = ("latest_loan_ts", "latest_disbursement_ts")
+
+
+def borrower_latest_loan(borrower: pd.DataFrame) -> pd.Timestamp | None:
+    """Latest loan timestamp in the borrower history -- its effective 'as of' date (the file has no snapshot_dt)."""
+    ts = [pd.to_datetime(borrower[c], errors="coerce").max() for c in BORROWER_TS_COLUMNS if c in borrower.columns]
+    ts = [t for t in ts if pd.notna(t)]
+    return max(ts) if ts else None
+
+
+def check_snapshot_dates(txn: pd.DataFrame, loan_summary: pd.DataFrame, loan_history: pd.DataFrame | None,
+                         borrower: pd.DataFrame | None = None) -> None:
     """Fail loudly when the extracts are from different snapshots.
 
     The engine joins the loan summary on (msisdn, snapshot_dt) with an EXACT date match and silently zero-fills
@@ -122,6 +133,14 @@ def check_snapshot_dates(txn: pd.DataFrame, loan_summary: pd.DataFrame, loan_his
     lh = _dates(loan_history)
     if loan_history is not None and lh and lh != t:
         problems.append(f"loan history snapshot_dt {lh} != agent mart snapshot_dt {t}")
+    if borrower is not None and len(t) == 1:
+        latest = borrower_latest_loan(borrower)
+        if latest is not None and latest.normalize() > pd.Timestamp(t[0]):
+            problems.append(f"borrower history contains loans up to {latest:%Y-%m-%d}, after the agent mart's "
+                            f"snapshot {t[0]} (it was built for a later date; regenerate data/borrower_history.txt "
+                            f"with snapshot_dt = {t[0].replace('-', '')})")
+        elif latest is not None:
+            logger.info("borrower history: latest loan %s (snapshot %s)", f"{latest:%Y-%m-%d}", t[0])
     if problems:
         raise SnapshotDateMismatch(
             "Input files are from different snapshot dates: " + "; ".join(problems) + ". "
@@ -141,7 +160,7 @@ def load_features(transaction: str, borrower: str, loan_summary: str, loan_histo
     ls = load_loan_summary_recent_features(loan_summary)
     lh = load_loan_history_snapshot_features(loan_history) if loan_history else None
     try:
-        check_snapshot_dates(txn, ls, lh)
+        check_snapshot_dates(txn, ls, lh, bor)
     except SnapshotDateMismatch as exc:
         if not allow_date_mismatch:
             raise
