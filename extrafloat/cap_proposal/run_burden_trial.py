@@ -83,6 +83,10 @@ AGENT_COLUMNS = [
     "is_thin_file", "risk_tier",
     "design_agent_category", "design_agent_tier_max", "design_agent_tier_guard",
     "design_limit_before_tier_guard", "design_agent_tier_guard_binding",
+    # engine caps the design keeps: which of them sets the limit when design_binding_constraint = "engine caps"
+    "capacity_cap", "recent_usage_cap", "prior_exposure_cap", "risk_cap",
+    "combined_cap_before_risk_guardrail", "combined_cap", "combined_top_driver", "combined_reason",
+    "policy_multiplier", "policy_reason", "risk_score", "cal_pd",
 ]
 CATEGORY_ORDER = ["Below Threshold", "new bronze", "bronze", "silver", "gold", "platinum", "titanium", "diamond"]
 GUARD_MODES = ("enforce", "enforce_below_diamond", "off")
