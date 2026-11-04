@@ -566,3 +566,38 @@ def test_exposure_waterfall_adds_up(features, settings):
     w = cs.waterfall(r)
     total = w["commission_capacity_m"] - w["held_by_engine_caps_and_tier_m"] - w["held_by_governor_m"] - w["held_by_category_max_m"]
     assert abs(total - w["final_limits_m"]) < 0.2 + 0.0001 * w["commission_capacity_m"]     # rounding to 100 per agent
+
+
+# -- 13. historical default validation by loan / commission multiple ------------------
+
+
+def test_validate_burden_history(tmp_path):
+    from extrafloat.cap_proposal import validate_burden_history as vb
+
+    mart = pd.DataFrame({"agent_msisdn": ["1", "1", "2", "3"], "tbl_dt": [20260131, 20260228, 20260131, 20260131],
+                         "commission": [600_000, 1_200_000, 60_000, 0]})
+    mart.to_csv(tmp_path / "mart.csv", index=False)
+    loans = pd.DataFrame({
+        "msisdn": ["1", "1", "2", "3", "4", "1"],
+        "loan_date": ["2026-02-10", "2026-03-05", "2026-02-15", "2026-02-15", "2026-02-15", "2026-01-15"],
+        "disbursement_amount_ugx": [450_000, 900_000, 55_000, 10_000, 10_000, 100_000],
+        "bad_state_3dpd_30d": [0, 1, 1, 0, 0, 0], "label_eligible_30d": [1, 1, 1, 1, 1, 1], "split": "train",
+        "prior_closed_loan_count": [9, 9, 5, 0, 0, 2], "consecutive_on_time_loans": [9, 9, 5, 0, 0, 2],
+        "active_loan_days_aging_at_scoring": [0, 0, 0, 0, 0, 0], "anomaly_open_at_scoring": [0, 0, 0, 0, 0, 0]})
+    loans.to_csv(tmp_path / "state_data", sep="|", index=False)              # no extension, pipe-delimited
+    m = vb.attach_commission(vb.load_loans(tmp_path / "state_data", None), vb.load_mart(tmp_path / "mart.csv"))
+    m = m.set_index(["msisdn", "loan_date"])
+    # 2026-02-10 uses the 31 Jan snapshot (no look-ahead to 28 Feb): 450k / (600k/6) = 4.5x
+    assert m.loc[("1", pd.Timestamp("2026-02-10")), "multiple"] == 4.5
+    # 2026-03-05 uses the 28 Feb snapshot: 900k / 200k = 4.5x
+    assert m.loc[("1", pd.Timestamp("2026-03-05")), "multiple"] == 4.5
+    assert m.loc[("2", pd.Timestamp("2026-02-15")), "band"] == "5-6x"           # 55k / 10k = 5.5x
+    assert pd.isna(m.loc[("1", pd.Timestamp("2026-01-15")), "multiple"])        # no snapshot before the loan
+    assert vb.main(["--loans", str(tmp_path / "state_data"), "--mart", str(tmp_path / "mart.csv"), "--out-dir", str(tmp_path / "o")]) == 0
+    bb = pd.read_csv(tmp_path / "o" / "burden_by_band.csv", index_col=0)
+    assert bb.loc["4-5x", "loans"] == 2 and bb.loc["4-5x", "bad"] == 1
+    mt = pd.read_csv(tmp_path / "o" / "burden_matching.csv", index_col=0)["loans"]
+    assert mt["used"] == 3 and mt["no mart snapshot before the loan"] == 2 and mt["commission 0 or missing"] == 1
+    st = vb.stage(pd.DataFrame({"prior_closed_loan_count": [9, 6, 6, 3, 1, 0], "consecutive_on_time_loans": [9, 5, 2, 3, 1, 0],
+                                "active_loan_days_aging_at_scoring": [0, 0, 0, 0, 0, 0], "anomaly_open_at_scoring": [0, 0, 0, 0, 0, 0]}))
+    assert list(st.str[:2]) == ["G6", "G5", "S2", "S2", "S1", "S0"]
