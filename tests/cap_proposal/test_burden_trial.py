@@ -391,3 +391,35 @@ def test_frozen_engine_output_joins_pd_and_frozen_limit(tmp_path):
                      "--disbursed", str(tmp_path / "disb.csv"), "--out-dir", str(tmp_path / "vs")]) == 0
     cat = pd.read_csv(tmp_path / "vs" / "limits_vs_disbursed_by_category.csv")
     assert "frozen engine" in set(cat["limit"])
+
+
+# -- 8. tier preview (inspect_pd_source) -------------------------------------------
+
+
+def test_tier_preview_shares_and_rules(tmp_path):
+    from extrafloat.cap_proposal import inspect_pd_source as ips
+
+    agents = pd.DataFrame({"msisdn": range(8), "cal_pd": [0.01, 0.02, 0.03, 0.05, 0.08, 0.10, 0.2, 0.5],
+                           "thin_file_flag": [0, 0, 0, 0, 0, 0, 1, 1]})
+    t = ips.tier_preview(agents, [0.02, 0.05, 0.10], None).set_index("tier")
+    assert list(t["agents"]) == [2, 2, 2, 2]                     # boundaries inclusive, as in limit_design
+    assert t.loc["tier_4", "thin_file_agents"] == 2
+    assert abs(t["agent_share"].sum() - 1) < 1e-9
+    assert ips.parse_cutoffs("3,12,30") == [0.03, 0.12, 0.30]
+    import argparse
+
+    with pytest.raises(argparse.ArgumentTypeError):
+        ips.parse_cutoffs("0.1,0.05,0.2")
+    cuts = ips.cutoffs_for_shares(pd.Series(np.linspace(0, 1, 101)), ips.parse_shares("40,30,20,10"))
+    np.testing.assert_allclose(cuts, [0.4, 0.7, 0.9])
+
+    cal = pd.DataFrame({"model": "xgb", "score_min": [0, .5], "score_max": [.5, 1], "pd": [0.01, 0.30],
+                        "n": [900, 100], "bad_rate": [0.01, 0.30]})
+    t2 = ips.tier_preview(agents, [0.02, 0.05, 0.10], cal).set_index("tier")
+    assert t2.loc["tier_1", "loan_share"] == 0.9 and t2.loc["tier_4", "loan_bad_rate"] == 0.30
+
+    agents.to_csv(tmp_path / "out.csv", index=False)
+    cal.to_csv(tmp_path / "cal.csv", index=False)
+    assert ips.main(["--engine-output", str(tmp_path / "out.csv"), "--calibration-map", str(tmp_path / "cal.csv"),
+                     "--cutoffs", "2,5,10", "--target-shares", "25,25,25,25", "--out", str(tmp_path / "p.csv")]) == 0
+    assert len(pd.read_csv(tmp_path / "p.csv")) == 8
