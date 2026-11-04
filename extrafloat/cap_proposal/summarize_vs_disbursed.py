@@ -92,7 +92,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--run", action="append", type=parse_run, required=True, metavar="LABEL=FOLDER",
                     help="A compare_limits_vs_disbursed --out-dir folder and the label to show it under. Repeat.")
     ap.add_argument("--design-limit", default="category enforced",
-                    choices=["category enforced", "category not enforced", "enforce below diamond"],
+                    choices=["category enforced", "category not enforced", "enforce below diamond", "enforce except graduates"],
                     help="Which of the design's limits to take from each run (default: category enforced).")
     ap.add_argument("--out-dir", default="output/burden_trial/vs_disbursed_summary")
     args = ap.parse_args(argv)

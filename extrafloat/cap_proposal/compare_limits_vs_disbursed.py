@@ -46,6 +46,7 @@ LIMIT_COLUMNS = {
     "limit_category_enforced": "category enforced",
     "limit_category_not_enforced": "category not enforced",
     "limit_enforce_below_diamond": "enforce below diamond",
+    "limit_enforce_except_graduates": "enforce except graduates",
 }
 CATEGORY_ORDER = ["Below Threshold", "new bronze", "bronze", "silver", "gold", "platinum", "titanium", "diamond"]
 

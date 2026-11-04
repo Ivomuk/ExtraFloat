@@ -532,3 +532,37 @@ def test_scenario_settings_files_load():
         d = ld.load_design_config(trial.HERE / f)
         assert d["graduation"]["enabled"] and d["graduation"]["stages"]
         assert d["pd"]["tier_pd_cutoffs"] == [0.03, 0.12, 0.30]
+
+
+# -- 12. selective category exemption, scenario C', exposure decomposition ----------------
+
+
+def test_enforce_except_graduates(features, settings):
+    s = _grad_settings(settings, [{"name": "G6", "min_completed": 5, "min_streak": 5, "multiple": 6.0, "max_risk_tier": 1}])
+    design = features[1].copy()
+    design["cal_pd"] = np.where(np.arange(len(design)) % 2 == 0, 0.01, 0.20)          # half tier 1, half tier 3
+    runs = {g: trial.run_proposed(design, {**s, "agent_tier_guard": g}) for g in ("enforce", "enforce_except_graduates", "off")}
+    sel = runs["enforce_except_graduates"]
+    grad = sel["design_graduation"].ne("")
+    over = sel["assigned_limit"] > sel["design_agent_tier_max"] + 1
+    assert not (over & ~grad).any()                                     # only graduates may exceed the category maximum
+    np.testing.assert_allclose(sel.loc[~grad, "assigned_limit"], runs["enforce"].loc[~grad, "assigned_limit"])
+    np.testing.assert_allclose(sel.loc[grad, "assigned_limit"], runs["off"].loc[grad, "assigned_limit"])
+    assert not sel.loc[design["cal_pd"].values > 0.12, "design_graduation"].ne("").any()   # tier 3 never graduates here
+    base = trial.run_proposed(design, {**settings, "agent_tier_guard": "enforce"})
+    assert (sel["assigned_limit"].values >= base["assigned_limit"].values - 0.5).all()  # nobody is penalised
+
+
+def test_cprime_settings():
+    d = ld.load_design_config(trial.HERE / "limit_design_scenario_Cprime_5x_t12_6x_t1.json")
+    st = sorted(d["graduation"]["stages"], key=lambda x: x["multiple"])
+    assert [(x["multiple"], x["max_risk_tier"], x["min_completed"]) for x in st] == [(5.0, 2, 5), (6.0, 1, 8)]
+
+
+def test_exposure_waterfall_adds_up(features, settings):
+    from extrafloat.cap_proposal import compare_scenarios as cs
+
+    r = trial.run_proposed(features[1], settings).rename(columns={"assigned_limit": "limit_proposed"})
+    w = cs.waterfall(r)
+    total = w["commission_capacity_m"] - w["held_by_engine_caps_and_tier_m"] - w["held_by_governor_m"] - w["held_by_category_max_m"]
+    assert abs(total - w["final_limits_m"]) < 0.2 + 0.0001 * w["commission_capacity_m"]     # rounding to 100 per agent

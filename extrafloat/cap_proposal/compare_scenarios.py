@@ -32,7 +32,9 @@ import pandas as pd
 CATEGORY_ORDER = ["Below Threshold", "new bronze", "bronze", "silver", "gold", "platinum", "titanium", "diamond"]
 KEEP = ["msisdn", "limit_proposed", "design_agent_category", "risk_tier", "cal_pd", "design_stage", "design_graduation",
         "design_k_capacity", "design_binding_constraint", "closed_loan_count", "consecutive_on_time_loans",
-        "design_monthly_commission", "max_prior_loan_size", "design_agent_tier_max"]
+        "design_monthly_commission", "max_prior_loan_size", "design_agent_tier_max",
+        "design_ladder_cap", "design_limit_before_governor", "design_limit_before_tier_guard"]
+ENGINE_CEILING = 5_000_000.0
 
 
 def parse_spec(text: str) -> tuple[str, Path]:
@@ -73,12 +75,44 @@ def _group(m: pd.DataFrame, by: str, order: list[str] | None = None) -> pd.DataF
     return t
 
 
+def waterfall(a: pd.DataFrame) -> dict:
+    """Where potential exposure is held back, in UGX millions, applying the design's caps in order:
+    commission capacity (ladder multiple x monthly commission, at most the engine ceiling)
+      - engine caps and risk tier (usage, exposure, risk cap, tier multiplier)  -> limit before governor
+      - past-loan governor                                                       -> limit before category guard
+      - category maximum (and any arrears block)                                 -> final limit"""
+    need = {"design_ladder_cap", "design_limit_before_governor", "design_limit_before_tier_guard", "limit_proposed"}
+    if not need <= set(a.columns):
+        return {}
+    cap = a["design_ladder_cap"].clip(lower=0, upper=ENGINE_CEILING)
+    s1 = a["design_limit_before_governor"].clip(lower=0)
+    s2 = a["design_limit_before_tier_guard"].clip(lower=0)
+    fin = a["limit_proposed"].clip(lower=0)
+    return {
+        "agents": len(a),
+        "commission_capacity_m": round(cap.sum() / 1e6, 1),
+        "held_by_engine_caps_and_tier_m": round((cap - s1).clip(lower=0).sum() / 1e6, 1),
+        "held_by_governor_m": round((s1 - s2).clip(lower=0).sum() / 1e6, 1),
+        "held_by_category_max_m": round((s2 - fin).clip(lower=0).sum() / 1e6, 1),
+        "final_limits_m": round(fin.sum() / 1e6, 1),
+    }
+
+
+def pd_spread(gr: pd.DataFrame) -> pd.DataFrame:
+    """PD distribution of graduated agents by risk tier."""
+    if gr.empty or "cal_pd" not in gr or "risk_tier" not in gr:
+        return pd.DataFrame()
+    q = gr.groupby("risk_tier")["cal_pd"].describe(percentiles=[0.1, 0.5, 0.9])
+    return q[["count", "min", "10%", "50%", "90%", "max"]]
+
+
 def summarize(label: str, m: pd.DataFrame) -> dict:
     gr = m[m["graduated"]]
     return {
         "scenario": label,
         "agents": len(m),
         "graduated": int(m["graduated"].sum()),
+        "graduated_share_of_all_agents": round(m["graduated"].mean(), 4),
         "limit_up": int(m["up"].sum()),
         "limit_down": int((m["change"] < -0.5).sum()),
         "base_total_m": round(m["limit_base"].sum() / 1e6, 1),
@@ -116,12 +150,18 @@ def main(argv: list[str] | None = None) -> int:
     out.mkdir(parents=True, exist_ok=True)
     focus = [x.strip().lower() for x in args.focus.split(",") if x.strip()]
     rows, md = [], [f"# Scenarios vs {base_label}\n"]
+    waterfalls = []
+    wb = waterfall(base)
+    if wb:
+        waterfalls.append({"scenario": base_label, "subset": "all agents", **wb})
     pd.set_option("display.width", 220)
     for label, path in args.scenario:
         m = compare(base, load(path))
         s = summarize(label, m)
         fm = m[m["design_agent_category"].astype(str).str.lower().isin(focus)] if "design_agent_category" in m else m.iloc[0:0]
-        s.update({"focus_agents": len(fm), "focus_limit_up": int(fm["up"].sum()), "focus_added_m": round(fm["change"].sum() / 1e6, 1)})
+        s.update({"focus_agents": len(fm), "focus_graduated": int(fm["graduated"].sum()),
+                  "focus_graduated_share": round(fm["graduated"].mean(), 4) if len(fm) else None,
+                  "focus_limit_up": int(fm["up"].sum()), "focus_added_m": round(fm["change"].sum() / 1e6, 1)})
         rows.append(s)
         slug = "".join(ch if ch.isalnum() else "_" for ch in label).strip("_")
         by_cat = _group(m, "design_agent_category", CATEGORY_ORDER) if "design_agent_category" in m else pd.DataFrame()
@@ -132,6 +172,13 @@ def main(argv: list[str] | None = None) -> int:
         by_cat.to_csv(out / f"{slug}_by_category.csv")
         by_tier.to_csv(out / f"{slug}_by_tier.csv")
         by_rule.to_csv(out / f"{slug}_graduated_by_rule.csv")
+        spread = pd_spread(gr)
+        spread.to_csv(out / f"{slug}_graduated_pd_by_tier.csv")
+        sm = load(path)
+        for subset, frame in (("all agents", sm), ("graduated agents", sm[sm["msisdn"].isin(gr["msisdn"])])):
+            w = waterfall(frame)
+            if w:
+                waterfalls.append({"scenario": label, "subset": subset, **w})
         m.to_csv(out / f"{slug}_agents.csv", index=False)
         block = (f"\n=== {label} vs {base_label} ===\n"
                  f"graduated {s['graduated']:,} | limit up for {s['limit_up']:,} | total {s['base_total_m']:,.1f}M -> "
@@ -145,7 +192,15 @@ def main(argv: list[str] | None = None) -> int:
             print("\n-- by PD risk tier --\n" + _fmt(by_tier))
         if not by_rule.empty:
             print("\n-- graduated agents: rule that finally set the limit --\n" + by_rule.to_string())
+        if not spread.empty:
+            print("\n-- graduated agents: PD by risk tier --\n" + spread.round(4).to_string())
         md.append(block.replace("===", "##") + "\n```\n" + (_fmt(by_cat) if not by_cat.empty else "") + "\n```\n")
+    if waterfalls:
+        wf = pd.DataFrame(waterfalls)
+        wf.to_csv(out / "exposure_waterfall.csv", index=False)
+        print("\n== Where potential exposure is held back (UGX millions) ==\n"
+              "commission capacity - engine caps & tier - governor - category max = final limits\n" + wf.to_string(index=False))
+        md.append("## Where potential exposure is held back (UGX millions)\n\n```\n" + wf.to_string(index=False) + "\n```\n")
     summary = pd.DataFrame(rows)
     summary.to_csv(out / "scenarios_summary.csv", index=False)
     (out / "scenarios.md").write_text("\n".join(md), encoding="utf-8")

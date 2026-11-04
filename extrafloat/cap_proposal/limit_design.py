@@ -69,6 +69,8 @@ DEFAULTS = {
     #   "enforce"               every agent capped at its category maximum; Below Threshold gets 0.
     #   "enforce_below_diamond" as enforce, except Diamond, which may go above 1,000,000 under the design's own caps and governor.
     #   "off"                   the design as originally written (no category guard).
+    #   "enforce_except_graduates" as enforce, except agents who graduated (see "graduation"): proven agents may exceed their
+    #                           category maximum under the design's other caps; everyone else keeps it.
     "agent_tier_guard": "enforce",
     # Graduation beyond the established multiple (OFF by default: results identical to the design without it).
     # An agent who meets ALL conditions of a stage gets that stage's multiple, for both the experience ladder and the commission
@@ -300,8 +302,8 @@ def run_burden_design(features, d):
     """Run the burden design and return the engine result frame with assigned_limit replaced and design_* audit columns added."""
     ceil = float(d["engine_ceiling"])
     guard_mode = d.get("agent_tier_guard", "enforce")
-    if guard_mode not in ("enforce", "enforce_below_diamond", "off"):
-        raise ValueError(f"agent_tier_guard must be enforce, enforce_below_diamond or off, not {guard_mode!r}")
+    if guard_mode not in ("enforce", "enforce_below_diamond", "off", "enforce_except_graduates"):
+        raise ValueError(f"agent_tier_guard must be enforce, enforce_below_diamond, enforce_except_graduates or off, not {guard_mode!r}")
     # The category maximum must be read BEFORE the engine pass: _engine_pass overwrites agent_tier_ceiling_multiplier.
     from extrafloat.engine.extrafloat_limit_engine_caps import DEFAULT_CAP_CONFIG as _CFG
     _key = features["msisdn"].astype(str)
@@ -369,6 +371,8 @@ def run_burden_design(features, d):
         guard_applies = tier_max.notna()
         if guard_mode == "enforce_below_diamond":
             guard_applies &= category.astype(str).str.lower() != "diamond"
+        elif guard_mode == "enforce_except_graduates":
+            guard_applies &= grad_r.isna()
     before_guard = final.copy()
     final = pd.Series(np.where(guard_applies, np.minimum(final, tier_max.fillna(np.inf)), final), index=r.index)
     tier_guard_binding = guard_applies & (final < before_guard - 1)

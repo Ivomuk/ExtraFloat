@@ -89,9 +89,10 @@ AGENT_COLUMNS = [
     "policy_multiplier", "policy_reason", "risk_score", "cal_pd",
     # experience inputs and graduation (scenario settings with "graduation" enabled)
     "closed_loan_count", "consecutive_on_time_loans", "design_k_capacity", "design_graduation",
+    "assigned_limit_before_design",
 ]
 CATEGORY_ORDER = ["Below Threshold", "new bronze", "bronze", "silver", "gold", "platinum", "titanium", "diamond"]
-GUARD_MODES = ("enforce", "enforce_below_diamond", "off")
+GUARD_MODES = ("enforce", "enforce_below_diamond", "off", "enforce_except_graduates")
 
 
 # -----------------------------------------------------------------------------
@@ -346,13 +347,14 @@ GUARD_LABELS = {
     "enforce": "category_enforced",
     "off": "category_not_enforced",
     "enforce_below_diamond": "enforce_below_diamond",
+    "enforce_except_graduates": "enforce_except_graduates",
 }
 
 
 def guard_comparison(agents_by_mode: dict[str, pd.DataFrame]) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Side by side for several agent_tier_guard modes of ONE settings file.
     Returns (per-agent wide table, per-category totals)."""
-    modes = [m for m in ("enforce", "off", "enforce_below_diamond") if m in agents_by_mode]
+    modes = [m for m in ("enforce", "off", "enforce_below_diamond", "enforce_except_graduates") if m in agents_by_mode]
     first = agents_by_mode[modes[0]]
     wide = first[[c for c in ("msisdn", "design_agent_category", "design_agent_tier_max", "design_stage", "limit_frozen",
                               "limit_current") if c in first.columns]].copy()
