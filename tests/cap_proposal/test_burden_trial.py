@@ -10,6 +10,7 @@ The guarantees that matter most:
 
 from __future__ import annotations
 
+import copy
 import logging
 
 import numpy as np
@@ -472,3 +473,62 @@ def test_explain_headroom(tmp_path):
     assert eh.main(["--comparison", str(tmp_path / "cmp.csv"), "--agents", str(tmp_path / "agents.csv"),
                     "--out-dir", str(tmp_path / "out")]) == 0
     assert (tmp_path / "out" / "headroom.md").exists() and len(pd.read_csv(tmp_path / "out" / "headroom_agents.csv")) == 2
+
+
+# -- 11. graduation beyond 4x and scenario comparison -----------------------------------
+
+
+def _grad_settings(settings, stages, enabled=True):
+    s = copy.deepcopy(settings)
+    s["graduation"] = {"enabled": enabled, "require_recent_disbursement": False, "stages": stages}
+    return s
+
+
+def test_graduation_rules(settings):
+    from extrafloat.cap_proposal import limit_design as ldm
+
+    f = _stage_frame(closed_loan_count=9, consecutive_on_time_loans=9)
+    f = pd.concat([f, _stage_frame(closed_loan_count=6, consecutive_on_time_loans=6),
+                   _stage_frame(closed_loan_count=9, consecutive_on_time_loans=9, active_loan_days_aging_at_snapshot=5),
+                   _stage_frame(closed_loan_count=9, consecutive_on_time_loans=2),
+                   _stage_frame(closed_loan_count=9, consecutive_on_time_loans=9)], ignore_index=True)
+    f["cal_pd"] = [0.01, 0.01, 0.01, 0.01, 0.20]
+    s = _grad_settings(settings, [{"name": "G5", "min_completed": 5, "min_streak": 5, "multiple": 5.0, "max_risk_tier": 4},
+                                  {"name": "G6", "min_completed": 8, "min_streak": 8, "multiple": 6.0, "max_risk_tier": 1}])
+    k, label = ldm.graduation_multiple(f, s)
+    assert list(k.fillna(0)) == [6.0, 5.0, 0.0, 0.0, 5.0]          # 9/9 tier1 -> 6x; 6/6 -> 5x; arrears -> none; streak 2 -> none; tier 3 -> 5x only
+    assert list(label) == ["G6", "G5", "", "", "G5"]
+    k_off, _ = ldm.graduation_multiple(f, _grad_settings(settings, s["graduation"]["stages"], enabled=False))
+    assert k_off.isna().all()
+
+
+def test_graduation_raises_limits_only_for_graduates(features, settings, tmp_path):
+    import copy as _c
+    s_on = _grad_settings(settings, [{"name": "G6", "min_completed": 5, "min_streak": 5, "multiple": 6.0, "max_risk_tier": 4}])
+    design = features[1].copy()
+    design["cal_pd"] = 0.01                                    # everyone tier 1 so the PD condition passes
+    base_s = _c.deepcopy(settings)
+    base = trial.run_proposed(design, {**base_s, "agent_tier_guard": "off"})
+    grad = trial.run_proposed(design, {**s_on, "agent_tier_guard": "off"})
+    up = grad["assigned_limit"].values > base["assigned_limit"].values + 0.5
+    graduated = grad["design_graduation"].ne("").values
+    assert not (up & ~graduated).any()                          # nobody who did not graduate gets more
+    assert (grad["assigned_limit"].values >= base["assigned_limit"].values - 0.5).all()   # nobody gets less
+    assert (grad.loc[graduated, "design_k_capacity"] == 6.0).all()
+    assert (grad.loc[graduated, "assigned_limit"] <= 6.0 * grad.loc[graduated, "design_monthly_commission"] + 50).all()
+
+    from extrafloat.cap_proposal import compare_scenarios as cs
+
+    base.assign(limit_proposed=base["assigned_limit"]).to_csv(tmp_path / "a.csv", index=False)
+    grad.assign(limit_proposed=grad["assigned_limit"]).to_csv(tmp_path / "b.csv", index=False)
+    assert cs.main(["--base", f"A={tmp_path / 'a.csv'}", "--scenario", f"B={tmp_path / 'b.csv'}", "--out-dir", str(tmp_path / "o")]) == 0
+    summ = pd.read_csv(tmp_path / "o" / "scenarios_summary.csv").iloc[0]
+    assert summ["limit_up"] == int(up.sum()) and summ["graduated"] == int(graduated.sum())
+
+
+def test_scenario_settings_files_load():
+    for f in ("limit_design_scenario_B_ladder_5x.json", "limit_design_scenario_C_ladder_6x_tier1.json",
+              "limit_design_scenario_D_ladder_6x_tier1_2.json"):
+        d = ld.load_design_config(trial.HERE / f)
+        assert d["graduation"]["enabled"] and d["graduation"]["stages"]
+        assert d["pd"]["tier_pd_cutoffs"] == [0.03, 0.12, 0.30]

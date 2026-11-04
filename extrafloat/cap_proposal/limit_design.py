@@ -70,6 +70,20 @@ DEFAULTS = {
     #   "enforce_below_diamond" as enforce, except Diamond, which may go above 1,000,000 under the design's own caps and governor.
     #   "off"                   the design as originally written (no category guard).
     "agent_tier_guard": "enforce",
+    # Graduation beyond the established multiple (OFF by default: results identical to the design without it).
+    # An agent who meets ALL conditions of a stage gets that stage's multiple, for both the experience ladder and the commission
+    # capacity (k x monthly commission) in the engine pass; the highest stage met wins. Every other cap still applies (risk tier
+    # multiplier, past-loan governor, category guard, engine ceiling). Conditions per stage:
+    #   min_completed  completed loans (closed_loan_count) at least this
+    #   min_streak     consecutive on-time loans at least this
+    #   max_risk_tier  PD tier at most this (1-4), from cal_pd and pd.tier_pd_cutoffs; agents without cal_pd never graduate
+    # and, for every stage: no severe overdue history (as in the ladder), no current arrears (minor or severe), and, if
+    # require_recent_disbursement, a disbursement in the last 3 months (recent_disbursement_amount_3m > 0).
+    "graduation": {
+        "enabled": False,
+        "require_recent_disbursement": True,
+        "stages": [],
+    },
     # When a calibrated PD (cal_pd) is present: how the PD is turned into the engine's risk tiers, and which thin-file definition applies.
     "pd": {
         "tier_pd_cutoffs": [0.02, 0.05, 0.10],      # PD at or below 2% = tier 1, to 5% = tier 2, to 10% = tier 3, above 10% = tier 4. None = engine's 0.85/0.60/0.35 on (1 - PD)
@@ -99,6 +113,55 @@ def load_design_config(path=None):
     return d
 
 
+def arrears_flags(r, d):
+    """(minor, severe) current-arrears flags, per the design's arrears settings."""
+    A = d["arrears"]
+    if A.get("source", "legacy") in ("snapshot", "any_loan"):
+        age = r["worst_dpd_material_any_loan_at_snapshot" if A["source"] == "any_loan" else "current_dpd_at_snapshot"].fillna(0)
+        anom = r["written_off_at_snapshot"].fillna(0) > 0
+        thr = float(A.get("severe_current_dpd_threshold", 30))
+        return (age > 0) & (age < thr), (age >= thr) | anom
+    age = r["active_loan_days_aging_at_snapshot"].fillna(0)
+    anom = r["anomaly_open_at_snapshot"].fillna(0) > 0
+    return (age > 0) & (age <= A["minor_max_days"]), (age > A["minor_max_days"]) | anom
+
+
+def pd_risk_tier(pd_values, d):
+    """PD tier 1-4 from cal_pd and pd.tier_pd_cutoffs (same rule as pd_tier_scale); NaN where there is no PD or no cut-offs."""
+    cuts = (d.get("pd") or {}).get("tier_pd_cutoffs")
+    v = pd.to_numeric(pd_values, errors="coerce")
+    if not cuts:
+        return pd.Series(np.nan, index=v.index)
+    c1, c2, c3 = [float(x) for x in cuts]
+    t = np.select([v <= c1, v <= c2, v <= c3, v > c3], [1, 2, 3, 4], np.nan)
+    return pd.Series(np.where(v.notna(), t, np.nan), index=v.index)
+
+
+def graduation_multiple(r, d):
+    """Per-agent graduated multiple (NaN where the agent does not graduate). See DEFAULTS['graduation']."""
+    G = d.get("graduation") or {}
+    out = pd.Series(np.nan, index=r.index)
+    stages = G.get("stages") or []
+    if not G.get("enabled") or not stages:
+        return out, pd.Series("", index=r.index)
+    L = d["ladder"]
+    c = r["closed_loan_count"].fillna(0)
+    streak = r["consecutive_on_time_loans"].fillna(0)
+    clean_history = r["lifetime_worst_days_to_principal_cure"].fillna(0) < L["severe_overdue_days"]
+    minor, severe = arrears_flags(r, d)
+    base_ok = clean_history & ~minor & ~severe
+    if G.get("require_recent_disbursement", True):
+        base_ok &= r.get("recent_disbursement_amount_3m", pd.Series(0, index=r.index)).fillna(0) > 0
+    tier = pd_risk_tier(r["cal_pd"], d) if "cal_pd" in r.columns else pd.Series(np.nan, index=r.index)
+    label = pd.Series("", index=r.index)
+    for st in sorted(stages, key=lambda x: float(x["multiple"])):          # highest multiple met wins
+        ok = (base_ok & (c >= float(st.get("min_completed", 0))) & (streak >= float(st.get("min_streak", 0)))
+              & tier.notna() & (tier <= float(st.get("max_risk_tier", 4))))
+        out = out.where(~ok, float(st["multiple"]))
+        label = label.where(~ok, str(st.get("name", f"{st['multiple']}x")))
+    return out, label
+
+
 def stage_and_k(r, d):
     """Experience stage and applied multiple (x monthly commission) for every borrower in engine output/feature frame r."""
     L, A = d["ladder"], d["arrears"]
@@ -125,17 +188,7 @@ def stage_and_k(r, d):
             names["S2s"]: L["established_severe_history"], names["S2a"]: L["established_streak"], names["S2b"]: L["established_short_streak"]}
     stage = pd.Series(stage, index=r.index)
     k_stage = stage.map(kmap).astype(float)
-    if A.get("source", "legacy") in ("snapshot", "any_loan"):
-        age = r["worst_dpd_material_any_loan_at_snapshot" if A["source"] == "any_loan" else "current_dpd_at_snapshot"].fillna(0)
-        anom = r["written_off_at_snapshot"].fillna(0) > 0
-        thr = float(A.get("severe_current_dpd_threshold", 30))
-        minor = (age > 0) & (age < thr)
-        severe = (age >= thr) | anom
-    else:
-        age = r["active_loan_days_aging_at_snapshot"].fillna(0)
-        anom = r["anomaly_open_at_snapshot"].fillna(0) > 0
-        minor = (age > 0) & (age <= A["minor_max_days"])
-        severe = (age > A["minor_max_days"]) | anom
+    minor, severe = arrears_flags(r, d)
     k = np.where(minor, np.minimum(k_stage, A["minor_cap_multiple"]), k_stage)
     k = np.where(severe, np.minimum(k, A["severe_cap_multiple"]), k)
     override = np.select([severe, minor & (k_stage > A["minor_cap_multiple"]), minor],
@@ -143,8 +196,9 @@ def stage_and_k(r, d):
     return stage, pd.Series(k, index=r.index), pd.Series(override, index=r.index), names["S0"], severe
 
 
-def _engine_pass(features, d, engine_ceiling, risk_base):
-    """One engine run with: k x monthly-commission ceiling, thin-file cap and experience ramp off, given ceiling and risk base."""
+def _engine_pass(features, d, engine_ceiling, risk_base, k_capacity=None):
+    """One engine run with: k x monthly-commission ceiling, thin-file cap and experience ramp off, given ceiling and risk base.
+    k_capacity: optional per-agent multiple (Series indexed by msisdn as str) replacing capacity_ceiling_multiple."""
     import extrafloat.engine.run_extrafloat_limit_engine as R
     from extrafloat.engine.extrafloat_limit_engine_caps import DEFAULT_CAP_CONFIG
 
@@ -158,7 +212,12 @@ def _engine_pass(features, d, engine_ceiling, risk_base):
     cfg["risk"]["base_limit"] = float(risk_base)
     f = features.copy()
     mc_ = f["commission"].fillna(0).clip(lower=0) / 6.0
-    f["agent_tier_ceiling_multiplier"] = (k * mc_ / ceil).clip(0, 1)     # per-borrower ceiling at all three places the old tier ceiling applied
+    def _k(frame):
+        if k_capacity is None:
+            return k
+        return frame["msisdn"].astype(str).map(k_capacity).fillna(k).astype(float).values
+
+    f["agent_tier_ceiling_multiplier"] = (_k(f) * mc_ / ceil).clip(0, 1)     # per-borrower ceiling at all three places the old tier ceiling applied
     orig = R.compute_capacity_cap
 
     def patched(df, c=None):
@@ -168,8 +227,9 @@ def _engine_pass(features, d, engine_ceiling, risk_base):
         cr = out["recent_credit_active_flag"].fillna(0).clip(0, 1)
         act = 0.5 + 0.5 * (0.7 * op + 0.3 * cr)                # the engine's own activity multiplier is kept
         seas = out["capacity_season_multiplier"] if keep_season else 1.0
-        out["capacity_cap"] = (k * mc * act * seas).clip(0, ceil)
-        out["capacity_structural"] = (k * mc).clip(0, ceil)
+        kk = _k(out)
+        out["capacity_cap"] = (kk * mc * act * seas).clip(0, ceil)
+        out["capacity_structural"] = (kk * mc).clip(0, ceil)
         if not keep_season:
             out["capacity_season_multiplier"] = 1.0
         return out
@@ -250,8 +310,14 @@ def run_burden_design(features, d):
          * float(_CFG["global_ceiling_limit"])).values, index=_key.values)
     category_by_agent = pd.Series(features["agent_category"].values, index=_key.values) if "agent_category" in features.columns else None
     features = apply_thin_file_definition(features, d)
+    grad_k, grad_label = graduation_multiple(features, d)
+    kmult_base = float(d["capacity_ceiling_multiple"])
+    k_cap_series = pd.Series(np.fmax(grad_k.values, kmult_base), index=_key.values)      # capacity multiple per agent
+    k_capacity = k_cap_series if grad_k.notna().any() else None
+    grad_by_agent = pd.Series(grad_k.values, index=_key.values)
+    grad_label_by_agent = pd.Series(grad_label.values, index=_key.values)
     with pd_tier_scale(d):
-        r = _engine_pass(features, d, ceil, d["risk_base_limit"]).copy()
+        r = _engine_pass(features, d, ceil, d["risk_base_limit"], k_capacity).copy()
     if "risk_score_pd" in r.columns:                       # pd_tier_scale re-mapped risk_score for the tiers only: restore 1 - PD and keep the mapped score apart
         r["policy_risk_score"] = r["risk_score"]
         has_pd = r["risk_score_pd"].notna()
@@ -259,6 +325,10 @@ def run_burden_design(features, d):
         r = r.drop(columns=["risk_score_pd"])
     mc = (r["commission"].fillna(0).clip(lower=0) / 6.0)
     stage, k, override, s0_name, severe = stage_and_k(r, d)
+    agents_r = r["msisdn"].astype(str)
+    grad_r = pd.Series(agents_r.map(grad_by_agent).values, index=r.index)
+    k = pd.Series(np.where(grad_r.notna(), np.fmax(k, grad_r), k), index=r.index)          # graduated agents move up the ladder
+    kmult = pd.Series(np.fmax(grad_r.fillna(kmult_base), kmult_base), index=r.index)       # capacity multiple per agent
     k_before_react = k.copy()
     RA = d.get("reactivation") or {}
     gap_ = r["days_since_last_repayment_any_loan_at_snapshot"] if "days_since_last_repayment_any_loan_at_snapshot" in r.columns else pd.Series(np.nan, index=r.index)
@@ -268,14 +338,14 @@ def run_burden_design(features, d):
     ladder_cap = k * mc
     engine_limit = r["assigned_limit"].astype(float).copy()
     if not d["risk_tier_multipliers_apply_to_first_exposure"]:
-        ceil_k = np.minimum(d["capacity_ceiling_multiple"] * mc, ceil)
+        ceil_k = np.minimum(kmult * mc, ceil)
         engine_limit = pd.Series(np.where(stage == s0_name, r["combined_cap"].clip(upper=ceil_k), engine_limit), index=r.index)
     limit_ladder = pd.Series(_r100(np.minimum(engine_limit, ladder_cap)), index=r.index)
 
     G = d["governor"]
     if G["enabled"]:
         with pd_tier_scale(d):
-            base = _engine_pass(features, d, G["reference_ceiling"], G["reference_risk_base"])
+            base = _engine_pass(features, d, G["reference_ceiling"], G["reference_risk_base"], k_capacity)
         base_limit = pd.Series(_r100(np.minimum(base["assigned_limit"].astype(float), ladder_cap)), index=r.index)
         hist = r["max_prior_loan_size"].fillna(0)
         gov_cap = pd.Series(np.maximum(base_limit, G["multiple_of_largest_past_loan"] * hist), index=r.index)
@@ -311,7 +381,6 @@ def run_burden_design(features, d):
     if d["arrears"]["block_lending_when_severe_overdue"]:
         final = final.where(~severe, 0.0)
 
-    kmult = float(d["capacity_ceiling_multiple"])
     binding = np.select([tier_guard_binding & (final <= 0), tier_guard_binding, final <= 0, before_guard < limit_ladder - 1, (ladder_cap < engine_limit) & (k < kmult), ladder_cap < engine_limit],
                         ["zero (Below Threshold agent category)", "agent category maximum",
                          "zero (no commission, arrears block, or engine caps)", "demonstrated-exposure governor", "experience ladder", "commission ceiling"],
@@ -323,6 +392,8 @@ def run_burden_design(features, d):
     r["design_arrears_rule"] = override
     r["design_monthly_commission"] = mc
     r["design_commission_ceiling"] = np.minimum(kmult * mc, ceil)
+    r["design_k_capacity"] = kmult
+    r["design_graduation"] = pd.Series(agents_r.map(grad_label_by_agent).fillna("").values, index=r.index)
     r["design_ladder_cap"] = ladder_cap
     r["design_limit_before_governor"] = limit_ladder
     r["design_governor_cap"] = gov_cap

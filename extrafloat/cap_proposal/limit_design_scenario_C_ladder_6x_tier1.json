@@ -1,0 +1,80 @@
+{
+  "_scenario": "Scenario C: experience ladder up to 6x, 6x for PD tier 1 only. Same as limit_design_proposal.json otherwise (scenario A = the proposal).",
+  "_readme": "Settings for run_engine_wrapper.py --limit-design burden. Every value is a PROPOSAL for Credit Risk to set. Keys starting with an underscore are comments and are ignored. Anything omitted falls back to the default in limit_design.py. The reasoning for each value is in the Credit Risk document.",
+
+  "capacity_ceiling_multiple": 4.0,
+  "_why_capacity_ceiling_multiple": "Limit may not exceed this many months of the agent's commission (6-month commission / 6). Measured bad-loan rate is about 1.9% at 3-4x for borrowers with a clean streak and about 2.5% at 4-6x; 3x would cut total limits about 8%.",
+
+  "keep_peak_season_haircut": true,
+  "_why_keep_peak_season_haircut": "Keeps the engine's 15% capacity cut in January, August, September and December. Not yet validated against outcomes; removing it adds about 2 points to the mean limit.",
+
+  "engine_ceiling": 5000000,
+  "_why_engine_ceiling": "Outer bound; matches the Bank of Uganda cap the engine already enforces. The product maximum is a separate decision for Product and Credit Risk.",
+
+  "risk_base_limit": 5000000,
+  "_why_risk_base_limit": "The risk cap is risk score x this value, so it must be raised with the ceiling or no limit can exceed 1,000,000. Raised alone it is NOT safe: see the governor.",
+
+  "governor": {
+    "enabled": true,
+    "multiple_of_largest_past_loan": 1.25,
+    "reference_ceiling": 1000000,
+    "reference_risk_base": 1000000,
+    "_why": "Any increase over what the 1,000,000-ceiling engine would give is limited to this multiple of the borrower's largest past loan. Without it, 23% of borrowers would be above 1,000,000 and the median limit would be 1.96x their largest past loan. 1.0x gives +11.8% total limits, 1.25x +19.3%, 1.5x +26.5% (versus the 1,000,000-ceiling version)."
+  },
+
+  "ladder": {
+    "no_completed_loan": 2.0,
+    "early_clean": 3.0,
+    "early_not_clean": 2.0,
+    "established_streak": 4.0,
+    "established_short_streak": 3.0,
+    "established_severe_history": 2.0,
+    "early_max_completed_loans": 2,
+    "streak_required": 3,
+    "severe_overdue_days": 30,
+    "_why": "Multiples of monthly commission by experience. First loans: 0.29% bad at or below 2x versus 3.19% at 2-3x. One or two clean loans: thin evidence (61 bad loans in 4,190), set at 3x. Established with an on-time streak: 4x. Unknown outcome counts as not clean (conservative). Severe overdue = 30+ days past a loan's due date, the definition already used in the loan-state query."
+  },
+
+  "arrears": {
+    "minor_max_days": 30,
+    "minor_cap_multiple": 3.0,
+    "severe_cap_multiple": 2.0,
+    "block_lending_when_severe_overdue": false,
+    "_why": "1-30 days overdue holds the borrower at 3x or below (no graduation); over 30 days or an open rollover drops to 2x. Blocking lending outright at 30+ days (963 borrowers holding 183M) is left OFF as a policy choice for Credit Risk."
+  },
+
+  "risk_tier_multipliers_apply_to_first_exposure": true,
+  "_why_risk_tier_multipliers_apply_to_first_exposure": "Borrowers with no history get a default risk score of 0.63, so every first-exposure borrower is tier 2 or 3 (multiplier 0.85 or 0.65) on top of the 2x cap. Kept ON (conservative). Switching OFF adds about 4.7% to total limits.",
+
+  "pd": {
+    "tier_pd_cutoffs": [0.03, 0.12, 0.30],
+    "thin_file_definition": "engine",
+    "thin_file_loans_threshold": 3,
+    "_why_tier_pd_cutoffs": "Used only for borrowers with a calibrated PD (cal_pd). The engine's own cut-offs (0.85 / 0.60 / 0.35) were built for the 7-signal score, so PD tiers are set directly on PD instead. Previous setting [0.02, 0.05, 0.10] was set for a loan-level PD topping out near 16%; on the frozen PD model (XGBoost trained 2026-09-14, label bad_state_3dpd_30d = more than 3 days past due within 30 days, 12% average bad rate) it put 75.5% of 31 July agents in tier 4. [0.03, 0.12, 0.30], chosen from the agent-level tier preview (extrafloat/cap_proposal/inspect_pd_source.py): agent shares 13.0 / 14.9 / 31.0 / 41.1%, expected bad rate 1.4 / 6.9 / 20.1 / 48.1%, observed bad rate on the model's validation loans 0.4 / 6.4 / 20.2 / 45.8%; tier 2/3 edge at the 12% average. Trial (2026-07-31 mart, category enforced): total limits 49,578M vs 46,373M with the previous cut-offs; August fit 96.3% vs 96.1%. Judgement-based; pending Credit Risk approval. Set to null to use the engine's own cut-offs.",
+    "_why_thin_file_definition": "The PD model's thin-file flag means no loan history at all and flags only 20 of 9,603 thin-file borrowers; using it would remove the thin-file weights for borrowers with 1-2 loans. 'engine' keeps the engine's own definition (fewer than 3 loans)."
+  },
+
+  "graduation": {
+    "enabled": true,
+    "require_recent_disbursement": true,
+    "stages": [
+      {
+        "name": "G5: 5+ completed, 5+ on-time streak",
+        "min_completed": 5,
+        "min_streak": 5,
+        "multiple": 5.0,
+        "max_risk_tier": 4
+      },
+      {
+        "name": "G6: 8+ completed, 8+ on-time streak, PD tier <= 1",
+        "min_completed": 8,
+        "min_streak": 8,
+        "multiple": 6.0,
+        "max_risk_tier": 1
+      }
+    ],
+    "_why": "Shadow scenario, not a calibration. Graduation beyond the established 4x for proven, low-risk agents: all of min_completed, min_streak and max_risk_tier, plus no severe overdue history, no current arrears and a disbursement in the last 3 months. Every other cap still applies (risk tier multiplier, past-loan governor, category guard). Loan-count thresholds are proposals to be calibrated against historical defaults."
+  },
+  "agent_tier_guard": "enforce",
+  "_why_agent_tier_guard": "Agent categories (commission tiers) cap what an agent can get: Below Threshold 0, New Bronze 50,000, Bronze 100,000, Silver 250,000, Gold 350,000, Platinum 500,000, Titanium 750,000, Diamond 1,000,000. The commission-multiple ceiling alone breaks these caps for Below Threshold, New Bronze, Bronze and Diamond. 'enforce' keeps every category cap; 'enforce_below_diamond' keeps them except for Diamond, which can then go above 1,000,000 under the governor; 'off' = the design as first written."
+}

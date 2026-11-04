@@ -87,6 +87,8 @@ AGENT_COLUMNS = [
     "capacity_cap", "recent_usage_cap", "prior_exposure_cap", "risk_cap",
     "combined_cap_before_risk_guardrail", "combined_cap", "combined_top_driver", "combined_reason",
     "policy_multiplier", "policy_reason", "risk_score", "cal_pd",
+    # experience inputs and graduation (scenario settings with "graduation" enabled)
+    "closed_loan_count", "consecutive_on_time_loans", "design_k_capacity", "design_graduation",
 ]
 CATEGORY_ORDER = ["Below Threshold", "new bronze", "bronze", "silver", "gold", "platinum", "titanium", "diamond"]
 GUARD_MODES = ("enforce", "enforce_below_diamond", "off")
