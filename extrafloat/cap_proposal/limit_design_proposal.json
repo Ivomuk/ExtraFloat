@@ -46,10 +46,10 @@
   "_why_risk_tier_multipliers_apply_to_first_exposure": "Borrowers with no history get a default risk score of 0.63, so every first-exposure borrower is tier 2 or 3 (multiplier 0.85 or 0.65) on top of the 2x cap. Kept ON (conservative). Switching OFF adds about 4.7% to total limits.",
 
   "pd": {
-    "tier_pd_cutoffs": [0.02, 0.05, 0.10],
+    "tier_pd_cutoffs": [0.03, 0.12, 0.30],
     "thin_file_definition": "engine",
     "thin_file_loans_threshold": 3,
-    "_why_tier_pd_cutoffs": "Used only for borrowers with a calibrated PD. The engine's cut-offs (0.85 / 0.60 / 0.35) were built for the 7-signal score; the calibrated PD tops out near 16%, so on (1 - PD) every borrower is tier 1 or 2. The PD is calibrated, so it reads as an expected bad-loan rate: tier 1 at or below the 2% appetite, tier 2 to 5%, tier 3 to 10%, tier 4 above 10%. Set to null to use the engine's own cut-offs.",
+    "_why_tier_pd_cutoffs": "Used only for borrowers with a calibrated PD (cal_pd). The engine's own cut-offs (0.85 / 0.60 / 0.35) were built for the 7-signal score, so PD tiers are set directly on PD instead. Previous setting [0.02, 0.05, 0.10] was set for a loan-level PD topping out near 16%; on the frozen PD model (XGBoost trained 2026-09-14, label bad_state_3dpd_30d = more than 3 days past due within 30 days, 12% average bad rate) it put 75.5% of 31 July agents in tier 4. [0.03, 0.12, 0.30], chosen from the agent-level tier preview (extrafloat/cap_proposal/inspect_pd_source.py): agent shares 13.0 / 14.9 / 31.0 / 41.1%, expected bad rate 1.4 / 6.9 / 20.1 / 48.1%, observed bad rate on the model's validation loans 0.4 / 6.4 / 20.2 / 45.8%; tier 2/3 edge at the 12% average. Trial (2026-07-31 mart, category enforced): total limits 49,578M vs 46,373M with the previous cut-offs; August fit 96.3% vs 96.1%. Judgement-based; pending Credit Risk approval. Set to null to use the engine's own cut-offs.",
     "_why_thin_file_definition": "The PD model's thin-file flag means no loan history at all and flags only 20 of 9,603 thin-file borrowers; using it would remove the thin-file weights for borrowers with 1-2 loans. 'engine' keeps the engine's own definition (fewer than 3 loans)."
   },
 
