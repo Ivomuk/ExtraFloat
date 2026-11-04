@@ -449,3 +449,26 @@ def test_summarize_vs_disbursed(tmp_path):
     assert ov.loc["cut_agents", "A"] == 1 and ov.loc["cut_agents", "B"] == 0       # 300k > 200k; nothing > 400k
     assert ov.loc["cut_agents", "frozen engine"] == 1
     assert (out / "summary.md").exists()
+
+
+# -- 10. headroom explanation --------------------------------------------------------
+
+
+def test_explain_headroom(tmp_path):
+    from extrafloat.cap_proposal import explain_headroom as eh
+
+    pd.DataFrame({"msisdn": ["1", "2", "3"], "agent_category": "platinum", "disbursed_amount": [250_000, 350_000, 100_000],
+                  "limit_category_enforced": [400_000, 300_000, 100_000]}).to_csv(tmp_path / "cmp.csv", index=False)
+    pd.DataFrame({"msisdn": ["1", "2", "3"], "risk_tier": ["tier_1", "tier_3", "tier_1"], "cal_pd": [0.01, 0.2, 0.02],
+                  "design_stage": "S2a", "design_k_applied": 4.0, "design_monthly_commission": [100_000, 100_000, 50_000],
+                  "max_prior_loan_size": [320_000, 300_000, 0], "design_binding_constraint": "experience ladder"}
+                 ).to_csv(tmp_path / "agents.csv", index=False)
+    m = eh.build(tmp_path / "cmp.csv", tmp_path / "agents.csv")
+    assert list(m["covered"]) == [True, False, True]
+    assert list(m["headroom"]) == [150_000, 0, 0]
+    assert m.loc[0, "limit_over_monthly_commission"] == 4.0 and m.loc[0, "limit_over_largest_past_loan"] == 1.25
+    t = eh.group_table(m, "risk_tier")
+    assert t.loc["tier_1", "headroom_total_m"] == 0.15 and t.loc["tier_3", "covered_share"] == 0
+    assert eh.main(["--comparison", str(tmp_path / "cmp.csv"), "--agents", str(tmp_path / "agents.csv"),
+                    "--out-dir", str(tmp_path / "out")]) == 0
+    assert (tmp_path / "out" / "headroom.md").exists() and len(pd.read_csv(tmp_path / "out" / "headroom_agents.csv")) == 2
