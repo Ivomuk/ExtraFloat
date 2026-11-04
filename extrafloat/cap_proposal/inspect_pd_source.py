@@ -246,8 +246,12 @@ def run_tier_preview(engine_output: Path, cal_path: Path | None, cutoff_sets: li
     print(f"\n=== Tier preview on {engine_output} ({int(pdv.notna().sum()):,} agents with cal_pd) ===")
     qs = [0.10, 0.25, 0.50, 0.75, 0.90]
     print("  agent PD percentiles: " + "  ".join(f"p{int(q * 100)}={pdv.quantile(q):.3f}" for q in qs))
+    if cal_path is not None:
+        print(f"  calibration map: {cal_path.resolve()}  ({'found' if cal is not None else 'NOT FOUND'})")
     if cal is None:
         print("  (no calibration map found: loan-level columns left out)")
+    elif not {"model", "pd", "n", "bad_rate"} <= set(cal.columns):
+        print(f"  (calibration map has columns {list(cal.columns)}; needs model, pd, n, bad_rate -- loan-level columns left out)")
     cutoff_sets = list(cutoff_sets)
     for shares in share_sets or []:
         cuts = cutoffs_for_shares(pdv, shares)
