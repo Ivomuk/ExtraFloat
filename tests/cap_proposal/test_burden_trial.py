@@ -423,3 +423,29 @@ def test_tier_preview_shares_and_rules(tmp_path):
     assert ips.main(["--engine-output", str(tmp_path / "out.csv"), "--calibration-map", str(tmp_path / "cal.csv"),
                      "--cutoffs", "2,5,10", "--target-shares", "25,25,25,25", "--out", str(tmp_path / "p.csv")]) == 0
     assert len(pd.read_csv(tmp_path / "p.csv")) == 8
+
+
+# -- 9. side-by-side summary of disbursement comparisons ---------------------------
+
+
+def test_summarize_vs_disbursed(tmp_path):
+    from extrafloat.cap_proposal import compare_limits_vs_disbursed as cmp
+    from extrafloat.cap_proposal import summarize_vs_disbursed as summ
+
+    disb = pd.DataFrame({"msisdn": ["1", "2"], "profile": "x", "month": "2026-08",
+                         "disbursed_amount": [100_000, 300_000], "n_transactions": 1})
+    disb.to_csv(tmp_path / "disb.csv", index=False)
+    for name, lim in (("a", 200_000), ("b", 400_000)):
+        pd.DataFrame({"msisdn": ["1", "2"], "agent_category": "gold", "category_max": 350_000,
+                      "limit_frozen": 150_000, "limit_current": 250_000, "limit_category_enforced": lim,
+                      "limit_category_not_enforced": lim, "limit_enforce_below_diamond": lim}
+                     ).to_csv(tmp_path / f"{name}.csv", index=False)
+        assert cmp.main(["--agents", str(tmp_path / f"{name}.csv"), "--disbursed", str(tmp_path / "disb.csv"),
+                         "--out-dir", str(tmp_path / f"vs_{name}")]) == 0
+    out = tmp_path / "summary"
+    assert summ.main(["--run", f"A={tmp_path / 'vs_a'}", "--run", f"B={tmp_path / 'vs_b'}", "--out-dir", str(out)]) == 0
+    ov = pd.read_csv(out / "summary_overall.csv", index_col=0)
+    assert list(ov.columns) == ["frozen engine", "current engine", "A", "B"]
+    assert ov.loc["cut_agents", "A"] == 1 and ov.loc["cut_agents", "B"] == 0       # 300k > 200k; nothing > 400k
+    assert ov.loc["cut_agents", "frozen engine"] == 1
+    assert (out / "summary.md").exists()
