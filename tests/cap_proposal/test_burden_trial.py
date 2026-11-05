@@ -623,7 +623,7 @@ def test_engine_output_file(tmp_path):
     pdt.assert_series_equal(eo.set_index("msisdn")["assigned_limit"].sort_index(),
                             a.set_index("msisdn")["limit_proposed"].sort_index(), check_names=False)
     prov = json.loads((tmp_path / "engine_output_cprime2.csv.provenance.json").read_text())
-    assert prov["agent_tier_guard"] == "enforce_except_graduates" and prov["graduation_enabled"] is True
+    assert prov["assigned_limit_setting"] == "enforce_except_graduates" and prov["graduation_enabled"] is True
     # refuses to overwrite the frozen baseline, and more than one settings file
     assert trial.main([*base, "--engine-output", str(tmp_path / "frozen.csv"), "--out-dir", str(tmp_path / "o3")]) == 2
     two = [*base, str(trial.DEFAULT_SETTINGS), "--engine-output", str(tmp_path / "x.csv"), "--out-dir", str(tmp_path / "o4")]
