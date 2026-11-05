@@ -280,6 +280,45 @@ def engine_output_frame(proposed: pd.DataFrame) -> pd.DataFrame:
     return out[lead + [c for c in out.columns if c not in lead]]
 
 
+def write_engine_output(eo: Path, engine_runs: list, args, paths: dict, as_of) -> None:
+    """Engine-form file for the FIRST category setting run (assigned_limit), with each other setting's limit added as
+    limit_<setting> (e.g. limit_category_enforced, limit_category_not_enforced), plus FILE.provenance.json."""
+    primary_mode, settings, proposed = engine_runs[0]
+    frame = engine_output_frame(proposed)
+    frame.insert(frame.columns.get_loc("assigned_limit") + 1, "assigned_limit_setting", primary_mode)
+    key = frame["msisdn"].astype(str)
+    totals = {primary_mode: round(float(frame["assigned_limit"].sum()) / 1e6, 1)}
+    pos = frame.columns.get_loc("assigned_limit_setting") + 1
+    for mode, _s, other in engine_runs[1:]:
+        col = f"limit_{GUARD_LABELS[mode]}"
+        frame.insert(pos, col, key.map(other.set_index(other["msisdn"].astype(str))["assigned_limit"]).values)
+        pos += 1
+        totals[mode] = round(float(frame[col].sum()) / 1e6, 1)
+    eo.parent.mkdir(parents=True, exist_ok=True)
+    frame.to_csv(eo, index=False)
+    prov = {
+        "written_at": pd.Timestamp.now().isoformat(timespec="seconds"),
+        "settings_file": str(next(iter(_settings_files(args)))),
+        "assigned_limit_setting": primary_mode,
+        "extra_limit_columns": {f"limit_{GUARD_LABELS[m]}": m for m, _s, _p in engine_runs[1:]},
+        "total_limit_m_by_setting": totals,
+        "tier_pd_cutoffs": (settings.get("pd") or {}).get("tier_pd_cutoffs"),
+        "graduation_enabled": bool((settings.get("graduation") or {}).get("enabled")),
+        "governor_multiple_of_largest_past_loan": settings["governor"]["multiple_of_largest_past_loan"],
+        "engine_ceiling": settings["engine_ceiling"],
+        "inputs": dict(paths),
+        "as_of_date": as_of,
+        "frozen_engine_output": args.frozen_engine_output,
+        "input_notes": list(DATA_NOTES),
+        "agents": int(len(frame)),
+        "note": "Proposal output from the burden-design trial, not the live engine. assigned_limit = design limit "
+                "under assigned_limit_setting; limit_* columns = the same design under the other category settings.",
+    }
+    Path(str(eo) + ".provenance.json").write_text(json.dumps(prov, indent=2, default=str))
+    logger.info("engine output written: %s (%d rows, %d columns)", eo, len(frame), frame.shape[1])
+    print(f"Engine output: {eo.resolve()}  (assigned_limit = {primary_mode}; totals by setting: {totals})")
+
+
 def run_proposed(features: pd.DataFrame, settings: dict) -> pd.DataFrame:
     """The burden design, with a check that the engine functions it swaps are put back."""
     originals = (R.compute_capacity_cap, R.compute_risk_cap)
@@ -553,8 +592,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--engine-output", metavar="FILE",
                     help="Also write the design's full result in engine-output form (one row per agent, assigned_limit = "
                          "the new limit, all engine and design columns) to FILE, plus FILE.provenance.json. Needs exactly "
-                         "one settings file and at most one --agent-tier-guard value. Refuses to overwrite the file given "
-                         "to --frozen-engine-output.")
+                         "one settings file. With several --agent-tier-guard values, assigned_limit uses the FIRST and the "
+                         "others are added as limit_<setting> columns. Refuses to overwrite the --frozen-engine-output file.")
     args = ap.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s  %(name)s  %(message)s")
@@ -608,10 +647,8 @@ def main(argv: list[str] | None = None) -> int:
     runs = []
     if args.engine_output:
         n_settings = len(_settings_files(args))
-        n_guard = len(args.agent_tier_guard or [None])
-        if n_settings != 1 or n_guard != 1:
-            print(f"\nERROR: --engine-output needs exactly one settings file and one --agent-tier-guard value "
-                  f"(got {n_settings} settings file(s) and {n_guard} guard value(s)).")
+        if n_settings != 1:
+            print(f"\nERROR: --engine-output needs exactly one settings file (got {n_settings}).")
             return 2
         if args.frozen_engine_output and Path(args.engine_output).resolve() == Path(args.frozen_engine_output).resolve():
             print("\nERROR: --engine-output would overwrite the --frozen-engine-output file (the baseline). Choose another name.")
@@ -628,6 +665,7 @@ def main(argv: list[str] | None = None) -> int:
             runs.append((path.stem, path.stem, base))
 
     by_settings: dict[str, dict[str, pd.DataFrame]] = {}
+    engine_runs: list[tuple[str, dict, pd.DataFrame]] = []
     for name, stem, settings in runs:
         try:
             proposed = run_proposed(design_features, settings)
@@ -642,28 +680,7 @@ def main(argv: list[str] | None = None) -> int:
         run_dir.mkdir(exist_ok=True)
         agents.to_csv(run_dir / "agents.csv", index=False)
         if args.engine_output:
-            eo = Path(args.engine_output)
-            eo.parent.mkdir(parents=True, exist_ok=True)
-            frame = engine_output_frame(proposed)
-            frame.to_csv(eo, index=False)
-            prov = {
-                "written_at": pd.Timestamp.now().isoformat(timespec="seconds"),
-                "settings_file": str(next(iter(_settings_files(args)))),
-                "agent_tier_guard": settings.get("agent_tier_guard", "enforce"),
-                "tier_pd_cutoffs": (settings.get("pd") or {}).get("tier_pd_cutoffs"),
-                "graduation_enabled": bool((settings.get("graduation") or {}).get("enabled")),
-                "governor_multiple_of_largest_past_loan": settings["governor"]["multiple_of_largest_past_loan"],
-                "engine_ceiling": settings["engine_ceiling"],
-                "inputs": dict(paths),
-                "as_of_date": as_of,
-                "frozen_engine_output": args.frozen_engine_output,
-                "input_notes": list(DATA_NOTES),
-                "agents": int(len(frame)),
-                "total_assigned_limit_m": round(float(frame["assigned_limit"].sum()) / 1e6, 1),
-                "note": "Proposal output from the burden-design trial, not the live engine. assigned_limit = design limit.",
-            }
-            Path(str(eo) + ".provenance.json").write_text(json.dumps(prov, indent=2, default=str))
-            logger.info("engine output written: %s (%d rows, %d columns)", eo, len(frame), frame.shape[1])
+            engine_runs.append((settings.get("agent_tier_guard", "enforce"), settings, proposed))
         (run_dir / "summary.json").write_text(json.dumps(summary, indent=2, default=str))
         (run_dir / "summary.md").write_text(render_markdown(summary, synthetic=bool(args.synthetic)))
         index.append({"settings": name, "agent_tier_guard": settings.get("agent_tier_guard", "enforce"), "agents": summary["agents"],
@@ -673,6 +690,9 @@ def main(argv: list[str] | None = None) -> int:
                       "zero_proposed": summary["proposed"]["zero"], "above_category_max": summary["above_category_max"]})
         logger.info("%s: total %.1fM -> %.1fM (%s%%), above 1M: %d", name, summary["current"]["total_m"],
                     summary["proposed"]["total_m"], summary["total_change_pct"], summary["proposed"]["above_1m"])
+
+    if args.engine_output and engine_runs:
+        write_engine_output(Path(args.engine_output), engine_runs, args, paths, as_of)
 
     for stem, agents_by_mode in by_settings.items():
         if len(agents_by_mode) < 2:

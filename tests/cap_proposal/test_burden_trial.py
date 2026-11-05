@@ -618,12 +618,36 @@ def test_engine_output_file(tmp_path):
     assert trial.main([*base, "--agent-tier-guard", "enforce_except_graduates", "--engine-output", str(out), "--out-dir", str(tmp_path / "o")]) == 0
     eo = pd.read_csv(out, dtype={"msisdn": str})
     a = pd.read_csv(tmp_path / "o" / "limit_design_scenario_Cprime_5x_t12_6x_t1" / "agents.csv", dtype={"msisdn": str})
-    assert list(eo.columns[:3]) == ["msisdn", "assigned_limit", "risk_tier"]
+    assert list(eo.columns[:3]) == ["msisdn", "assigned_limit", "assigned_limit_setting"]
     assert eo["msisdn"].is_unique and len(eo) == len(a)
     pdt.assert_series_equal(eo.set_index("msisdn")["assigned_limit"].sort_index(),
                             a.set_index("msisdn")["limit_proposed"].sort_index(), check_names=False)
     prov = json.loads((tmp_path / "engine_output_cprime2.csv.provenance.json").read_text())
     assert prov["agent_tier_guard"] == "enforce_except_graduates" and prov["graduation_enabled"] is True
-    # refuses: two guard modes, or overwriting the frozen baseline
-    assert trial.main([*base, "--agent-tier-guard", "enforce", "off", "--engine-output", str(out), "--out-dir", str(tmp_path / "o2")]) == 2
+    # refuses to overwrite the frozen baseline, and more than one settings file
     assert trial.main([*base, "--engine-output", str(tmp_path / "frozen.csv"), "--out-dir", str(tmp_path / "o3")]) == 2
+    two = [*base, str(trial.DEFAULT_SETTINGS), "--engine-output", str(tmp_path / "x.csv"), "--out-dir", str(tmp_path / "o4")]
+    assert trial.main(two) == 2
+
+
+def test_engine_output_with_other_category_settings(tmp_path):
+    paths = _write_synthetic(tmp_path)
+    txn = pd.read_csv(paths["transaction"], dtype={"agent_msisdn": str})
+    pd.DataFrame({"msisdn": txn["agent_msisdn"], "cal_pd": 0.01, "assigned_limit": 100_000.0}).to_csv(tmp_path / "frozen.csv", index=False)
+    out = tmp_path / "eo.csv"
+    args = ["--transaction", paths["transaction"], "--borrower", paths["borrower"], "--loan-summary", paths["loan_summary"],
+            "--loan-history", paths["loan_history"], "--as-of-date", SNAPSHOT_DT, "--frozen-engine-output", str(tmp_path / "frozen.csv"),
+            "--design-config", str(trial.HERE / "limit_design_scenario_Cprime_5x_t12_6x_t1.json"),
+            "--agent-tier-guard", "enforce_except_graduates", "enforce", "off", "--engine-output", str(out), "--out-dir", str(tmp_path / "o")]
+    assert trial.main(args) == 0
+    eo = pd.read_csv(out, dtype={"msisdn": str}).set_index("msisdn").sort_index()
+    assert list(eo.columns[:4]) == ["assigned_limit", "assigned_limit_setting", "limit_category_enforced", "limit_category_not_enforced"]
+    assert (eo["assigned_limit_setting"] == "enforce_except_graduates").all()
+    for mode, col in (("enforce_except_graduates", "assigned_limit"), ("enforce", "limit_category_enforced"), ("off", "limit_category_not_enforced")):
+        a = pd.read_csv(tmp_path / "o" / f"limit_design_scenario_Cprime_5x_t12_6x_t1__guard_{mode}" / "agents.csv",
+                        dtype={"msisdn": str}).set_index("msisdn").sort_index()
+        pdt.assert_series_equal(eo[col], a["limit_proposed"], check_names=False)
+    assert (eo["limit_category_enforced"] <= eo["assigned_limit"] + 0.5).all()
+    assert (eo["assigned_limit"] <= eo["limit_category_not_enforced"] + 0.5).all()
+    prov = json.loads((tmp_path / "eo.csv.provenance.json").read_text())
+    assert set(prov["total_limit_m_by_setting"]) == {"enforce_except_graduates", "enforce", "off"}
