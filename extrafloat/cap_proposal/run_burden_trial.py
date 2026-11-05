@@ -263,6 +263,23 @@ def run_current(features: pd.DataFrame) -> pd.DataFrame:
     return R.run_extrafloat_limit_engine(features)
 
 
+ENGINE_OUTPUT_LEAD = ["msisdn", "assigned_limit", "risk_tier", "cal_pd", "score_source", "agent_category",
+                      "design_agent_category", "design_binding_constraint", "design_stage", "design_graduation",
+                      "design_k_applied", "design_k_capacity", "design_monthly_commission", "design_agent_tier_max",
+                      "assigned_limit_before_design", "final_decision_reason"]
+
+
+def engine_output_frame(proposed: pd.DataFrame) -> pd.DataFrame:
+    """The design's full result in engine-output form: one row per agent, assigned_limit = the design's limit,
+    every engine and design_* column kept (key columns first). assigned_limit_before_design = the engine's own
+    limit inside the design run; final_decision_reason is the engine's reason, design_binding_constraint the design's."""
+    out = proposed.copy()
+    if "cal_pd" in out.columns and "score_source" not in out.columns:
+        out["score_source"] = np.where(out["cal_pd"].notna(), "pd_model", "7_signal_fallback")
+    lead = [c for c in ENGINE_OUTPUT_LEAD if c in out.columns]
+    return out[lead + [c for c in out.columns if c not in lead]]
+
+
 def run_proposed(features: pd.DataFrame, settings: dict) -> pd.DataFrame:
     """The burden design, with a check that the engine functions it swaps are put back."""
     originals = (R.compute_capacity_cap, R.compute_risk_cap)
@@ -533,6 +550,11 @@ def main(argv: list[str] | None = None) -> int:
                     help="Feed the loan history to the CURRENT run too (activates the engine's unresolved-loan haircut). "
                          "Default off = the engine exactly as run_engine.py runs it in production.")
     ap.add_argument("--out-dir", default="output/burden_trial")
+    ap.add_argument("--engine-output", metavar="FILE",
+                    help="Also write the design's full result in engine-output form (one row per agent, assigned_limit = "
+                         "the new limit, all engine and design columns) to FILE, plus FILE.provenance.json. Needs exactly "
+                         "one settings file and at most one --agent-tier-guard value. Refuses to overwrite the file given "
+                         "to --frozen-engine-output.")
     args = ap.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s  %(name)s  %(message)s")
@@ -584,6 +606,16 @@ def main(argv: list[str] | None = None) -> int:
 
     index = []
     runs = []
+    if args.engine_output:
+        n_settings = len(_settings_files(args))
+        n_guard = len(args.agent_tier_guard or [None])
+        if n_settings != 1 or n_guard != 1:
+            print(f"\nERROR: --engine-output needs exactly one settings file and one --agent-tier-guard value "
+                  f"(got {n_settings} settings file(s) and {n_guard} guard value(s)).")
+            return 2
+        if args.frozen_engine_output and Path(args.engine_output).resolve() == Path(args.frozen_engine_output).resolve():
+            print("\nERROR: --engine-output would overwrite the --frozen-engine-output file (the baseline). Choose another name.")
+            return 2
     for path in _settings_files(args):
         base = ld.load_design_config(path)
         if not path.exists():
@@ -609,6 +641,29 @@ def main(argv: list[str] | None = None) -> int:
         run_dir = out_dir / name
         run_dir.mkdir(exist_ok=True)
         agents.to_csv(run_dir / "agents.csv", index=False)
+        if args.engine_output:
+            eo = Path(args.engine_output)
+            eo.parent.mkdir(parents=True, exist_ok=True)
+            frame = engine_output_frame(proposed)
+            frame.to_csv(eo, index=False)
+            prov = {
+                "written_at": pd.Timestamp.now().isoformat(timespec="seconds"),
+                "settings_file": str(next(iter(_settings_files(args)))),
+                "agent_tier_guard": settings.get("agent_tier_guard", "enforce"),
+                "tier_pd_cutoffs": (settings.get("pd") or {}).get("tier_pd_cutoffs"),
+                "graduation_enabled": bool((settings.get("graduation") or {}).get("enabled")),
+                "governor_multiple_of_largest_past_loan": settings["governor"]["multiple_of_largest_past_loan"],
+                "engine_ceiling": settings["engine_ceiling"],
+                "inputs": dict(paths),
+                "as_of_date": as_of,
+                "frozen_engine_output": args.frozen_engine_output,
+                "input_notes": list(DATA_NOTES),
+                "agents": int(len(frame)),
+                "total_assigned_limit_m": round(float(frame["assigned_limit"].sum()) / 1e6, 1),
+                "note": "Proposal output from the burden-design trial, not the live engine. assigned_limit = design limit.",
+            }
+            Path(str(eo) + ".provenance.json").write_text(json.dumps(prov, indent=2, default=str))
+            logger.info("engine output written: %s (%d rows, %d columns)", eo, len(frame), frame.shape[1])
         (run_dir / "summary.json").write_text(json.dumps(summary, indent=2, default=str))
         (run_dir / "summary.md").write_text(render_markdown(summary, synthetic=bool(args.synthetic)))
         index.append({"settings": name, "agent_tier_guard": settings.get("agent_tier_guard", "enforce"), "agents": summary["agents"],

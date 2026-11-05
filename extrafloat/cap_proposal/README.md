@@ -101,6 +101,15 @@ Add `--frozen-engine-output output\engine_test_output.csv`, the file `run.bat` w
 - **`assigned_limit`** from that file is added as **`limit_frozen`**. It appears in `agents.csv`, the side-by-side
   files, the summaries and `compare_limits_vs_disbursed` (as "frozen engine").
 
+### Writing an engine output with the new limits
+
+`--engine-output FILE` writes the design's full result for **one** policy in engine-output form: one row per agent,
+with `assigned_limit` set to the **new** limit, and every engine and `design_*` column. It needs exactly one settings
+file and one `--agent-tier-guard` value. It also writes `FILE.provenance.json`, recording the settings, inputs, input
+notes and totals. It refuses to overwrite the file given to `--frozen-engine-output`.
+- `assigned_limit_before_design` is the engine's own limit inside the design run.
+- `final_decision_reason` is the engine's reason; `design_binding_constraint` is the rule that set the new limit.
+
 ### Inputs the design needs
 
 | Column | Source |

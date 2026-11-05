@@ -11,6 +11,7 @@ The guarantees that matter most:
 from __future__ import annotations
 
 import copy
+import json
 import logging
 
 import numpy as np
@@ -601,3 +602,28 @@ def test_validate_burden_history(tmp_path):
     st = vb.stage(pd.DataFrame({"prior_closed_loan_count": [9, 6, 6, 3, 1, 0], "consecutive_on_time_loans": [9, 5, 2, 3, 1, 0],
                                 "active_loan_days_aging_at_scoring": [0, 0, 0, 0, 0, 0], "anomaly_open_at_scoring": [0, 0, 0, 0, 0, 0]}))
     assert list(st.str[:2]) == ["G6", "G5", "S2", "S2", "S1", "S0"]
+
+
+# -- 14. engine-form output for one policy ------------------------------------------------
+
+
+def test_engine_output_file(tmp_path):
+    paths = _write_synthetic(tmp_path)
+    txn = pd.read_csv(paths["transaction"], dtype={"agent_msisdn": str})
+    pd.DataFrame({"msisdn": txn["agent_msisdn"], "cal_pd": 0.01, "assigned_limit": 100_000.0}).to_csv(tmp_path / "frozen.csv", index=False)
+    base = ["--transaction", paths["transaction"], "--borrower", paths["borrower"], "--loan-summary", paths["loan_summary"],
+            "--loan-history", paths["loan_history"], "--as-of-date", SNAPSHOT_DT, "--frozen-engine-output", str(tmp_path / "frozen.csv"),
+            "--design-config", str(trial.HERE / "limit_design_scenario_Cprime_5x_t12_6x_t1.json")]
+    out = tmp_path / "engine_output_cprime2.csv"
+    assert trial.main([*base, "--agent-tier-guard", "enforce_except_graduates", "--engine-output", str(out), "--out-dir", str(tmp_path / "o")]) == 0
+    eo = pd.read_csv(out, dtype={"msisdn": str})
+    a = pd.read_csv(tmp_path / "o" / "limit_design_scenario_Cprime_5x_t12_6x_t1" / "agents.csv", dtype={"msisdn": str})
+    assert list(eo.columns[:3]) == ["msisdn", "assigned_limit", "risk_tier"]
+    assert eo["msisdn"].is_unique and len(eo) == len(a)
+    pdt.assert_series_equal(eo.set_index("msisdn")["assigned_limit"].sort_index(),
+                            a.set_index("msisdn")["limit_proposed"].sort_index(), check_names=False)
+    prov = json.loads((tmp_path / "engine_output_cprime2.csv.provenance.json").read_text())
+    assert prov["agent_tier_guard"] == "enforce_except_graduates" and prov["graduation_enabled"] is True
+    # refuses: two guard modes, or overwriting the frozen baseline
+    assert trial.main([*base, "--agent-tier-guard", "enforce", "off", "--engine-output", str(out), "--out-dir", str(tmp_path / "o2")]) == 2
+    assert trial.main([*base, "--engine-output", str(tmp_path / "frozen.csv"), "--out-dir", str(tmp_path / "o3")]) == 2
